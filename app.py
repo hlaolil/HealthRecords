@@ -174,12 +174,8 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 
 <form method="POST" action="{{ url_for('dispense') }}" class="dispense-form">
     <div>
-        <label>Medication:</label>
-        <select name="med_name" required>
-            {% for med in meds %}
-                <option value="{{ med['name'] }}">{{ med['name'] }}</option>
-            {% endfor %}
-        </select>
+        <label>Medication:</label><input name="med_name" id="med_name" list="med_suggestions" required>
+        <datalist id="med_suggestions"></datalist>
     </div>
 
     <div>
