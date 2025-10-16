@@ -141,8 +141,7 @@ CSS_STYLE = """
 """
 
 # Dispense Template
-DISPENSE_TEMPLATE = f"""
-{CSS_STYLE}
+DISPENSE_TEMPLATE = CSS_STYLE + """
 <h1>Dispensing</h1>
 {{ nav_links|safe }}
 
@@ -206,24 +205,24 @@ DISPENSE_TEMPLATE = f"""
 </table>
 
 <script>
-document.getElementById('med_name').addEventListener('input', async function() {{
+document.getElementById('med_name').addEventListener('input', async function() {
     const query = this.value;
     const datalist = document.getElementById('med_suggestions');
     datalist.innerHTML = '';
     if (query.length < 1) return;
 
-    const response = await fetch(`/api/medications?query=${{encodeURIComponent(query)}}`);
+    const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
     const meds = await response.json();
-    if (meds.error) {{
+    if (meds.error) {
         console.error(meds.error);
         return;
-    }}
-    meds.forEach(med => {{
+    }
+    meds.forEach(med => {
         const option = document.createElement('option');
         option.value = med;
         datalist.appendChild(option);
-    }});
-}});
+    });
+});
 
 // Clear form after successful dispense
 {% if message and 'successfully' in message|lower %}
@@ -233,10 +232,13 @@ document.getElementById('med_name').addEventListener('input', async function() {
 """
 
 # Receive Template
-RECEIVE_TEMPLATE = f"""
-{CSS_STYLE}
+RECEIVE_TEMPLATE = CSS_STYLE + """
 <h1>Receiving</h1>
 {{ nav_links|safe }}
+
+{% if message %}
+    <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
 
 <h2>Receive Medication</h2>
 <form method="POST" action="/receive">
@@ -290,32 +292,35 @@ RECEIVE_TEMPLATE = f"""
 </table>
 
 <script>
-document.getElementById('med_name').addEventListener('input', async function() {{
+document.getElementById('med_name').addEventListener('input', async function() {
     const query = this.value;
     const datalist = document.getElementById('med_suggestions');
     datalist.innerHTML = '';
     if (query.length < 1) return;
 
-    const response = await fetch(`/api/medications?query=${{encodeURIComponent(query)}}`);
+    const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
     const meds = await response.json();
-    if (meds.error) {{
+    if (meds.error) {
         console.error(meds.error);
         return;
-    }}
-    meds.forEach(med => {{
+    }
+    meds.forEach(med => {
         const option = document.createElement('option');
         option.value = med;
         datalist.appendChild(option);
-    }});
-}});
+    });
+});
 </script>
 """
 
 # Add Medication Template
-ADD_MED_TEMPLATE = f"""
-{CSS_STYLE}
+ADD_MED_TEMPLATE = CSS_STYLE + """
 <h1>Add New Medication</h1>
 {{ nav_links|safe }}
+
+{% if message %}
+    <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
 
 <h2>Add Medication</h2>
 <form method="POST" action="/add-medication">
@@ -333,32 +338,35 @@ ADD_MED_TEMPLATE = f"""
 </form>
 
 <script>
-document.getElementById('med_name').addEventListener('input', async function() {{
+document.getElementById('med_name').addEventListener('input', async function() {
     const query = this.value;
     const datalist = document.getElementById('med_suggestions');
     datalist.innerHTML = '';
     if (query.length < 1) return;
 
-    const response = await fetch(`/api/medications?query=${{encodeURIComponent(query)}}`);
+    const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
     const meds = await response.json();
-    if (meds.error) {{
+    if (meds.error) {
         console.error(meds.error);
         return;
-    }}
-    meds.forEach(med => {{
+    }
+    meds.forEach(med => {
         const option = document.createElement('option');
         option.value = med;
         datalist.appendChild(option);
-    }});
-}});
+    });
+});
 </script>
 """
 
 # Reports Template
-REPORTS_TEMPLATE = f"""
-{CSS_STYLE}
+REPORTS_TEMPLATE = CSS_STYLE + """
 <h1>Inventory Reports</h1>
 {{ nav_links|safe }}
+
+{% if message %}
+    <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
 
 <h2>Generate Report</h2>
 <form method="POST" action="/reports">
@@ -638,7 +646,6 @@ def dispense():
                         'timestamp': datetime.utcnow()
                     })
                     message = 'Dispensed successfully!'
-                    # Refresh transaction list after successful dispense
                     tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
 
                 return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
