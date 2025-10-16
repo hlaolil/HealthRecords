@@ -161,7 +161,7 @@ CSS_STYLE = """
 """
 
 
-# ✅ Updated Dispense Template with 3-column layout
+# ✅ Updated Dispense Template with dropdowns for Doctors, Issuers, and Age Groups
 DISPENSE_TEMPLATE = CSS_STYLE + """
 <h1>Dispensing</h1>
 {{ nav_links|safe }}
@@ -199,8 +199,15 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
     </div>
 
     <div>
-        <label>Age:</label>
-        <input name="age" type="number" min="0" required>
+        <label>Age Group:</label>
+        <select name="age_group" required>
+            <option value="">-- Select Age Group --</option>
+            <option value="18-24">18-24</option>
+            <option value="25-34">25-34</option>
+            <option value="35-45">35-45</option>
+            <option value="45-54">45-54</option>
+            <option value="54-65">54-65</option>
+        </select>
     </div>
 
     <div>
@@ -223,13 +230,33 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
     </div>
 
     <div>
-        <label>Prescriber:</label>
-        <input name="prescriber" type="text" required>
+        <label>Prescriber (Doctor):</label>
+        <select name="prescriber" required>
+            <option value="">-- Select Doctor --</option>
+            <option>Dr. T. Khothatso</option>
+            <option>Mamosa Seetsa</option>
+            <option>Mapalo Mapesela</option>
+            <option>Mathuto Kutoane</option>
+            <option>Mamosaase Nqosa</option>
+            <option>Malesoetsa Leohla</option>
+            <option>Locum</option>
+            <option>Thapelo Mphole</option>
+        </select>
     </div>
 
     <div>
-        <label>Dispenser:</label>
-        <input name="dispenser" type="text" required>
+        <label>Dispenser (Issuer):</label>
+        <select name="dispenser" required>
+            <option value="">-- Select Issuer --</option>
+            <option>Letlotlo Hlaoli</option>
+            <option>Mamosa Seetsa</option>
+            <option>Mapalo Mapesela</option>
+            <option>Mathuto Kutoane</option>
+            <option>Mamosaase Nqosa</option>
+            <option>Malesoetsa Leohla</option>
+            <option>Locum</option>
+            <option>Thapelo Mphole</option>
+        </select>
     </div>
 
     <div>
@@ -254,7 +281,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <th>Patient</th>
             <th>Company</th>
             <th>Position</th>
-            <th>Age</th>
+            <th>Age Group</th>
             <th>Gender</th>
             <th>Sick Leave (Days)</th>
             <th>Diagnosis</th>
@@ -272,7 +299,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <td>{{ t.patient }}</td>
             <td>{{ t.company }}</td>
             <td>{{ t.position }}</td>
-            <td>{{ t.age }}</td>
+            <td>{{ t.age_group }}</td>
             <td>{{ t.gender }}</td>
             <td>{{ t.sick_leave_days }}</td>
             <td>{{ t.diagnosis }}</td>
@@ -288,25 +315,6 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 </table>
 
 <script>
-document.getElementById('med_name')?.addEventListener('input', async function() {
-    const query = this.value;
-    const datalist = document.getElementById('med_suggestions');
-    datalist.innerHTML = '';
-    if (query.length < 1) return;
-
-    const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
-    const meds = await response.json();
-    if (meds.error) {
-        console.error(meds.error);
-        return;
-    }
-    meds.forEach(med => {
-        const option = document.createElement('option');
-        option.value = med;
-        datalist.appendChild(option);
-    });
-});
-
 // Clear form after successful dispense
 {% if message and 'successfully' in message|lower %}
     document.querySelector('form').reset();
@@ -314,118 +322,6 @@ document.getElementById('med_name')?.addEventListener('input', async function() 
 </script>
 """
 
-
-# Receive Template
-RECEIVE_TEMPLATE = CSS_STYLE + """
-<h1>Receiving</h1>
-{{ nav_links|safe }}
-
-{% if message %}
-    <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
-{% endif %}
-
-<h2>Receive Medication</h2>
-<form method="POST" action="/receive" class="receive-form">
-    <div>
-        <label>Medication:</label>
-        <input name="med_name" id="med_name" list="med_suggestions" required>
-        <datalist id="med_suggestions"></datalist>
-    </div>
-    <div>
-        <label>Quantity:</label>
-        <input name="quantity" type="number" min="1" required>
-    </div>
-    <div>
-        <label>Batch:</label>
-        <input name="batch" required>
-    </div>
-    <div>
-        <label>Price per Unit:</label>
-        <input name="price" type="number" step="0.01" min="0" required>
-    </div>
-    <div>
-        <label>Expiry Date (YYYY-MM-DD):</label>
-        <input name="expiry_date" type="date" required>
-    </div>
-    <div>
-        <label>Stock Receiver:</label>
-        <input name="stock_receiver" required>
-    </div>
-    <div>
-        <label>Order Number:</label>
-        <input name="order_number" required>
-    </div>
-    <div>
-        <label>Supplier:</label>
-        <input name="supplier" required>
-    </div>
-    <div>
-        <label>Invoice Number:</label>
-        <input name="invoice_number" required>
-    </div>
-    <div class="form-buttons">
-        <input type="submit" value="Receive">
-        <button type="button" onclick="document.querySelector('form').reset();">Clear Form</button>
-    </div>
-</form>
-
-<h2>Receive Transactions</h2>
-<table>
-    <thead>
-        <tr>
-            <th>Medication</th>
-            <th>Quantity</th>
-            <th>Batch</th>
-            <th>Price</th>
-            <th>Expiry Date</th>
-            <th>Stock Receiver</th>
-            <th>Order Number</th>
-            <th>Supplier</th>
-            <th>Invoice Number</th>
-            <th>Timestamp</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for t in tx_list %}
-        <tr>
-            <td>{{ t.med_name }}</td>
-            <td>{{ t.quantity }}</td>
-            <td>{{ t.batch }}</td>
-            <td>${{ "%.2f"|format(t.price) }}</td>
-            <td>{{ t.expiry_date }}</td>
-            <td>{{ t.stock_receiver }}</td>
-            <td>{{ t.order_number }}</td>
-            <td>{{ t.supplier }}</td>
-            <td>{{ t.invoice_number }}</td>
-            <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="10">No receive transactions.</td></tr>
-    {% endfor %}
-    </tbody>
-</table>
-
-<script>
-document.getElementById('med_name').addEventListener('input', async function() {
-    const query = this.value;
-    const datalist = document.getElementById('med_suggestions');
-    datalist.innerHTML = '';
-    if (query.length < 1) return;
-
-    const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
-    const meds = await response.json();
-    if (meds.error) {
-        console.error(meds.error);
-        return;
-    }
-    meds.forEach(med => {
-        const option = document.createElement('option');
-        option.value = med;
-        datalist.appendChild(option);
-    });
-});
-</script>
-"""
 
 # Add Medication Template
 ADD_MED_TEMPLATE = CSS_STYLE + """
