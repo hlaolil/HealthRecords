@@ -781,7 +781,7 @@ def dispense():
                     message = f'Insufficient stock for "{med_name}".'
                 else:
                     medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
-                   transactions.insert_one({
+                       transactions.insert_one({
                        'type': 'dispense',
                        'patient': patient,
                         'company': company,
