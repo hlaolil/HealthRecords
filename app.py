@@ -33,7 +33,7 @@ CSS_STYLE = """
         color: #333;
     }
     h1 {
-        color: #007bff;
+        color: #0056b3; /* darker blue */
         text-align: center;
         margin-bottom: 20px;
     }
@@ -47,31 +47,25 @@ CSS_STYLE = """
         font-size: 16px;
     }
     .nav-links a {
-        color: #007bff;
+        color: #0056b3; /* darker blue links */
         text-decoration: none;
         margin: 0 10px;
+        font-weight: bold;
     }
     .nav-links a:hover {
         text-decoration: underline;
+        color: #003d80; /* darker on hover */
     }
     form {
         background-color: #fff;
         padding: 20px;
         border-radius: 8px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        max-width: 900px; /* Increased for 3-column layout */
+        max-width: 900px;
         margin: 0 auto 20px;
     }
-    .dispense-form {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 15px;
-    }
-    .receive-form {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 15px;
-    }
+    .dispense-form,
+    .receive-form,
     .add-medication-form {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
@@ -91,11 +85,11 @@ CSS_STYLE = """
         box-sizing: border-box;
     }
     .form-buttons {
-        grid-column: 1 / -1; /* Span all columns */
+        grid-column: 1 / -1;
         text-align: center;
     }
     form input[type="submit"], form button {
-        background-color: #007bff;
+        background-color: #0056b3; /* darker blue button */
         color: #fff;
         border: none;
         padding: 10px 20px;
@@ -103,9 +97,10 @@ CSS_STYLE = """
         cursor: pointer;
         margin: 10px 5px;
         display: inline-block;
+        font-weight: bold;
     }
     form input[type="submit"]:hover, form button:hover {
-        background-color: #0056b3;
+        background-color: #003d80; /* even darker on hover */
     }
     table {
         width: 100%;
@@ -120,7 +115,7 @@ CSS_STYLE = """
         border: 1px solid #dee2e6;
     }
     table th {
-        background-color: #007bff;
+        background-color: #0056b3; /* darker table header */
         color: #fff;
         font-weight: bold;
     }
@@ -128,7 +123,7 @@ CSS_STYLE = """
         background-color: #f8f9fa;
     }
     table tr:hover {
-        background-color: #e9ecef;
+        background-color: #e0e7f5; /* subtle blue hover */
     }
     .message {
         padding: 10px;
@@ -152,7 +147,9 @@ CSS_STYLE = """
         form, table {
             max-width: 100%;
         }
-        .dispense-form {
+        .dispense-form,
+        .receive-form,
+        .add-medication-form {
             grid-template-columns: 1fr; /* Single column on mobile */
         }
         table th, table td {
@@ -162,6 +159,7 @@ CSS_STYLE = """
     }
 </style>
 """
+
 
 # Dispense Template
 DISPENSE_TEMPLATE = CSS_STYLE + """
