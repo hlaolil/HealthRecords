@@ -782,21 +782,21 @@ def dispense():
                 else:
                     medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
                    transactions.insert_one({
-    'type': 'dispense',
-    'patient': patient,
-    'company': company,
-    'position': position,
-    'age': age,
-    'gender': gender,
-    'sick_leave_days': sick_leave_days,
-    'diagnosis': diagnosis,
-    'prescriber': prescriber,
-    'dispenser': dispenser,
-    'date': date_str,
-    'med_name': med_name,
-    'quantity': quantity,
-    'timestamp': datetime.utcnow()
-})
+                       'type': 'dispense',
+                       'patient': patient,
+                        'company': company,
+                        'position': position,
+                        'age': age,
+                        'gender': gender,
+                        'sick_leave_days': sick_leave_days,
+                        'diagnosis': diagnosis,
+                        'prescriber': prescriber,
+                        'dispenser': dispenser,
+                        'date': date_str,
+                        'med_name': med_name,
+                        'quantity': quantity,
+                        'timestamp': datetime.utcnow()
+                    })
 
                     message = 'Dispensed successfully!'
                     tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
