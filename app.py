@@ -171,45 +171,84 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 {% endif %}
 
 <h2>Dispense Medication</h2>
-<form method="POST" action="/dispense" class="dispense-form">
+
+<form method="POST" action="{{ url_for('dispense') }}">
     <div>
-        <label>Patient Name:</label><input name="patient" required>
+        <label>Medication:</label>
+        <select name="med_name" required>
+            {% for med in meds %}
+                <option value="{{ med['name'] }}">{{ med['name'] }}</option>
+            {% endfor %}
+        </select>
     </div>
+
     <div>
-        <label>Company:</label><input name="company" required>
+        <label>Quantity:</label>
+        <input name="quantity" type="number" min="1" required>
     </div>
+
     <div>
-        <label>Position:</label><input name="position" required>
+        <label>Patient:</label>
+        <input name="patient" type="text" required>
     </div>
+
     <div>
-        <label>Patient Age:</label><input name="age" type="number" min="0" required>
+        <label>Company:</label>
+        <input name="company" type="text" required>
     </div>
+
     <div>
-        <label>Diagnosis:</label><input name="diagnosis" required>
+        <label>Position:</label>
+        <input name="position" type="text" required>
     </div>
+
     <div>
-        <label>Prescriber:</label><input name="prescriber" required>
+        <label>Age:</label>
+        <input name="age" type="number" min="0" required>
     </div>
+
+    <!-- ✅ NEW FIELD: Gender -->
     <div>
-        <label>Dispenser:</label><input name="dispenser" required>
+        <label>Gender:</label>
+        <select name="gender" required>
+            <option value="">-- Select --</option>
+            <option value="Male">Male</option>
+            <option value="Female">Female</option>
+        </select>
     </div>
+
+    <!-- ✅ NEW FIELD: Sick Leave Days -->
     <div>
-        <label>Date (YYYY-MM-DD):</label><input name="date" type="date" required>
+        <label>Number of Sick Leave Days:</label>
+        <input name="sick_leave_days" type="number" min="0" required>
     </div>
+
     <div>
-        <label>Medication:</label><input name="med_name" id="med_name" list="med_suggestions" required>
-        <datalist id="med_suggestions"></datalist>
+        <label>Diagnosis:</label>
+        <input name="diagnosis" type="text" required>
     </div>
+
     <div>
-        <label>Quantity:</label><input name="quantity" type="number" min="1" required>
+        <label>Prescriber:</label>
+        <input name="prescriber" type="text" required>
     </div>
-    <div class="form-buttons">
-        <input type="submit" value="Dispense">
-        <button type="button" onclick="document.querySelector('form').reset();">Clear Form</button>
+
+    <div>
+        <label>Dispenser:</label>
+        <input name="dispenser" type="text" required>
     </div>
+
+    <div>
+        <label>Date:</label>
+        <input name="date" type="date" required>
+    </div>
+
+    <button type="submit">Dispense</button>
 </form>
 
-<h2>Dispense Transactions</h2>
+<hr>
+
+<h3>Dispense Transactions</h3>
 <table>
     <thead>
         <tr>
@@ -219,6 +258,8 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <th>Company</th>
             <th>Position</th>
             <th>Age</th>
+            <th>Gender</th>
+            <th>Sick Leave (Days)</th>
             <th>Diagnosis</th>
             <th>Prescriber</th>
             <th>Dispenser</th>
@@ -227,7 +268,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         </tr>
     </thead>
     <tbody>
-    {% for t in tx_list %}
+        {% for t in tx_list %}
         <tr>
             <td>{{ t.med_name }}</td>
             <td>{{ t.quantity }}</td>
@@ -235,15 +276,17 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <td>{{ t.company }}</td>
             <td>{{ t.position }}</td>
             <td>{{ t.age }}</td>
+            <td>{{ t.gender }}</td>
+            <td>{{ t.sick_leave_days }}</td>
             <td>{{ t.diagnosis }}</td>
             <td>{{ t.prescriber }}</td>
             <td>{{ t.dispenser }}</td>
             <td>{{ t.date }}</td>
             <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
         </tr>
-    {% else %}
-        <tr><td colspan="11">No dispense transactions.</td></tr>
-    {% endfor %}
+        {% else %}
+        <tr><td colspan="13">No dispense transactions.</td></tr>
+        {% endfor %}
     </tbody>
 </table>
 
@@ -727,6 +770,9 @@ def dispense():
                 date_str = request.form['date']
                 med_name = request.form['med_name']
                 quantity = int(request.form['quantity'])
+                gender = request.form['gender']
+                sick_leave_days = int(request.form['sick_leave_days'])
+
 
                 med = medications.find_one({'name': med_name})
                 if not med:
@@ -735,20 +781,23 @@ def dispense():
                     message = f'Insufficient stock for "{med_name}".'
                 else:
                     medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
-                    transactions.insert_one({
-                        'type': 'dispense',
-                        'patient': patient,
-                        'company': company,
-                        'position': position,
-                        'age': age,
-                        'diagnosis': diagnosis,
-                        'prescriber': prescriber,
-                        'dispenser': dispenser,
-                        'date': date_str,
-                        'med_name': med_name,
-                        'quantity': quantity,
-                        'timestamp': datetime.utcnow()
-                    })
+                   transactions.insert_one({
+    'type': 'dispense',
+    'patient': patient,
+    'company': company,
+    'position': position,
+    'age': age,
+    'gender': gender,
+    'sick_leave_days': sick_leave_days,
+    'diagnosis': diagnosis,
+    'prescriber': prescriber,
+    'dispenser': dispenser,
+    'date': date_str,
+    'med_name': med_name,
+    'quantity': quantity,
+    'timestamp': datetime.utcnow()
+})
+
                     message = 'Dispensed successfully!'
                     tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
 
