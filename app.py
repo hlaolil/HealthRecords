@@ -59,21 +59,30 @@ CSS_STYLE = """
         padding: 20px;
         border-radius: 8px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        max-width: 600px;
+        max-width: 900px; /* Increased for 3-column layout */
         margin: 0 auto 20px;
+    }
+    .dispense-form {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 15px;
     }
     form label {
         display: block;
         margin: 10px 0 5px;
         font-weight: bold;
     }
-    form input, form select {
+    form input, form select, form datalist {
         width: 100%;
         padding: 8px;
         margin-bottom: 10px;
         border: 1px solid #ced4da;
         border-radius: 4px;
         box-sizing: border-box;
+    }
+    .form-buttons {
+        grid-column: 1 / -1; /* Span all columns */
+        text-align: center;
     }
     form input[type="submit"], form button {
         background-color: #007bff;
@@ -82,7 +91,8 @@ CSS_STYLE = """
         padding: 10px 20px;
         border-radius: 4px;
         cursor: pointer;
-        margin-right: 10px;
+        margin: 10px 5px;
+        display: inline-block;
     }
     form input[type="submit"]:hover, form button:hover {
         background-color: #0056b3;
@@ -132,6 +142,9 @@ CSS_STYLE = """
         form, table {
             max-width: 100%;
         }
+        .dispense-form {
+            grid-template-columns: 1fr; /* Single column on mobile */
+        }
         table th, table td {
             font-size: 14px;
             padding: 8px;
@@ -150,20 +163,42 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 {% endif %}
 
 <h2>Dispense Medication</h2>
-<form method="POST" action="/dispense">
-    <label>Patient Name:</label><input name="patient" required><br>
-    <label>Company:</label><input name="company" required><br>
-    <label>Position:</label><input name="position" required><br>
-    <label>Patient Age:</label><input name="age" type="number" min="0" required><br>
-    <label>Diagnosis:</label><input name="diagnosis" required><br>
-    <label>Prescriber:</label><input name="prescriber" required><br>
-    <label>Dispenser:</label><input name="dispenser" required><br>
-    <label>Date (YYYY-MM-DD):</label><input name="date" type="date" required><br>
-    <label>Medication:</label><input name="med_name" id="med_name" list="med_suggestions" required><br>
-    <datalist id="med_suggestions"></datalist>
-    <label>Quantity:</label><input name="quantity" type="number" min="1" required><br>
-    <input type="submit" value="Dispense">
-    <button type="button" onclick="document.querySelector('form').reset();">Clear Form</button>
+<form method="POST" action="/dispense" class="dispense-form">
+    <div>
+        <label>Patient Name:</label><input name="patient" required>
+    </div>
+    <div>
+        <label>Company:</label><input name="company" required>
+    </div>
+    <div>
+        <label>Position:</label><input name="position" required>
+    </div>
+    <div>
+        <label>Patient Age:</label><input name="age" type="number" min="0" required>
+    </div>
+    <div>
+        <label>Diagnosis:</label><input name="diagnosis" required>
+    </div>
+    <div>
+        <label>Prescriber:</label><input name="prescriber" required>
+    </div>
+    <div>
+        <label>Dispenser:</label><input name="dispenser" required>
+    </div>
+    <div>
+        <label>Date (YYYY-MM-DD):</label><input name="date" type="date" required>
+    </div>
+    <div>
+        <label>Medication:</label><input name="med_name" id="med_name" list="med_suggestions" required>
+        <datalist id="med_suggestions"></datalist>
+    </div>
+    <div>
+        <label>Quantity:</label><input name="quantity" type="number" min="1" required>
+    </div>
+    <div class="form-buttons">
+        <input type="submit" value="Dispense">
+        <button type="button" onclick="document.querySelector('form').reset();">Clear Form</button>
+    </div>
 </form>
 
 <h2>Dispense Transactions</h2>
