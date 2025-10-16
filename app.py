@@ -21,13 +21,13 @@ NAV_LINKS = """
 </p>
 """
 
-# Updated Dispense Template to show success/error messages
+# Dispense Template with message display
 DISPENSE_TEMPLATE = """
 <h1>Dispensing</h1>
 {{ nav_links|safe }}
 
 {% if message %}
-    <p style="color: {% if 'successfully' in message %}green{% else %}red{% endif %}; font-weight: bold;">{{ message }}</p>
+    <p style="color: {% if 'successfully' in message|lower %}green{% else %}red{% endif %}; font-weight: bold;">{{ message }}</p>
 {% endif %}
 
 <h2>Dispense Medication</h2>
@@ -44,6 +44,7 @@ DISPENSE_TEMPLATE = """
     <datalist id="med_suggestions"></datalist>
     Quantity: <input name="quantity" type="number" min="1" required><br>
     <input type="submit" value="Dispense">
+    <button type="button" onclick="document.querySelector('form').reset();">Clear Form</button>
 </form>
 
 <h2>Dispense Transactions</h2>
@@ -93,12 +94,21 @@ document.getElementById('med_name').addEventListener('input', async function() {
 
     const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
     const meds = await response.json();
+    if (meds.error) {
+        console.error(meds.error);
+        return;
+    }
     meds.forEach(med => {
         const option = document.createElement('option');
         option.value = med;
         datalist.appendChild(option);
     });
 });
+
+// Clear form after successful dispense
+{% if message and 'successfully' in message|lower %}
+    document.querySelector('form').reset();
+{% endif %}
 </script>
 """
 
@@ -166,6 +176,10 @@ document.getElementById('med_name').addEventListener('input', async function() {
 
     const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
     const meds = await response.json();
+    if (meds.error) {
+        console.error(meds.error);
+        return;
+    }
     meds.forEach(med => {
         const option = document.createElement('option');
         option.value = med;
@@ -203,6 +217,10 @@ document.getElementById('med_name').addEventListener('input', async function() {
 
     const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
     const meds = await response.json();
+    if (meds.error) {
+        console.error(meds.error);
+        return;
+    }
     meds.forEach(med => {
         const option = document.createElement('option');
         option.value = med;
@@ -460,42 +478,47 @@ def dispense():
         tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
 
         if request.method == 'POST':
-            patient = request.form['patient']
-            company = request.form['company']
-            position = request.form['position']
-            age = int(request.form['age'])
-            diagnosis = request.form['diagnosis']
-            prescriber = request.form['prescriber']
-            dispenser = request.form['dispenser']
-            date_str = request.form['date']
-            med_name = request.form['med_name']
-            quantity = int(request.form['quantity'])
+            try:
+                patient = request.form['patient']
+                company = request.form['company']
+                position = request.form['position']
+                age = int(request.form['age'])
+                diagnosis = request.form['diagnosis']
+                prescriber = request.form['prescriber']
+                dispenser = request.form['dispenser']
+                date_str = request.form['date']
+                med_name = request.form['med_name']
+                quantity = int(request.form['quantity'])
 
-            med = medications.find_one({'name': med_name})
-            if not med:
-                message = f'Medication "{med_name}" not found.'
-            elif med['balance'] < quantity:
-                message = f'Insufficient stock for "{med_name}".'
-            else:
-                medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
-                transactions.insert_one({
-                    'type': 'dispense',
-                    'patient': patient,
-                    'company': company,
-                    'position': position,
-                    'age': age,
-                    'diagnosis': diagnosis,
-                    'prescriber': prescriber,
-                    'dispenser': dispenser,
-                    'date': date_str,
-                    'med_name': med_name,
-                    'quantity': quantity,
-                    'timestamp': datetime.utcnow()
-                })
-                message = 'Dispensed successfully!'
-                # Refresh transaction list after successful dispense
-                tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
+                med = medications.find_one({'name': med_name})
+                if not med:
+                    message = f'Medication "{med_name}" not found.'
+                elif med['balance'] < quantity:
+                    message = f'Insufficient stock for "{med_name}".'
+                else:
+                    medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
+                    transactions.insert_one({
+                        'type': 'dispense',
+                        'patient': patient,
+                        'company': company,
+                        'position': position,
+                        'age': age,
+                        'diagnosis': diagnosis,
+                        'prescriber': prescriber,
+                        'dispenser': dispenser,
+                        'date': date_str,
+                        'med_name': med_name,
+                        'quantity': quantity,
+                        'timestamp': datetime.utcnow()
+                    })
+                    message = 'Dispensed successfully!'
+                    # Refresh transaction list after successful dispense
+                    tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
 
+                return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
+            except ValueError as e:
+                message = f'Invalid input: {str(e)}'
+                return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
         return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
     except ServerSelectionTimeoutError:
         return render_template_string(DISPENSE_TEMPLATE, tx_list=[], nav_links=NAV_LINKS, message="Database connection failed. Please try again later."), 500
