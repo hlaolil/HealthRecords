@@ -21,10 +21,14 @@ NAV_LINKS = """
 </p>
 """
 
-# Templates (unchanged)
+# Updated Dispense Template to show success/error messages
 DISPENSE_TEMPLATE = """
 <h1>Dispensing</h1>
 {{ nav_links|safe }}
+
+{% if message %}
+    <p style="color: {% if 'successfully' in message %}green{% else %}red{% endif %}; font-weight: bold;">{{ message }}</p>
+{% endif %}
 
 <h2>Dispense Medication</h2>
 <form method="POST" action="/dispense">
@@ -440,7 +444,7 @@ REPORTS_TEMPLATE = """
 {% endif %}
 """
 
-# Routes with error handling and lazy MongoDB connection
+# Routes
 @app.route('/', methods=['GET'])
 def home():
     return redirect('/reports')
@@ -452,6 +456,9 @@ def dispense():
         db = client['pharmacy_db']
         medications = db['medications']
         transactions = db['transactions']
+        message = None
+        tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
+
         if request.method == 'POST':
             patient = request.form['patient']
             company = request.form['company']
@@ -466,31 +473,32 @@ def dispense():
 
             med = medications.find_one({'name': med_name})
             if not med:
-                return f'Medication "{med_name}" not found. <a href="/dispense">Back</a>'
-            if med['balance'] < quantity:
-                return f'Insufficient stock for "{med_name}". <a href="/dispense">Back</a>'
+                message = f'Medication "{med_name}" not found.'
+            elif med['balance'] < quantity:
+                message = f'Insufficient stock for "{med_name}".'
+            else:
+                medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
+                transactions.insert_one({
+                    'type': 'dispense',
+                    'patient': patient,
+                    'company': company,
+                    'position': position,
+                    'age': age,
+                    'diagnosis': diagnosis,
+                    'prescriber': prescriber,
+                    'dispenser': dispenser,
+                    'date': date_str,
+                    'med_name': med_name,
+                    'quantity': quantity,
+                    'timestamp': datetime.utcnow()
+                })
+                message = 'Dispensed successfully!'
+                # Refresh transaction list after successful dispense
+                tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
 
-            medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
-            transactions.insert_one({
-                'type': 'dispense',
-                'patient': patient,
-                'company': company,
-                'position': position,
-                'age': age,
-                'diagnosis': diagnosis,
-                'prescriber': prescriber,
-                'dispenser': dispenser,
-                'date': date_str,
-                'med_name': med_name,
-                'quantity': quantity,
-                'timestamp': datetime.utcnow()
-            })
-            return 'Dispensed successfully! <a href="/dispense">Back</a>'
-
-        tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
-        return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS)
+        return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
     except ServerSelectionTimeoutError:
-        return "Database connection failed. Please try again later. <a href='/dispense'>Back</a>", 500
+        return render_template_string(DISPENSE_TEMPLATE, tx_list=[], nav_links=NAV_LINKS, message="Database connection failed. Please try again later."), 500
     finally:
         client.close()
 
