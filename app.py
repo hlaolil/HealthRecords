@@ -161,7 +161,7 @@ CSS_STYLE = """
 """
 
 
-# Dispense Template
+# ✅ Updated Dispense Template with 3-column layout
 DISPENSE_TEMPLATE = CSS_STYLE + """
 <h1>Dispensing</h1>
 {{ nav_links|safe }}
@@ -172,7 +172,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 
 <h2>Dispense Medication</h2>
 
-<form method="POST" action="{{ url_for('dispense') }}">
+<form method="POST" action="{{ url_for('dispense') }}" class="dispense-form">
     <div>
         <label>Medication:</label>
         <select name="med_name" required>
@@ -207,7 +207,6 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         <input name="age" type="number" min="0" required>
     </div>
 
-    <!-- ✅ NEW FIELD: Gender -->
     <div>
         <label>Gender:</label>
         <select name="gender" required>
@@ -217,7 +216,6 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         </select>
     </div>
 
-    <!-- ✅ NEW FIELD: Sick Leave Days -->
     <div>
         <label>Number of Sick Leave Days:</label>
         <input name="sick_leave_days" type="number" min="0" required>
@@ -243,7 +241,10 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         <input name="date" type="date" required>
     </div>
 
-    <button type="submit">Dispense</button>
+    <div class="form-buttons">
+        <input type="submit" value="Dispense">
+        <button type="button" onclick="document.querySelector('form').reset();">Clear Form</button>
+    </div>
 </form>
 
 <hr>
@@ -291,7 +292,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 </table>
 
 <script>
-document.getElementById('med_name').addEventListener('input', async function() {
+document.getElementById('med_name')?.addEventListener('input', async function() {
     const query = this.value;
     const datalist = document.getElementById('med_suggestions');
     datalist.innerHTML = '';
@@ -316,6 +317,7 @@ document.getElementById('med_name').addEventListener('input', async function() {
 {% endif %}
 </script>
 """
+
 
 # Receive Template
 RECEIVE_TEMPLATE = CSS_STYLE + """
