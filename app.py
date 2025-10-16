@@ -67,6 +67,16 @@ CSS_STYLE = """
         grid-template-columns: repeat(3, 1fr);
         gap: 15px;
     }
+    .receive-form {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 15px;
+    }
+    .add-medication-form {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 15px;
+    }
     form label {
         display: block;
         margin: 10px 0 5px;
@@ -276,7 +286,7 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
 {% endif %}
 
 <h2>Receive Medication</h2>
-<form method="POST" action="/receive">
+<form method="POST" action="/receive" class="receive-form">
     <label>Medication:</label><input name="med_name" id="med_name" list="med_suggestions" required><br>
     <datalist id="med_suggestions"></datalist>
     <label>Quantity:</label><input name="quantity" type="number" min="1" required><br>
@@ -358,7 +368,7 @@ ADD_MED_TEMPLATE = CSS_STYLE + """
 {% endif %}
 
 <h2>Add Medication</h2>
-<form method="POST" action="/add-medication">
+<form method="POST" action="/add-medication" class="add-medication-form">
     <label>Medication Name:</label><input name="med_name" id="med_name" list="med_suggestions" required><br>
     <datalist id="med_suggestions"></datalist>
     <label>Initial Balance:</label><input name="initial_balance" type="number" min="0" required><br>
