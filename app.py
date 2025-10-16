@@ -321,7 +321,115 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 {% endif %}
 </script>
 """
+RECEIVE_TEMPLATE = CSS_STYLE + """
+<h1>Receiving</h1>{{ nav_links|safe }}
 
+{% if message %}
+<p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+
+<h2>Receive Medication</h2>
+<form method="POST" action="/receive" class="receive-form">
+    <div>
+        <label>Medication:</label>
+        <input name="med_name" id="med_name" list="med_suggestions" required>
+        <datalist id="med_suggestions"></datalist>
+    </div>
+    <div>
+        <label>Quantity:</label>
+        <input name="quantity" type="number" min="1" required>
+    </div>
+    <div>
+        <label>Batch:</label>
+        <input name="batch" required>
+    </div>
+    <div>
+        <label>Price per Unit:</label>
+        <input name="price" type="number" step="0.01" min="0" required>
+    </div>
+    <div>
+        <label>Expiry Date (YYYY-MM-DD):</label>
+        <input name="expiry_date" type="date" required>
+    </div>
+    <div>
+        <label>Stock Receiver:</label>
+        <input name="stock_receiver" required>
+    </div>
+    <div>
+        <label>Order Number:</label>
+        <input name="order_number" required>
+    </div>
+    <div>
+        <label>Supplier:</label>
+        <input name="supplier" required>
+    </div>
+    <div>
+        <label>Invoice Number:</label>
+        <input name="invoice_number" required>
+    </div>
+    <div class="form-buttons">
+        <input type="submit" value="Receive">
+        <button type="button" onclick="document.querySelector('form').reset();">Clear Form</button>
+    </div>
+</form>
+
+<h2>Receive Transactions</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Medication</th>
+            <th>Quantity</th>
+            <th>Batch</th>
+            <th>Price</th>
+            <th>Expiry Date</th>
+            <th>Stock Receiver</th>
+            <th>Order Number</th>
+            <th>Supplier</th>
+            <th>Invoice Number</th>
+            <th>Timestamp</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for t in tx_list %}
+        <tr>
+            <td>{{ t.med_name }}</td>
+            <td>{{ t.quantity }}</td>
+            <td>{{ t.batch }}</td>
+            <td>${{ "%.2f"|format(t.price) }}</td>
+            <td>{{ t.expiry_date }}</td>
+            <td>{{ t.stock_receiver }}</td>
+            <td>{{ t.order_number }}</td>
+            <td>{{ t.supplier }}</td>
+            <td>{{ t.invoice_number }}</td>
+            <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="10">No receive transactions.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<script>
+document.getElementById('med_name').addEventListener('input', async function() {
+    const query = this.value;
+    const datalist = document.getElementById('med_suggestions');
+    datalist.innerHTML = '';
+    if (query.length < 1) return;
+
+    const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
+    const meds = await response.json();
+    if (meds.error) {
+        console.error(meds.error);
+        return;
+    }
+    meds.forEach(med => {
+        const option = document.createElement('option');
+        option.value = med;
+        datalist.appendChild(option);
+    });
+});
+</script>
+"""
 
 # Add Medication Template
 ADD_MED_TEMPLATE = CSS_STYLE + """
