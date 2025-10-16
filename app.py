@@ -1,18 +1,17 @@
 import os
 from flask import Flask, request, render_template_string, jsonify, redirect
 from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# MongoDB connection
-MONGOURI = os.getenv('MONGOURI', 'mongodb://localhost:27017/')
-client = MongoClient(MONGOURI)
-db = client['pharmacy_db']
-medications = db['medications']    # {name, balance, expiry_date, stock_receiver, batch, price, order_number, supplier, invoice_number}
-transactions = db['transactions']   # logs
+# MongoDB connection function (lazy initialization for fork-safety)
+def get_mongo_client():
+    mongouri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
+    return MongoClient(mongouri, serverSelectionTimeoutMS=5000)
 
-# Common navigation links
+# Navigation links
 NAV_LINKS = """
 <p><strong>Navigate:</strong>
     <a href="/dispense">Dispensing</a> |
@@ -22,7 +21,7 @@ NAV_LINKS = """
 </p>
 """
 
-# Template for dispensing
+# Templates (unchanged)
 DISPENSE_TEMPLATE = """
 <h1>Dispensing</h1>
 {{ nav_links|safe }}
@@ -85,8 +84,8 @@ DISPENSE_TEMPLATE = """
 document.getElementById('med_name').addEventListener('input', async function() {
     const query = this.value;
     const datalist = document.getElementById('med_suggestions');
-    datalist.innerHTML = ''; // Clear previous suggestions
-    if (query.length < 1) return; // Don't fetch for empty input
+    datalist.innerHTML = '';
+    if (query.length < 1) return;
 
     const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
     const meds = await response.json();
@@ -99,7 +98,6 @@ document.getElementById('med_name').addEventListener('input', async function() {
 </script>
 """
 
-# Template for receiving
 RECEIVE_TEMPLATE = """
 <h1>Receiving</h1>
 {{ nav_links|safe }}
@@ -159,8 +157,8 @@ RECEIVE_TEMPLATE = """
 document.getElementById('med_name').addEventListener('input', async function() {
     const query = this.value;
     const datalist = document.getElementById('med_suggestions');
-    datalist.innerHTML = ''; // Clear previous suggestions
-    if (query.length < 1) return; // Don't fetch for empty input
+    datalist.innerHTML = '';
+    if (query.length < 1) return;
 
     const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
     const meds = await response.json();
@@ -173,7 +171,6 @@ document.getElementById('med_name').addEventListener('input', async function() {
 </script>
 """
 
-# Template for adding new medication
 ADD_MED_TEMPLATE = """
 <h1>Add New Medication</h1>
 {{ nav_links|safe }}
@@ -197,8 +194,8 @@ ADD_MED_TEMPLATE = """
 document.getElementById('med_name').addEventListener('input', async function() {
     const query = this.value;
     const datalist = document.getElementById('med_suggestions');
-    datalist.innerHTML = ''; // Clear previous suggestions
-    if (query.length < 1) return; // Don't fetch for empty input
+    datalist.innerHTML = '';
+    if (query.length < 1) return;
 
     const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
     const meds = await response.json();
@@ -211,7 +208,6 @@ document.getElementById('med_name').addEventListener('input', async function() {
 </script>
 """
 
-# Template for reports
 REPORTS_TEMPLATE = """
 <h1>Inventory Reports</h1>
 {{ nav_links|safe }}
@@ -444,261 +440,290 @@ REPORTS_TEMPLATE = """
 {% endif %}
 """
 
-# API endpoint for medication suggestions
-@app.route('/api/medications', methods=['GET'])
-def get_medication_suggestions():
-    query = request.args.get('query', '')
-    # Case-insensitive search for names starting with query
-    meds = list(medications.find(
-        {'name': {'$regex': f'^{query}', '$options': 'i'}},
-        {'_id': 0, 'name': 1}
-    ).sort('name', 1))
-    # Return list of names
-    return jsonify([med['name'] for med in meds])
-
-# Routes
+# Routes with error handling and lazy MongoDB connection
 @app.route('/', methods=['GET'])
 def home():
-    return redirect('/reports')  # Redirect to reports page
+    return redirect('/reports')
 
 @app.route('/dispense', methods=['GET', 'POST'])
 def dispense():
-    if request.method == 'POST':
-        patient = request.form['patient']
-        company = request.form['company']
-        position = request.form['position']
-        age = int(request.form['age'])
-        diagnosis = request.form['diagnosis']
-        prescriber = request.form['prescriber']
-        dispenser = request.form['dispenser']
-        date_str = request.form['date']
-        med_name = request.form['med_name']
-        quantity = int(request.form['quantity'])
+    try:
+        client = get_mongo_client()
+        db = client['pharmacy_db']
+        medications = db['medications']
+        transactions = db['transactions']
+        if request.method == 'POST':
+            patient = request.form['patient']
+            company = request.form['company']
+            position = request.form['position']
+            age = int(request.form['age'])
+            diagnosis = request.form['diagnosis']
+            prescriber = request.form['prescriber']
+            dispenser = request.form['dispenser']
+            date_str = request.form['date']
+            med_name = request.form['med_name']
+            quantity = int(request.form['quantity'])
 
-        med = medications.find_one({'name': med_name})
-        if not med:
-            return f'Medication "{med_name}" not found. <a href="/dispense">Back</a>'
-        if med['balance'] < quantity:
-            return f'Insufficient stock for "{med_name}". <a href="/dispense">Back</a>'
+            med = medications.find_one({'name': med_name})
+            if not med:
+                return f'Medication "{med_name}" not found. <a href="/dispense">Back</a>'
+            if med['balance'] < quantity:
+                return f'Insufficient stock for "{med_name}". <a href="/dispense">Back</a>'
 
-        medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
-        transactions.insert_one({
-            'type': 'dispense',
-            'patient': patient,
-            'company': company,
-            'position': position,
-            'age': age,
-            'diagnosis': diagnosis,
-            'prescriber': prescriber,
-            'dispenser': dispenser,
-            'date': date_str,
-            'med_name': med_name,
-            'quantity': quantity,
-            'timestamp': datetime.utcnow()
-        })
-        return 'Dispensed successfully! <a href="/dispense">Back</a>'
+            medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
+            transactions.insert_one({
+                'type': 'dispense',
+                'patient': patient,
+                'company': company,
+                'position': position,
+                'age': age,
+                'diagnosis': diagnosis,
+                'prescriber': prescriber,
+                'dispenser': dispenser,
+                'date': date_str,
+                'med_name': med_name,
+                'quantity': quantity,
+                'timestamp': datetime.utcnow()
+            })
+            return 'Dispensed successfully! <a href="/dispense">Back</a>'
 
-    tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
-    return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS)
+        tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
+        return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS)
+    except ServerSelectionTimeoutError:
+        return "Database connection failed. Please try again later. <a href='/dispense'>Back</a>", 500
+    finally:
+        client.close()
 
 @app.route('/receive', methods=['GET', 'POST'])
 def receive():
-    if request.method == 'POST':
-        med_name = request.form['med_name']
-        quantity = int(request.form['quantity'])
-        batch = request.form['batch']
-        price = float(request.form['price'])
-        expiry_date = request.form['expiry_date']
-        stock_receiver = request.form['stock_receiver']
-        order_number = request.form['order_number']
-        supplier = request.form['supplier']
-        invoice_number = request.form['invoice_number']
+    try:
+        client = get_mongo_client()
+        db = client['pharmacy_db']
+        medications = db['medications']
+        transactions = db['transactions']
+        if request.method == 'POST':
+            med_name = request.form['med_name']
+            quantity = int(request.form['quantity'])
+            batch = request.form['batch']
+            price = float(request.form['price'])
+            expiry_date = request.form['expiry_date']
+            stock_receiver = request.form['stock_receiver']
+            order_number = request.form['order_number']
+            supplier = request.form['supplier']
+            invoice_number = request.form['invoice_number']
 
-        medications.update_one(
-            {'name': med_name},
-            {'$inc': {'balance': quantity},
-             '$set': {
-                 'batch': batch,
-                 'price': price,
-                 'expiry_date': expiry_date,
-                 'stock_receiver': stock_receiver,
-                 'order_number': order_number,
-                 'supplier': supplier,
-                 'invoice_number': invoice_number
-             }},
-            upsert=True
-        )
-        transactions.insert_one({
-            'type': 'receive',
-            'med_name': med_name,
-            'quantity': quantity,
-            'batch': batch,
-            'price': price,
-            'expiry_date': expiry_date,
-            'stock_receiver': stock_receiver,
-            'order_number': order_number,
-            'supplier': supplier,
-            'invoice_number': invoice_number,
-            'timestamp': datetime.utcnow()
-        })
-        return 'Received successfully! <a href="/receive">Back</a>'
+            medications.update_one(
+                {'name': med_name},
+                {'$inc': {'balance': quantity},
+                 '$set': {
+                     'batch': batch,
+                     'price': price,
+                     'expiry_date': expiry_date,
+                     'stock_receiver': stock_receiver,
+                     'order_number': order_number,
+                     'supplier': supplier,
+                     'invoice_number': invoice_number
+                 }},
+                upsert=True
+            )
+            transactions.insert_one({
+                'type': 'receive',
+                'med_name': med_name,
+                'quantity': quantity,
+                'batch': batch,
+                'price': price,
+                'expiry_date': expiry_date,
+                'stock_receiver': stock_receiver,
+                'order_number': order_number,
+                'supplier': supplier,
+                'invoice_number': invoice_number,
+                'timestamp': datetime.utcnow()
+            })
+            return 'Received successfully! <a href="/receive">Back</a>'
 
-    tx_list = list(transactions.find({'type': 'receive'}).sort('timestamp', -1))
-    return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS)
+        tx_list = list(transactions.find({'type': 'receive'}).sort('timestamp', -1))
+        return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS)
+    except ServerSelectionTimeoutError:
+        return "Database connection failed. Please try again later. <a href='/receive'>Back</a>", 500
+    finally:
+        client.close()
 
 @app.route('/add-medication', methods=['GET', 'POST'])
 def add_medication():
-    if request.method == 'POST':
-        med_name = request.form['med_name']
-        initial_balance = int(request.form['initial_balance'])
-        batch = request.form['batch']
-        price = float(request.form['price'])
-        expiry_date = request.form['expiry_date']
-        stock_receiver = request.form['stock_receiver']
-        order_number = request.form['order_number']
-        supplier = request.form['supplier']
-        invoice_number = request.form['invoice_number']
+    try:
+        client = get_mongo_client()
+        db = client['pharmacy_db']
+        medications = db['medications']
+        transactions = db['transactions']
+        if request.method == 'POST':
+            med_name = request.form['med_name']
+            initial_balance = int(request.form['initial_balance'])
+            batch = request.form['batch']
+            price = float(request.form['price'])
+            expiry_date = request.form['expiry_date']
+            stock_receiver = request.form['stock_receiver']
+            order_number = request.form['order_number']
+            supplier = request.form['supplier']
+            invoice_number = request.form['invoice_number']
 
-        # Check if medication already exists
-        if medications.find_one({'name': med_name}):
-            return f'Medication "{med_name}" already exists. Use Receiving to add stock. <a href="/add-medication">Back</a>'
+            if medications.find_one({'name': med_name}):
+                return f'Medication "{med_name}" already exists. Use Receiving to add stock. <a href="/add-medication">Back</a>'
 
-        # Insert new medication
-        medications.insert_one({
-            'name': med_name,
-            'balance': initial_balance,
-            'batch': batch,
-            'price': price,
-            'expiry_date': expiry_date,
-            'stock_receiver': stock_receiver,
-            'order_number': order_number,
-            'supplier': supplier,
-            'invoice_number': invoice_number
-        })
-        # Log as a receive transaction
-        transactions.insert_one({
-            'type': 'receive',
-            'med_name': med_name,
-            'quantity': initial_balance,
-            'batch': batch,
-            'price': price,
-            'expiry_date': expiry_date,
-            'stock_receiver': stock_receiver,
-            'order_number': order_number,
-            'supplier': supplier,
-            'invoice_number': invoice_number,
-            'timestamp': datetime.utcnow()
-        })
-        return 'Medication added successfully! <a href="/add-medication">Back</a>'
+            medications.insert_one({
+                'name': med_name,
+                'balance': initial_balance,
+                'batch': batch,
+                'price': price,
+                'expiry_date': expiry_date,
+                'stock_receiver': stock_receiver,
+                'order_number': order_number,
+                'supplier': supplier,
+                'invoice_number': invoice_number
+            })
+            transactions.insert_one({
+                'type': 'receive',
+                'med_name': med_name,
+                'quantity': initial_balance,
+                'batch': batch,
+                'price': price,
+                'expiry_date': expiry_date,
+                'stock_receiver': stock_receiver,
+                'order_number': order_number,
+                'supplier': supplier,
+                'invoice_number': invoice_number,
+                'timestamp': datetime.utcnow()
+            })
+            return 'Medication added successfully! <a href="/add-medication">Back</a>'
 
-    return render_template_string(ADD_MED_TEMPLATE, nav_links=NAV_LINKS)
+        return render_template_string(ADD_MED_TEMPLATE, nav_links=NAV_LINKS)
+    except ServerSelectionTimeoutError:
+        return "Database connection failed. Please try again later. <a href='/add-medication'>Back</a>", 500
+    finally:
+        client.close()
 
 @app.route('/reports', methods=['GET', 'POST'])
 def reports():
-    report_data = []
-    dispense_list = []
-    receive_list = []
-    stock_data = []
-    expiry_data = []
-    report_type = None
-    start_date = None
-    end_date = None
-    close_to_expire_days = None
+    try:
+        client = get_mongo_client()
+        db = client['pharmacy_db']
+        medications = db['medications']
+        transactions = db['transactions']
+        report_data = []
+        dispense_list = []
+        receive_list = []
+        stock_data = []
+        expiry_data = []
+        report_type = None
+        start_date = None
+        end_date = None
+        close_to_expire_days = None
 
-    if request.method == 'POST':
-        report_type = request.form['report_type']
-        if report_type not in ['stock_on_hand', 'out_of_stock']:
-            start_date = request.form['start_date']
-            end_date = request.form['end_date']
-            # Convert dates to datetime objects (UTC, midnight)
-            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-            end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)  # End of day
-        if report_type == 'expiry':
-            close_to_expire_days = int(request.form.get('close_to_expire_days', 30))
+        if request.method == 'POST':
+            report_type = request.form['report_type']
+            if report_type not in ['stock_on_hand', 'out_of_stock']:
+                start_date = request.form['start_date']
+                end_date = request.form['end_date']
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
+            if report_type == 'expiry':
+                close_to_expire_days = int(request.form.get('close_to_expire_days', 30))
 
-        if report_type == 'stock_on_hand':
-            # Stock on Hand Report
-            stock_data = list(medications.find({}, {'_id': 0}).sort('name', 1))
-        elif report_type == 'out_of_stock':
-            # Out of Stock Report
-            stock_data = list(medications.find({'balance': 0}, {'_id': 0}).sort('name', 1))
-        elif report_type == 'inventory':
-            # Inventory Report
-            meds = list(medications.find({}, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1))
-            for med in meds:
-                med_name = med['name']
-                # Calculate beginning balance (before start_date)
-                pre_transactions = transactions.find({
-                    'med_name': med_name,
-                    'timestamp': {'$lt': start_dt}
-                })
-                beginning_balance = 0
-                for tx in pre_transactions:
-                    if tx['type'] == 'receive':
-                        beginning_balance += tx['quantity']
-                    elif tx['type'] == 'dispense':
-                        beginning_balance -= tx['quantity']
+            if report_type == 'stock_on_hand':
+                stock_data = list(medications.find({}, {'_id': 0}).sort('name', 1))
+            elif report_type == 'out_of_stock':
+                stock_data = list(medications.find({'balance': 0}, {'_id': 0}).sort('name', 1))
+            elif report_type == 'inventory':
+                meds = list(medications.find({}, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1))
+                for med in meds:
+                    med_name = med['name']
+                    pre_transactions = transactions.find({
+                        'med_name': med_name,
+                        'timestamp': {'$lt': start_dt}
+                    })
+                    beginning_balance = 0
+                    for tx in pre_transactions:
+                        if tx['type'] == 'receive':
+                            beginning_balance += tx['quantity']
+                        elif tx['type'] == 'dispense':
+                            beginning_balance -= tx['quantity']
 
-                # Calculate dispensed and received in date range
-                period_transactions = transactions.find({
-                    'med_name': med_name,
+                    period_transactions = transactions.find({
+                        'med_name': med_name,
+                        'timestamp': {'$gte': start_dt, '$lte': end_dt}
+                    })
+                    dispensed = 0
+                    received = 0
+                    for tx in period_transactions:
+                        if tx['type'] == 'dispense':
+                            dispensed += tx['quantity']
+                        elif tx['type'] == 'receive':
+                            received += tx['quantity']
+
+                    report_data.append({
+                        'med_name': med_name,
+                        'beginning_balance': max(0, beginning_balance),
+                        'dispensed': dispensed,
+                        'received': received,
+                        'current_balance': med['balance']
+                    })
+            elif report_type == 'dispense_list':
+                dispense_list = list(transactions.find({
+                    'type': 'dispense',
                     'timestamp': {'$gte': start_dt, '$lte': end_dt}
-                })
-                dispensed = 0
-                received = 0
-                for tx in period_transactions:
-                    if tx['type'] == 'dispense':
-                        dispensed += tx['quantity']
-                    elif tx['type'] == 'receive':
-                        received += tx['quantity']
+                }).sort('timestamp', 1))
+            elif report_type == 'receive_list':
+                receive_list = list(transactions.find({
+                    'type': 'receive',
+                    'timestamp': {'$gte': start_dt, '$lte': end_dt}
+                }).sort('timestamp', 1))
+            elif report_type == 'expiry':
+                today = datetime.utcnow().date()
+                threshold_date = today + timedelta(days=close_to_expire_days)
+                expiry_data = []
+                meds = list(medications.find({}, {'_id': 0}).sort('name', 1))
+                for med in meds:
+                    expiry_dt = datetime.strptime(med['expiry_date'], '%Y-%m-%d').date()
+                    if expiry_dt < today:
+                        med['expiry_status'] = 'Expired'
+                        expiry_data.append(med)
+                    elif expiry_dt <= threshold_date:
+                        med['expiry_status'] = 'Close to Expire'
+                        expiry_data.append(med)
 
-                report_data.append({
-                    'med_name': med_name,
-                    'beginning_balance': max(0, beginning_balance),  # Prevent negative
-                    'dispensed': dispensed,
-                    'received': received,
-                    'current_balance': med['balance']
-                })
-        elif report_type == 'dispense_list':
-            # Dispense List
-            dispense_list = list(transactions.find({
-                'type': 'dispense',
-                'timestamp': {'$gte': start_dt, '$lte': end_dt}
-            }).sort('timestamp', 1))
-        elif report_type == 'receive_list':
-            # Receive List
-            receive_list = list(transactions.find({
-                'type': 'receive',
-                'timestamp': {'$gte': start_dt, '$lte': end_dt}
-            }).sort('timestamp', 1))
-        elif report_type == 'expiry':
-            # Expired and Close to Expire Report
-            today = datetime.utcnow().date()
-            threshold_date = today + timedelta(days=close_to_expire_days)
-            expiry_data = []
-            meds = list(medications.find({}, {'_id': 0}).sort('name', 1))
-            for med in meds:
-                expiry_dt = datetime.strptime(med['expiry_date'], '%Y-%m-%d').date()
-                if expiry_dt < today:
-                    med['expiry_status'] = 'Expired'
-                    expiry_data.append(med)
-                elif expiry_dt <= threshold_date:
-                    med['expiry_status'] = 'Close to Expire'
-                    expiry_data.append(med)
+        return render_template_string(
+            REPORTS_TEMPLATE,
+            report_type=report_type,
+            report_data=report_data,
+            dispense_list=dispense_list,
+            receive_list=receive_list,
+            stock_data=stock_data,
+            expiry_data=expiry_data,
+            start_date=start_date,
+            end_date=end_date,
+            close_to_expire_days=close_to_expire_days,
+            nav_links=NAV_LINKS
+        )
+    except ServerSelectionTimeoutError:
+        return "Database connection failed. Please try again later. <a href='/reports'>Back</a>", 500
+    finally:
+        client.close()
 
-    return render_template_string(
-        REPORTS_TEMPLATE,
-        report_type=report_type,
-        report_data=report_data,
-        dispense_list=dispense_list,
-        receive_list=receive_list,
-        stock_data=stock_data,
-        expiry_data=expiry_data,
-        start_date=start_date,
-        end_date=end_date,
-        close_to_expire_days=close_to_expire_days,
-        nav_links=NAV_LINKS
-    )
+@app.route('/api/medications', methods=['GET'])
+def get_medication_suggestions():
+    try:
+        client = get_mongo_client()
+        db = client['pharmacy_db']
+        medications = db['medications']
+        query = request.args.get('query', '')
+        meds = list(medications.find(
+            {'name': {'$regex': f'^{query}', '$options': 'i'}},
+            {'_id': 0, 'name': 1}
+        ).sort('name', 1))
+        return jsonify([med['name'] for med in meds])
+    except ServerSelectionTimeoutError:
+        return jsonify({'error': 'Database connection failed'}), 500
+    finally:
+        client.close()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
