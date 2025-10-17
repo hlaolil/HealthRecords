@@ -67,9 +67,38 @@ CSS_STYLE = """
     .dispense-form,
     .receive-form,
     .add-medication-form {
+        display: block;
+    }
+    .common-section {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
         gap: 15px;
+        margin-bottom: 20px;
+    }
+    .med-section {
+        margin-bottom: 20px;
+    }
+    .med-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr auto;
+        gap: 10px;
+        margin-bottom: 10px;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        align-items: end;
+    }
+    .med-row label {
+        display: block;
+        margin: 0 0 5px;
+        font-weight: bold;
+    }
+    .med-row input {
+        width: 100%;
+        padding: 8px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        box-sizing: border-box;
     }
     form label {
         display: block;
@@ -85,7 +114,6 @@ CSS_STYLE = """
         box-sizing: border-box;
     }
     .form-buttons {
-        grid-column: 1 / -1;
         text-align: center;
     }
     form input[type="submit"], form button {
@@ -147,10 +175,11 @@ CSS_STYLE = """
         form, table {
             max-width: 100%;
         }
-        .dispense-form,
-        .receive-form,
-        .add-medication-form {
+        .common-section {
             grid-template-columns: 1fr; /* Single column on mobile */
+        }
+        .med-row {
+            grid-template-columns: 1fr;
         }
         table th, table td {
             font-size: 14px;
@@ -161,7 +190,7 @@ CSS_STYLE = """
 """
 
 
-# ✅ Updated Dispense Template with dropdowns for Doctors, Issuers, and Age Groups
+# ✅ Updated Dispense Template with multiple medications support
 DISPENSE_TEMPLATE = CSS_STYLE + """
 <h1>Dispensing</h1>
 {{ nav_links|safe }}
@@ -173,188 +202,201 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 <h2>Dispense Medication</h2>
 
 <form method="POST" action="{{ url_for('dispense') }}" class="dispense-form">
-    <div>
-        <label>Medication:</label><input name="med_name" id="med_name" list="med_suggestions" required>
+    <div class="common-section">
+        <div>
+            <label>Patient:</label>
+            <input name="patient" type="text" required>
+        </div>
+
+        <div>
+            <label for="company">Company:</label>
+            <select id="company" name="company" required>
+              <option value="">-- Select Company --</option>
+              <option>Eminence</option>
+              <option>BLW</option>
+              <option>Mendi</option>
+              <option>BUSY BEE</option>
+              <option>CMS</option>
+              <option>PLATO</option>
+              <option>LD</option>
+              <option>LISELO</option>
+              <option>LMPS</option>
+              <option>MGC</option>
+              <option>MINOPEX</option>
+              <option>NMC</option>
+              <option>Public</option>
+              <option>Enaex</option>
+              <option>TOMRA</option>
+              <option>IFS</option>
+              <option>UL4</option>
+              <option>UNITRANS</option>
+              <option>THOLO</option>
+              <option>Other</option>
+              <option>Government</option>
+              <option>Consulmet</option>
+              <option>Other</option>
+            </select>
+        </div>
+
+        <div>
+            <label for="position">Position:</label>
+            <select id="position" name="position" required>
+              <option value="">-- Select Position --</option>
+              <option>Operator</option>
+              <option>Supervisor</option>
+              <option>Manager</option>
+              <option>Cleaner</option>
+              <option>Drivers</option>
+              <option>Plant Operator</option>
+              <option>Maintenance</option>
+              <option>Hse</option>
+              <option>Storekeeper</option>
+              <option>Mechanics</option>
+              <option>Administration</option>
+              <option>Electricians</option>
+              <option>Fitters</option>
+              <option>Recovery</option>
+              <option>Geologist</option>
+              <option>Workshop Cleaners</option>
+              <option>Kitchen</option>
+              <option>Controller</option>
+              <option>Management</option>
+              <option>Emergency Coordinator</option>
+              <option>Security</option>
+              <option>Medical Doctor</option>
+              <option>Nurse</option>
+              <option>PHC</option>
+              <option>X-Ray Technologist</option>
+              <option>Lab Technologist</option>
+              <option>Boiler Maker</option>
+              <option>Housekeeping</option>
+              <option>Pharmacist</option>
+              <option>Process</option>
+              <option>Mining</option>
+              <option>General Worker</option>
+              <option>Blasting</option>
+              <option>Chef</option>
+              <option>Food Service Attendant</option>
+              <option>Other</option>
+              <option>Drilling</option>
+              <option>Treatment</option>
+              <option>Sorting</option>
+              <option>Diesel Attendant</option>
+              <option>Welder</option>
+              <option>Water Works</option>
+              <option>Intern</option>
+              <option>CI</option>
+              <option>Finance</option>
+              <option>Procurement</option>
+              <option>Metallurgy</option>
+              <option>Tyreman</option>
+              <option>Training</option>
+              <option>Artisan</option>
+              <option>IT</option>
+              <option>Production</option>
+              <option>Survey</option>
+              <option>Visitor</option>
+              <option>Environmnet</option>
+              <option>Tourist</option>
+              <option>Police</option>
+              <option>Public</option>
+              <option>Director</option>
+              <option>Technician</option>
+              <option>Other</option>
+            </select>
+        </div>
+
+        <div>
+            <label>Age Group:</label>
+            <select name="age_group" required>
+                <option value="">-- Select Age Group --</option>
+                <option value="18-24">18-24</option>
+                <option value="25-34">25-34</option>
+                <option value="35-45">35-45</option>
+                <option value="45-54">45-54</option>
+                <option value="54-65">54-65</option>
+            </select>
+        </div>
+
+        <div>
+            <label>Gender:</label>
+            <select name="gender" required>
+                <option value="">-- Select --</option>
+                <option value="Male">Male</option>
+                <option value="Female">Female</option>
+            </select>
+        </div>
+
+        <div>
+            <label>Number of Sick Leave Days:</label>
+            <input name="sick_leave_days" type="number" min="0" required>
+        </div>
+
+        <div>
+            <label>Diagnosis:</label>
+            <input name="diagnosis" type="text" required>
+        </div>
+
+        <div>
+            <label>Prescriber (Doctor):</label>
+            <select name="prescriber" required>
+                <option value="">-- Select Doctor --</option>
+                <option>Dr. T. Khothatso</option>
+                <option>Mamosa Seetsa</option>
+                <option>Mapalo Mapesela</option>
+                <option>Mathuto Kutoane</option>
+                <option>Mamosaase Nqosa</option>
+                <option>Malesoetsa Leohla</option>
+                <option>Locum</option>
+                <option>Thapelo Mphole</option>
+            </select>
+        </div>
+
+        <div>
+            <label>Dispenser (Issuer):</label>
+            <select name="dispenser" required>
+                <option value="">-- Select Issuer --</option>
+                <option>Letlotlo Hlaoli</option>
+                <option>Mamosa Seetsa</option>
+                <option>Mapalo Mapesela</option>
+                <option>Mathuto Kutoane</option>
+                <option>Mamosaase Nqosa</option>
+                <option>Malesoetsa Leohla</option>
+                <option>Locum</option>
+                <option>Thapelo Mphole</option>
+            </select>
+        </div>
+
+        <div>
+            <label>Date:</label>
+            <input name="date" type="date" required>
+        </div>
+    </div>
+
+    <div class="med-section">
+        <h3>Medications (up to 12)</h3>
         <datalist id="med_suggestions"></datalist>
-    </div>
-
-    <div>
-        <label>Quantity:</label>
-        <input name="quantity" type="number" min="1" required>
-    </div>
-
-    <div>
-        <label>Patient:</label>
-        <input name="patient" type="text" required>
-    </div>
-
-    <div>
-        <label for="company">Company:</label>
-        <select id="company" name="company" required>
-          <option value="">-- Select Company --</option>
-          <option>Eminence</option>
-          <option>BLW</option>
-          <option>Mendi</option>
-          <option>BUSY BEE</option>
-          <option>CMS</option>
-          <option>PLATO</option>
-          <option>LD</option>
-          <option>LISELO</option>
-          <option>LMPS</option>
-          <option>MGC</option>
-          <option>MINOPEX</option>
-          <option>NMC</option>
-          <option>Public</option>
-          <option>Enaex</option>
-          <option>TOMRA</option>
-          <option>IFS</option>
-          <option>UL4</option>
-          <option>UNITRANS</option>
-          <option>THOLO</option>
-          <option>Other</option>
-          <option>Government</option>
-          <option>Consulmet</option>
-          <option>Other</option>
-        </select>
-    </div>
-
-    <div>
-        <label for="position">Position:</label>
-        <select id="position" name="position" required>
-          <option value="">-- Select Position --</option>
-          <option>Operator</option>
-          <option>Supervisor</option>
-          <option>Manager</option>
-          <option>Cleaner</option>
-          <option>Drivers</option>
-          <option>Plant Operator</option>
-          <option>Maintenance</option>
-          <option>Hse</option>
-          <option>Storekeeper</option>
-          <option>Mechanics</option>
-          <option>Administration</option>
-          <option>Electricians</option>
-          <option>Fitters</option>
-          <option>Recovery</option>
-          <option>Geologist</option>
-          <option>Workshop Cleaners</option>
-          <option>Kitchen</option>
-          <option>Controller</option>
-          <option>Management</option>
-          <option>Emergency Coordinator</option>
-          <option>Security</option>
-          <option>Medical Doctor</option>
-          <option>Nurse</option>
-          <option>PHC</option>
-          <option>X-Ray Technologist</option>
-          <option>Lab Technologist</option>
-          <option>Boiler Maker</option>
-          <option>Housekeeping</option>
-          <option>Pharmacist</option>
-          <option>Process</option>
-          <option>Mining</option>
-          <option>General Worker</option>
-          <option>Blasting</option>
-          <option>Chef</option>
-          <option>Food Service Attendant</option>
-          <option>Other</option>
-          <option>Drilling</option>
-          <option>Treatment</option>
-          <option>Sorting</option>
-          <option>Diesel Attendant</option>
-          <option>Welder</option>
-          <option>Water Works</option>
-          <option>Intern</option>
-          <option>CI</option>
-          <option>Finance</option>
-          <option>Procurement</option>
-          <option>Metallurgy</option>
-          <option>Tyreman</option>
-          <option>Training</option>
-          <option>Artisan</option>
-          <option>IT</option>
-          <option>Production</option>
-          <option>Survey</option>
-          <option>Visitor</option>
-          <option>Environmnet</option>
-          <option>Tourist</option>
-          <option>Police</option>
-          <option>Public</option>
-          <option>Director</option>
-          <option>Technician</option>
-          <option>Other</option>
-        </select>
-    </div>
-
-    <div>
-        <label>Age Group:</label>
-        <select name="age_group" required>
-            <option value="">-- Select Age Group --</option>
-            <option value="18-24">18-24</option>
-            <option value="25-34">25-34</option>
-            <option value="35-45">35-45</option>
-            <option value="45-54">45-54</option>
-            <option value="54-65">54-65</option>
-        </select>
-    </div>
-
-    <div>
-        <label>Gender:</label>
-        <select name="gender" required>
-            <option value="">-- Select --</option>
-            <option value="Male">Male</option>
-            <option value="Female">Female</option>
-        </select>
-    </div>
-
-    <div>
-        <label>Number of Sick Leave Days:</label>
-        <input name="sick_leave_days" type="number" min="0" required>
-    </div>
-
-    <div>
-        <label>Diagnosis:</label>
-        <input name="diagnosis" type="text" required>
-    </div>
-
-    <div>
-        <label>Prescriber (Doctor):</label>
-        <select name="prescriber" required>
-            <option value="">-- Select Doctor --</option>
-            <option>Dr. T. Khothatso</option>
-            <option>Mamosa Seetsa</option>
-            <option>Mapalo Mapesela</option>
-            <option>Mathuto Kutoane</option>
-            <option>Mamosaase Nqosa</option>
-            <option>Malesoetsa Leohla</option>
-            <option>Locum</option>
-            <option>Thapelo Mphole</option>
-        </select>
-    </div>
-
-    <div>
-        <label>Dispenser (Issuer):</label>
-        <select name="dispenser" required>
-            <option value="">-- Select Issuer --</option>
-            <option>Letlotlo Hlaoli</option>
-            <option>Mamosa Seetsa</option>
-            <option>Mapalo Mapesela</option>
-            <option>Mathuto Kutoane</option>
-            <option>Mamosaase Nqosa</option>
-            <option>Malesoetsa Leohla</option>
-            <option>Locum</option>
-            <option>Thapelo Mphole</option>
-        </select>
-    </div>
-
-    <div>
-        <label>Date:</label>
-        <input name="date" type="date" required>
+        <div id="medications">
+            <div class="med-row">
+                <div>
+                    <label>Medication:</label>
+                    <input name="med_names[]" list="med_suggestions" class="med-input" required>
+                </div>
+                <div>
+                    <label>Quantity:</label>
+                    <input name="quantities[]" type="number" min="1" required>
+                </div>
+                <div>
+                    <button type="button" onclick="removeRow(this)">Remove</button>
+                </div>
+            </div>
+        </div>
+        <button type="button" onclick="addRow()">Add Medication</button>
     </div>
 
     <div class="form-buttons">
         <input type="submit" value="Dispense">
-        <button type="button" onclick="document.querySelector('form').reset();">Clear Form</button>
+        <button type="button" onclick="clearForm()">Clear Form</button>
     </div>
 </form>
 
@@ -403,9 +445,82 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 </table>
 
 <script>
+let medRowCount = 1;
+
+function addInputListener(input) {
+    input.addEventListener('input', async function() {
+        const query = this.value;
+        const datalist = document.getElementById('med_suggestions');
+        datalist.innerHTML = '';
+        if (query.length < 1) return;
+
+        const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
+        const meds = await response.json();
+        if (meds.error) {
+            console.error(meds.error);
+            return;
+        }
+        meds.forEach(med => {
+            const option = document.createElement('option');
+            option.value = med;
+            datalist.appendChild(option);
+        });
+    });
+}
+
+function addRow() {
+    if (medRowCount >= 12) {
+        alert('Maximum 12 medications allowed.');
+        return;
+    }
+    medRowCount++;
+    const container = document.getElementById('medications');
+    const newRow = document.createElement('div');
+    newRow.className = 'med-row';
+    newRow.innerHTML = `
+        <div>
+            <label>Medication:</label>
+            <input name="med_names[]" list="med_suggestions" class="med-input" required>
+        </div>
+        <div>
+            <label>Quantity:</label>
+            <input name="quantities[]" type="number" min="1" required>
+        </div>
+        <div>
+            <button type="button" onclick="removeRow(this)">Remove</button>
+        </div>
+    `;
+    container.appendChild(newRow);
+    const newInput = newRow.querySelector('.med-input');
+    addInputListener(newInput);
+}
+
+function removeRow(btn) {
+    btn.closest('.med-row').remove();
+    medRowCount--;
+}
+
+function clearForm() {
+    document.querySelector('.common-section').querySelectorAll('input, select').forEach(el => el.value = '');
+    const medsContainer = document.getElementById('medications');
+    while (medsContainer.children.length > 1) {
+        medsContainer.removeChild(medsContainer.lastChild);
+    }
+    const firstRow = medsContainer.firstChild;
+    firstRow.querySelectorAll('input').forEach(el => el.value = '');
+    medRowCount = 1;
+    document.getElementById('med_suggestions').innerHTML = '';
+}
+
+// Initialize listeners for existing inputs
+document.addEventListener('DOMContentLoaded', function() {
+    const existingInputs = document.querySelectorAll('.med-input');
+    existingInputs.forEach(addInputListener);
+});
+
 // Clear form after successful dispense
 {% if message and 'successfully' in message|lower %}
-    document.querySelector('form').reset();
+    clearForm();
 {% endif %}
 </script>
 """
@@ -696,7 +811,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <th>Patient</th>
             <th>Company</th>
             <th>Position</th>
-            <th>Age</th>
+            <th>Age Group</th>
             <th>Diagnosis</th>
             <th>Prescriber</th>
             <th>Dispenser</th>
@@ -712,7 +827,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ t.patient }}</td>
             <td>{{ t.company }}</td>
             <td>{{ t.position }}</td>
-            <td>{{ t.age }}</td>
+            <td>{{ t.age_group }}</td>
             <td>{{ t.diagnosis }}</td>
             <td>{{ t.prescriber }}</td>
             <td>{{ t.dispenser }}</td>
@@ -853,44 +968,67 @@ def dispense():
                 patient = request.form['patient']
                 company = request.form['company']
                 position = request.form['position']
-                age = int(request.form['age'])
+                age_group = request.form['age_group']
                 diagnosis = request.form['diagnosis']
                 prescriber = request.form['prescriber']
                 dispenser = request.form['dispenser']
                 date_str = request.form['date']
-                med_name = request.form['med_name']
-                quantity = int(request.form['quantity'])
                 gender = request.form['gender']
                 sick_leave_days = int(request.form['sick_leave_days'])
 
+                med_names = [name.strip() for name in request.form.getlist('med_names') if name.strip()]
+                quantities_str = request.form.getlist('quantities')
+                quantities = []
+                for q_str in quantities_str:
+                    try:
+                        qty = int(q_str)
+                        if qty > 0:
+                            quantities.append(qty)
+                    except ValueError:
+                        pass
 
-                med = medications.find_one({'name': med_name})
-                if not med:
-                    message = f'Medication "{med_name}" not found.'
-                elif med['balance'] < quantity:
-                    message = f'Insufficient stock for "{med_name}".'
+                if len(med_names) != len(quantities) or not med_names:
+                    message = 'Please provide at least one valid medication and quantity.'
                 else:
-                    medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
-                    transactions.insert_one({
-                       'type': 'dispense',
-                       'patient': patient,
-                        'company': company,
-                        'position': position,
-                        'age': age,
-                        'gender': gender,
-                        'sick_leave_days': sick_leave_days,
-                        'diagnosis': diagnosis,
-                        'prescriber': prescriber,
-                        'dispenser': dispenser,
-                        'date': date_str,
-                        'med_name': med_name,
-                        'quantity': quantity,
-                        'timestamp': datetime.utcnow()
-                    })
+                    success = True
+                    error_msgs = []
+                    dispensed_meds = []
+                    for med_name, quantity in zip(med_names, quantities):
+                        med = medications.find_one({'name': med_name})
+                        if not med:
+                            error_msgs.append(f'Medication "{med_name}" not found.')
+                            success = False
+                            continue
+                        elif med['balance'] < quantity:
+                            error_msgs.append(f'Insufficient stock for "{med_name}".')
+                            success = False
+                            continue
+                        else:
+                            medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
+                            transactions.insert_one({
+                                'type': 'dispense',
+                                'patient': patient,
+                                'company': company,
+                                'position': position,
+                                'age_group': age_group,
+                                'gender': gender,
+                                'sick_leave_days': sick_leave_days,
+                                'diagnosis': diagnosis,
+                                'prescriber': prescriber,
+                                'dispenser': dispenser,
+                                'date': date_str,
+                                'med_name': med_name,
+                                'quantity': quantity,
+                                'timestamp': datetime.utcnow()
+                            })
+                            dispensed_meds.append(med_name)
 
-                    message = 'Dispensed successfully!'
-                    tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
+                    if success and dispensed_meds:
+                        message = f'Dispensed successfully: {", ".join(dispensed_meds)}'
+                    else:
+                        message = '; '.join(error_msgs) if error_msgs else 'No medications dispensed.'
 
+                tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
                 return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
