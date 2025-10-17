@@ -1332,7 +1332,8 @@ def reports():
                         'type': 'dispense',
                         'timestamp': {'$gte': start_dt, '$lte': end_dt}
                     }).sort('timestamp', 1))
-                    total_transactions = len(set(t['transaction_id'] for t in dispense_list)) if dispense_list else 0
+                    unique_txs = set((t['patient'], t['date'], t['prescriber'], t['dispenser']) for t in dispense_list)
+                    total_transactions = len(unique_txs) if dispense_list else 0
                 elif report_type == 'receive_list':
                     receive_list = list(transactions.find({
                         'type': 'receive',
@@ -1353,7 +1354,7 @@ def reports():
                             med['expiry_status'] = 'Close to Expire'
                             med['status'] = 'close-to-expire'
                             expiry_data.append(med)
-            except ValueError as e:
+            except (ValueError, KeyError) as e:
                 return render_template_string(
                     REPORTS_TEMPLATE,
                     nav_links=NAV_LINKS,
