@@ -3,6 +3,7 @@ from flask import Flask, request, render_template_string, jsonify, redirect
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 app = Flask(__name__)
 
@@ -1064,6 +1065,7 @@ def dispense():
                     if len(med_names) != len(quantities) or not med_names:
                         message = 'Please provide at least one valid medication and quantity.'
                     else:
+                        tx_id = str(uuid4())
                         success = True
                         error_msgs = []
                         dispensed_meds = []
@@ -1081,6 +1083,7 @@ def dispense():
                                 medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
                                 transactions.insert_one({
                                     'type': 'dispense',
+                                    'transaction_id': tx_id,
                                     'patient': patient,
                                     'company': company,
                                     'position': position,
@@ -1329,7 +1332,7 @@ def reports():
                         'type': 'dispense',
                         'timestamp': {'$gte': start_dt, '$lte': end_dt}
                     }).sort('timestamp', 1))
-                    total_transactions = len(dispense_list) if dispense_list else 0
+                    total_transactions = len(set(t['transaction_id'] for t in dispense_list)) if dispense_list else 0
                 elif report_type == 'receive_list':
                     receive_list = list(transactions.find({
                         'type': 'receive',
