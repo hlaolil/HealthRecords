@@ -877,11 +877,12 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 </table>
 {% elif report_type == 'dispense_list' and dispense_list %}
 <h2>Dispense List for {{ start_date }} to {{ end_date }}</h2>
-<h3>Total Patients Served: {{ total_patients }}</h3>
+<h3>Total Transactions: {{ total_transactions }}</h3>
 <table>
     <thead>
         <tr>
-            <th>Medications Dispensed</th>
+            <th>Medication</th>
+            <th>Quantity</th>
             <th>Patient</th>
             <th>Company</th>
             <th>Position</th>
@@ -898,7 +899,8 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     <tbody>
     {% for t in dispense_list %}
         <tr>
-            <td>{{ ', '.join([m.med_name ~ ' (' ~ m.quantity|string ~ ')' for m in t.meds]) }}</td>
+            <td>{{ t.med_name }}</td>
+            <td>{{ t.quantity }}</td>
             <td>{{ t.patient }}</td>
             <td>{{ t.company }}</td>
             <td>{{ t.position }}</td>
@@ -912,7 +914,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="12">No dispense transactions in this period.</td></tr>
+        <tr><td colspan="13">No dispense transactions in this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -1248,7 +1250,7 @@ def reports():
         start_date = None
         end_date = None
         close_to_expire_days = 30
-        total_patients = 0
+        total_transactions = 0
 
         if request.method == 'POST':
             try:
@@ -1323,40 +1325,11 @@ def reports():
                             'amount_to_order': int(amount_to_order) if amount_to_order.is_integer() else round(amount_to_order, 2)
                         })
                 elif report_type == 'dispense_list':
-                    pipeline = [
-                        {'$match': {
-                            'type': 'dispense',
-                            'timestamp': {'$gte': start_dt, '$lte': end_dt}
-                        }},
-                        {'$group': {
-                            '_id': {
-                                'patient': '$patient',
-                                'date': '$date',
-                                'prescriber': '$prescriber',
-                                'dispenser': '$dispenser'
-                            },
-                            'patient': {'$first': '$patient'},
-                            'company': {'$first': '$company'},
-                            'position': {'$first': '$position'},
-                            'age_group': {'$first': '$age_group'},
-                            'gender': {'$first': '$gender'},
-                            'sick_leave_days': {'$first': '$sick_leave_days'},
-                            'diagnoses': {'$first': '$diagnoses'},
-                            'prescriber': {'$first': '$prescriber'},
-                            'dispenser': {'$first': '$dispenser'},
-                            'date': {'$first': '$date'},
-                            'meds': {
-                                '$push': {
-                                    'med_name': '$med_name',
-                                    'quantity': '$quantity'
-                                }
-                            },
-                            'timestamp': {'$min': '$timestamp'}
-                        }},
-                        {'$sort': {'timestamp': 1}}
-                    ]
-                    dispense_list = list(transactions.aggregate(pipeline))
-                    total_patients = len(dispense_list) if dispense_list else 0
+                    dispense_list = list(transactions.find({
+                        'type': 'dispense',
+                        'timestamp': {'$gte': start_dt, '$lte': end_dt}
+                    }).sort('timestamp', 1))
+                    total_transactions = len(dispense_list) if dispense_list else 0
                 elif report_type == 'receive_list':
                     receive_list = list(transactions.find({
                         'type': 'receive',
@@ -1391,7 +1364,7 @@ def reports():
                     start_date=None,
                     end_date=None,
                     close_to_expire_days=close_to_expire_days,
-                    total_patients=0
+                    total_transactions=0
                 )
 
         return render_template_string(
@@ -1405,7 +1378,7 @@ def reports():
             start_date=start_date,
             end_date=end_date,
             close_to_expire_days=close_to_expire_days,
-            total_patients=total_patients,
+            total_transactions=total_transactions,
             nav_links=NAV_LINKS
         )
     except ServerSelectionTimeoutError:
@@ -1422,7 +1395,7 @@ def reports():
             start_date=None,
             end_date=None,
             close_to_expire_days=close_to_expire_days,
-            total_patients=0
+            total_transactions=0
         ), 500
     finally:
         client.close()
