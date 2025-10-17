@@ -195,13 +195,6 @@ CSS_STYLE = """
         background-color: #f8d7da;
         color: #721c24;
     }
-    .summary {
-        background-color: #e9ecef;
-        padding: 10px;
-        border-radius: 4px;
-        margin-bottom: 20px;
-        font-weight: bold;
-    }
     @media (max-width: 600px) {
         body {
             padding: 10px;
@@ -811,6 +804,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         <option value="inventory">Inventory Report</option>
         <option value="dispense_list">Dispense List</option>
         <option value="receive_list">Receive List</option>
+        <option value="patients_served">Patients Served</option>
         <option value="out_of_stock">Out of Stock</option>
         <option value="expiry">Expired and Close to Expire</option>
     </select><br>
@@ -880,9 +874,6 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 </table>
 {% elif report_type == 'dispense_list' and dispense_list %}
 <h2>Dispense List for {{ start_date }} to {{ end_date }}</h2>
-<div class="summary">
-    Total patients served: {{ unique_patients }}
-</div>
 <table>
     <thead>
         <tr>
@@ -959,6 +950,9 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     {% endfor %}
     </tbody>
 </table>
+{% elif report_type == 'patients_served' and patients_served %}
+<h2>Total Patients Served from {{ start_date }} to {{ end_date }}</h2>
+<p>Total unique patients: {{ patients_served }}</p>
 {% elif report_type == 'out_of_stock' and stock_data %}
 <h2>Out of Stock</h2>
 <table>
@@ -1251,7 +1245,7 @@ def reports():
         receive_list = []
         stock_data = []
         expiry_data = []
-        unique_patients = 0
+        patients_served = 0
         report_type = None
         start_date = None
         end_date = None
@@ -1334,12 +1328,22 @@ def reports():
                         'type': 'dispense',
                         'timestamp': {'$gte': start_dt, '$lte': end_dt}
                     }).sort('timestamp', 1))
-                    unique_patients = len(set(t['patient'] for t in dispense_list))
                 elif report_type == 'receive_list':
                     receive_list = list(transactions.find({
                         'type': 'receive',
                         'timestamp': {'$gte': start_dt, '$lte': end_dt}
                     }).sort('timestamp', 1))
+                elif report_type == 'patients_served':
+                    pipeline = [
+                        {'$match': {
+                            'type': 'dispense',
+                            'timestamp': {'$gte': start_dt, '$lte': end_dt}
+                        }},
+                        {'$group': {'_id': '$patient'}},
+                        {'$count': 'total_patients'}
+                    ]
+                    result = list(transactions.aggregate(pipeline))
+                    patients_served = result[0]['total_patients'] if result else 0
                 elif report_type == 'expiry':
                     today = datetime.utcnow().date()
                     threshold_date = today + timedelta(days=close_to_expire_days)
@@ -1366,7 +1370,7 @@ def reports():
                     receive_list=[],
                     stock_data=[],
                     expiry_data=[],
-                    unique_patients=0,
+                    patients_served=0,
                     start_date=None,
                     end_date=None,
                     close_to_expire_days=close_to_expire_days
@@ -1380,7 +1384,7 @@ def reports():
             receive_list=receive_list,
             stock_data=stock_data,
             expiry_data=expiry_data,
-            unique_patients=unique_patients,
+            patients_served=patients_served,
             start_date=start_date,
             end_date=end_date,
             close_to_expire_days=close_to_expire_days,
@@ -1397,7 +1401,7 @@ def reports():
             receive_list=[],
             stock_data=[],
             expiry_data=[],
-            unique_patients=0,
+            patients_served=0,
             start_date=None,
             end_date=None,
             close_to_expire_days=close_to_expire_days
