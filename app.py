@@ -809,15 +809,10 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         <option value="inventory">Inventory Report</option>
         <option value="dispense_list">Dispense List</option>
         <option value="receive_list">Receive List</option>
-        <option value="out_of_stock">Out of Stock</option>
-        <option value="expiry">Expired and Close to Expire</option>
     </select><br>
-    {% if report_type != 'stock_on_hand' and report_type != 'out_of_stock' %}
+    {% if report_type != 'stock_on_hand' %}
     <label>Start Date (YYYY-MM-DD):</label><input name="start_date" type="date" required><br>
     <label>End Date (YYYY-MM-DD):</label><input name="end_date" type="date" required><br>
-    {% endif %}
-    {% if report_type == 'expiry' %}
-    <label>Close to Expire Threshold (days):</label><input name="close_to_expire_days" type="number" min="1" value="30" required><br>
     {% endif %}
     <input type="submit" value="Generate Report">
 </form>
@@ -863,7 +858,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     </thead>
     <tbody>
     {% for row in report_data %}
-        <tr>
+        <tr class="{{ row.status }}">
             <td>{{ row.med_name }}</td>
             <td>{{ row.beginning_balance }}</td>
             <td>{{ row.dispensed }}</td>
@@ -952,68 +947,6 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         </tr>
     {% else %}
         <tr><td colspan="10">No receive transactions in this period.</td></tr>
-    {% endfor %}
-    </tbody>
-</table>
-{% elif report_type == 'out_of_stock' and stock_data %}
-<h2>Out of Stock</h2>
-<table>
-    <thead>
-        <tr>
-            <th>Medication</th>
-            <th>Balance</th>
-            <th>Expiry Date</th>
-            <th>Batch</th>
-            <th>Price</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for med in stock_data %}
-        <tr class="{{ med.status }}">
-            <td>{{ med.name }}</td>
-            <td>{{ med.balance }}</td>
-            <td>{{ med.expiry_date }}</td>
-            <td>{{ med.batch }}</td>
-            <td>${{ "%.2f"|format(med.price) }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="5">No medications out of stock.</td></tr>
-    {% endfor %}
-    </tbody>
-</table>
-{% elif report_type == 'expiry' and expiry_data %}
-<h2>Expired and Close to Expire (within {{ close_to_expire_days }} days)</h2>
-<table>
-    <thead>
-        <tr>
-            <th>Medication</th>
-            <th>Balance</th>
-            <th>Expiry Date</th>
-            <th>Expiry Status</th>
-            <th>Batch</th>
-            <th>Price</th>
-            <th>Stock Receiver</th>
-            <th>Order Number</th>
-            <th>Supplier</th>
-            <th>Invoice Number</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for med in expiry_data %}
-        <tr class="{{ med.status }}">
-            <td>{{ med.name }}</td>
-            <td>{{ med.balance }}</td>
-            <td>{{ med.expiry_date }}</td>
-            <td>{{ med.expiry_status }}</td>
-            <td>{{ med.batch }}</td>
-            <td>${{ "%.2f"|format(med.price) }}</td>
-            <td>{{ med.stock_receiver }}</td>
-            <td>{{ med.order_number }}</td>
-            <td>{{ med.supplier }}</td>
-            <td>{{ med.invoice_number }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="10">No medications expired or close to expiry.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -1248,23 +1181,19 @@ def reports():
         dispense_list = []
         receive_list = []
         stock_data = []
-        expiry_data = []
         report_type = None
         start_date = None
         end_date = None
-        close_to_expire_days = 30
         total_transactions = 0
 
         if request.method == 'POST':
             try:
                 report_type = request.form['report_type']
-                if report_type not in ['stock_on_hand', 'out_of_stock']:
+                if report_type != 'stock_on_hand':
                     start_date = request.form['start_date']
                     end_date = request.form['end_date']
                     start_dt = datetime.strptime(start_date, '%Y-%m-%d')
                     end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
-                if report_type == 'expiry':
-                    close_to_expire_days = int(request.form.get('close_to_expire_days', 30))
 
                 if report_type == 'stock_on_hand':
                     stock_data = list(medications.find({}, {'_id': 0}).sort('name', 1))
@@ -1280,15 +1209,13 @@ def reports():
                             med['status'] = 'close-to-expire'
                         else:
                             med['status'] = 'normal'
-                elif report_type == 'out_of_stock':
-                    stock_data = list(medications.find({'balance': 0}, {'_id': 0}).sort('name', 1))
-                    for med in stock_data:
-                        med['status'] = 'out-of-stock'
                 elif report_type == 'inventory':
-                    meds = list(medications.find({}, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1))
+                    meds = list(medications.find({}, {'_id': 0}).sort('name', 1))
                     start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
                     end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
                     days_in_period = (end_date_obj - start_date_obj).days + 1
+                    today = datetime.utcnow().date()
+                    threshold_date = today + timedelta(days=30)
                     for med in meds:
                         med_name = med['name']
                         pre_transactions = transactions.find({
@@ -1319,13 +1246,27 @@ def reports():
                         lead_time_stock = average_daily * 14
                         amount_to_order = max(0, average_monthly - med['balance'] + lead_time_stock)
 
+                        try:
+                            expiry_dt = datetime.strptime(med['expiry_date'], '%Y-%m-%d').date()
+                            if med['balance'] == 0:
+                                status = 'out-of-stock'
+                            elif expiry_dt < today:
+                                status = 'expired'
+                            elif expiry_dt <= threshold_date:
+                                status = 'close-to-expire'
+                            else:
+                                status = 'normal'
+                        except:
+                            status = 'normal'
+
                         report_data.append({
                             'med_name': med_name,
                             'beginning_balance': max(0, beginning_balance),
                             'dispensed': dispensed,
                             'received': received,
                             'current_balance': med['balance'],
-                            'amount_to_order': int(amount_to_order) if amount_to_order.is_integer() else round(amount_to_order, 2)
+                            'amount_to_order': int(amount_to_order) if amount_to_order.is_integer() else round(amount_to_order, 2),
+                            'status': status
                         })
                 elif report_type == 'dispense_list':
                     dispense_list = list(transactions.find({
@@ -1339,21 +1280,6 @@ def reports():
                         'type': 'receive',
                         'timestamp': {'$gte': start_dt, '$lte': end_dt}
                     }).sort('timestamp', 1))
-                elif report_type == 'expiry':
-                    today = datetime.utcnow().date()
-                    threshold_date = today + timedelta(days=close_to_expire_days)
-                    expiry_data = []
-                    meds = list(medications.find({}, {'_id': 0}).sort('name', 1))
-                    for med in meds:
-                        expiry_dt = datetime.strptime(med['expiry_date'], '%Y-%m-%d').date()
-                        if expiry_dt < today:
-                            med['expiry_status'] = 'Expired'
-                            med['status'] = 'expired'
-                            expiry_data.append(med)
-                        elif expiry_dt <= threshold_date:
-                            med['expiry_status'] = 'Close to Expire'
-                            med['status'] = 'close-to-expire'
-                            expiry_data.append(med)
             except (ValueError, KeyError) as e:
                 return render_template_string(
                     REPORTS_TEMPLATE,
@@ -1364,10 +1290,8 @@ def reports():
                     dispense_list=[],
                     receive_list=[],
                     stock_data=[],
-                    expiry_data=[],
                     start_date=None,
                     end_date=None,
-                    close_to_expire_days=close_to_expire_days,
                     total_transactions=0
                 )
 
@@ -1378,10 +1302,8 @@ def reports():
             dispense_list=dispense_list,
             receive_list=receive_list,
             stock_data=stock_data,
-            expiry_data=expiry_data,
             start_date=start_date,
             end_date=end_date,
-            close_to_expire_days=close_to_expire_days,
             total_transactions=total_transactions,
             nav_links=NAV_LINKS
         )
@@ -1395,10 +1317,8 @@ def reports():
             dispense_list=[],
             receive_list=[],
             stock_data=[],
-            expiry_data=[],
             start_date=None,
             end_date=None,
-            close_to_expire_days=close_to_expire_days,
             total_transactions=0
         ), 500
     finally:
