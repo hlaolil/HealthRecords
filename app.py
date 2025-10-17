@@ -189,13 +189,101 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
     </div>
 
     <div>
-        <label>Company:</label>
-        <input name="company" type="text" required>
+        <label for="company">Company:</label>
+        <select id="company" name="company" required>
+          <option value="">-- Select Company --</option>
+          <option>Eminence</option>
+          <option>BLW</option>
+          <option>Mendi</option>
+          <option>BUSY BEE</option>
+          <option>CMS</option>
+          <option>PLATO</option>
+          <option>LD</option>
+          <option>LISELO</option>
+          <option>LMPS</option>
+          <option>MGC</option>
+          <option>MINOPEX</option>
+          <option>NMC</option>
+          <option>Public</option>
+          <option>Enaex</option>
+          <option>TOMRA</option>
+          <option>IFS</option>
+          <option>UL4</option>
+          <option>UNITRANS</option>
+          <option>THOLO</option>
+          <option>Other</option>
+          <option>Government</option>
+          <option>Consulmet</option>
+          <option>Other</option>
+        </select>
     </div>
 
     <div>
-        <label>Position:</label>
-        <input name="position" type="text" required>
+        <label for="position">Position:</label>
+        <select id="position" name="position" required>
+          <option value="">-- Select Position --</option>
+          <option>Operator</option>
+          <option>Supervisor</option>
+          <option>Manager</option>
+          <option>Cleaner</option>
+          <option>Drivers</option>
+          <option>Plant Operator</option>
+          <option>Maintenance</option>
+          <option>Hse</option>
+          <option>Storekeeper</option>
+          <option>Mechanics</option>
+          <option>Administration</option>
+          <option>Electricians</option>
+          <option>Fitters</option>
+          <option>Recovery</option>
+          <option>Geologist</option>
+          <option>Workshop Cleaners</option>
+          <option>Kitchen</option>
+          <option>Controller</option>
+          <option>Management</option>
+          <option>Emergency Coordinator</option>
+          <option>Security</option>
+          <option>Medical Doctor</option>
+          <option>Nurse</option>
+          <option>PHC</option>
+          <option>X-Ray Technologist</option>
+          <option>Lab Technologist</option>
+          <option>Boiler Maker</option>
+          <option>Housekeeping</option>
+          <option>Pharmacist</option>
+          <option>Process</option>
+          <option>Mining</option>
+          <option>General Worker</option>
+          <option>Blasting</option>
+          <option>Chef</option>
+          <option>Food Service Attendant</option>
+          <option>Other</option>
+          <option>Drilling</option>
+          <option>Treatment</option>
+          <option>Sorting</option>
+          <option>Diesel Attendant</option>
+          <option>Welder</option>
+          <option>Water Works</option>
+          <option>Intern</option>
+          <option>CI</option>
+          <option>Finance</option>
+          <option>Procurement</option>
+          <option>Metallurgy</option>
+          <option>Tyreman</option>
+          <option>Training</option>
+          <option>Artisan</option>
+          <option>IT</option>
+          <option>Production</option>
+          <option>Survey</option>
+          <option>Visitor</option>
+          <option>Environmnet</option>
+          <option>Tourist</option>
+          <option>Police</option>
+          <option>Public</option>
+          <option>Director</option>
+          <option>Technician</option>
+          <option>Other</option>
+        </select>
     </div>
 
     <div>
