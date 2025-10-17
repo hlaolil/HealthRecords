@@ -858,7 +858,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     </thead>
     <tbody>
     {% for row in report_data %}
-        <tr class="{{ row.status }}">
+        <tr>
             <td>{{ row.med_name }}</td>
             <td>{{ row.beginning_balance }}</td>
             <td>{{ row.dispensed }}</td>
@@ -1189,7 +1189,7 @@ def reports():
         if request.method == 'POST':
             try:
                 report_type = request.form['report_type']
-                if report_type != 'stock_on_hand':
+                if report_type not in ['stock_on_hand']:
                     start_date = request.form['start_date']
                     end_date = request.form['end_date']
                     start_dt = datetime.strptime(start_date, '%Y-%m-%d')
@@ -1210,12 +1210,10 @@ def reports():
                         else:
                             med['status'] = 'normal'
                 elif report_type == 'inventory':
-                    meds = list(medications.find({}, {'_id': 0}).sort('name', 1))
+                    meds = list(medications.find({}, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1))
                     start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
                     end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
                     days_in_period = (end_date_obj - start_date_obj).days + 1
-                    today = datetime.utcnow().date()
-                    threshold_date = today + timedelta(days=30)
                     for med in meds:
                         med_name = med['name']
                         pre_transactions = transactions.find({
@@ -1246,27 +1244,13 @@ def reports():
                         lead_time_stock = average_daily * 14
                         amount_to_order = max(0, average_monthly - med['balance'] + lead_time_stock)
 
-                        try:
-                            expiry_dt = datetime.strptime(med['expiry_date'], '%Y-%m-%d').date()
-                            if med['balance'] == 0:
-                                status = 'out-of-stock'
-                            elif expiry_dt < today:
-                                status = 'expired'
-                            elif expiry_dt <= threshold_date:
-                                status = 'close-to-expire'
-                            else:
-                                status = 'normal'
-                        except:
-                            status = 'normal'
-
                         report_data.append({
                             'med_name': med_name,
                             'beginning_balance': max(0, beginning_balance),
                             'dispensed': dispensed,
                             'received': received,
                             'current_balance': med['balance'],
-                            'amount_to_order': int(amount_to_order) if amount_to_order.is_integer() else round(amount_to_order, 2),
-                            'status': status
+                            'amount_to_order': int(amount_to_order) if amount_to_order.is_integer() else round(amount_to_order, 2)
                         })
                 elif report_type == 'dispense_list':
                     dispense_list = list(transactions.find({
