@@ -87,13 +87,16 @@ CSS_STYLE = """
     }
     .med-row, .diag-row {
         display: grid;
-        grid-template-columns: 1fr auto;
+        grid-template-columns: 1fr 1fr auto;
         gap: 10px;
         margin-bottom: 10px;
         padding: 10px;
         border: 1px solid #ddd;
         border-radius: 4px;
         align-items: end;
+    }
+    .diag-row > div:first-of-type {
+        grid-column: span 2;
     }
     .med-row label, .diag-row label {
         display: block;
