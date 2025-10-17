@@ -823,10 +823,6 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <th>Expiry Date</th>
             <th>Batch</th>
             <th>Price</th>
-            <th>Stock Receiver</th>
-            <th>Order Number</th>
-            <th>Supplier</th>
-            <th>Invoice Number</th>
         </tr>
     </thead>
     <tbody>
@@ -837,13 +833,9 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ med.expiry_date }}</td>
             <td>{{ med.batch }}</td>
             <td>${{ "%.2f"|format(med.price) }}</td>
-            <td>{{ med.stock_receiver }}</td>
-            <td>{{ med.order_number }}</td>
-            <td>{{ med.supplier }}</td>
-            <td>{{ med.invoice_number }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="9">No medications in stock.</td></tr>
+        <tr><td colspan="5">No medications in stock.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -963,10 +955,6 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <th>Expiry Date</th>
             <th>Batch</th>
             <th>Price</th>
-            <th>Stock Receiver</th>
-            <th>Order Number</th>
-            <th>Supplier</th>
-            <th>Invoice Number</th>
         </tr>
     </thead>
     <tbody>
@@ -977,13 +965,9 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ med.expiry_date }}</td>
             <td>{{ med.batch }}</td>
             <td>${{ "%.2f"|format(med.price) }}</td>
-            <td>{{ med.stock_receiver }}</td>
-            <td>{{ med.order_number }}</td>
-            <td>{{ med.supplier }}</td>
-            <td>{{ med.invoice_number }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="9">No medications out of stock.</td></tr>
+        <tr><td colspan="5">No medications out of stock.</td></tr>
     {% endfor %}
     </tbody>
 </table>
