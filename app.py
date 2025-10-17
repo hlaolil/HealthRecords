@@ -45,6 +45,13 @@ CSS_STYLE = """
         text-align: center;
         margin-bottom: 20px;
         font-size: 16px;
+        position: sticky;
+        top: 0;
+        background-color: #f8f9fa;
+        z-index: 100;
+        padding: 10px 0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-bottom: 1px solid #dee2e6;
     }
     .nav-links a {
         color: #0056b3; /* darker blue links */
@@ -212,29 +219,28 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <label for="company">Company:</label>
             <select id="company" name="company" required>
               <option value="">-- Select Company --</option>
-              <option>Eminence</option>
               <option>BLW</option>
-              <option>Mendi</option>
               <option>BUSY BEE</option>
               <option>CMS</option>
-              <option>PLATO</option>
+              <option>Consulmet</option>
+              <option>Enaex</option>
+              <option>Eminence</option>
+              <option>Government</option>
+              <option>IFS</option>
               <option>LD</option>
               <option>LISELO</option>
               <option>LMPS</option>
+              <option>Mendi</option>
               <option>MGC</option>
               <option>MINOPEX</option>
               <option>NMC</option>
+              <option>Other</option>
+              <option>PLATO</option>
               <option>Public</option>
-              <option>Enaex</option>
+              <option>THOLO</option>
               <option>TOMRA</option>
-              <option>IFS</option>
               <option>UL4</option>
               <option>UNITRANS</option>
-              <option>THOLO</option>
-              <option>Other</option>
-              <option>Government</option>
-              <option>Consulmet</option>
-              <option>Other</option>
             </select>
         </div>
 
@@ -242,67 +248,65 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <label for="position">Position:</label>
             <select id="position" name="position" required>
               <option value="">-- Select Position --</option>
-              <option>Operator</option>
-              <option>Supervisor</option>
-              <option>Manager</option>
-              <option>Cleaner</option>
-              <option>Drivers</option>
-              <option>Plant Operator</option>
-              <option>Maintenance</option>
-              <option>Hse</option>
-              <option>Storekeeper</option>
-              <option>Mechanics</option>
               <option>Administration</option>
-              <option>Electricians</option>
-              <option>Fitters</option>
-              <option>Recovery</option>
-              <option>Geologist</option>
-              <option>Workshop Cleaners</option>
-              <option>Kitchen</option>
-              <option>Controller</option>
-              <option>Management</option>
-              <option>Emergency Coordinator</option>
-              <option>Security</option>
-              <option>Medical Doctor</option>
-              <option>Nurse</option>
-              <option>PHC</option>
-              <option>X-Ray Technologist</option>
-              <option>Lab Technologist</option>
-              <option>Boiler Maker</option>
-              <option>Housekeeping</option>
-              <option>Pharmacist</option>
-              <option>Process</option>
-              <option>Mining</option>
-              <option>General Worker</option>
-              <option>Blasting</option>
-              <option>Chef</option>
-              <option>Food Service Attendant</option>
-              <option>Other</option>
-              <option>Drilling</option>
-              <option>Treatment</option>
-              <option>Sorting</option>
-              <option>Diesel Attendant</option>
-              <option>Welder</option>
-              <option>Water Works</option>
-              <option>Intern</option>
-              <option>CI</option>
-              <option>Finance</option>
-              <option>Procurement</option>
-              <option>Metallurgy</option>
-              <option>Tyreman</option>
-              <option>Training</option>
               <option>Artisan</option>
-              <option>IT</option>
-              <option>Production</option>
-              <option>Survey</option>
-              <option>Visitor</option>
-              <option>Environmnet</option>
-              <option>Tourist</option>
-              <option>Police</option>
-              <option>Public</option>
+              <option>Blasting</option>
+              <option>Boiler Maker</option>
+              <option>Chef</option>
+              <option>CI</option>
+              <option>Cleaner</option>
+              <option>Controller</option>
               <option>Director</option>
-              <option>Technician</option>
+              <option>Drilling</option>
+              <option>Drivers</option>
+              <option>Electricians</option>
+              <option>Emergency Coordinator</option>
+              <option>Environmnet</option>
+              <option>Finance</option>
+              <option>Fitters</option>
+              <option>Food Service Attendant</option>
+              <option>General Worker</option>
+              <option>Geologist</option>
+              <option>Hse</option>
+              <option>Housekeeping</option>
+              <option>IT</option>
+              <option>Intern</option>
+              <option>Kitchen</option>
+              <option>Lab Technologist</option>
+              <option>Maintenance</option>
+              <option>Management</option>
+              <option>Manager</option>
+              <option>Mechanics</option>
+              <option>Medical Doctor</option>
+              <option>Metallurgy</option>
+              <option>Mining</option>
+              <option>Nurse</option>
+              <option>Operator</option>
               <option>Other</option>
+              <option>PHC</option>
+              <option>Pharmacist</option>
+              <option>Plant Operator</option>
+              <option>Police</option>
+              <option>Procurement</option>
+              <option>Process</option>
+              <option>Production</option>
+              <option>Public</option>
+              <option>Recovery</option>
+              <option>Security</option>
+              <option>Sorting</option>
+              <option>Storekeeper</option>
+              <option>Survey</option>
+              <option>Technician</option>
+              <option>Training</option>
+              <option>Tourist</option>
+              <option>Treatment</option>
+              <option>Tyreman</option>
+              <option>UNITRANS</option>
+              <option>Visitor</option>
+              <option>Water Works</option>
+              <option>Welder</option>
+              <option>Workshop Cleaners</option>
+              <option>X-Ray Technologist</option>
             </select>
         </div>
 
@@ -342,12 +346,12 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <select name="prescriber" required>
                 <option value="">-- Select Doctor --</option>
                 <option>Dr. T. Khothatso</option>
+                <option>Locum</option>
+                <option>Malesoetsa Leohla</option>
                 <option>Mamosa Seetsa</option>
+                <option>Mamosaase Nqosa</option>
                 <option>Mapalo Mapesela</option>
                 <option>Mathuto Kutoane</option>
-                <option>Mamosaase Nqosa</option>
-                <option>Malesoetsa Leohla</option>
-                <option>Locum</option>
                 <option>Thapelo Mphole</option>
             </select>
         </div>
@@ -357,12 +361,12 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <select name="dispenser" required>
                 <option value="">-- Select Issuer --</option>
                 <option>Letlotlo Hlaoli</option>
+                <option>Locum</option>
+                <option>Malesoetsa Leohla</option>
                 <option>Mamosa Seetsa</option>
+                <option>Mamosaase Nqosa</option>
                 <option>Mapalo Mapesela</option>
                 <option>Mathuto Kutoane</option>
-                <option>Mamosaase Nqosa</option>
-                <option>Malesoetsa Leohla</option>
-                <option>Locum</option>
                 <option>Thapelo Mphole</option>
             </select>
         </div>
