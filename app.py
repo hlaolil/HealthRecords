@@ -605,43 +605,45 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
 
 <h2>Receive Medication</h2>
 <form method="POST" action="/receive" class="receive-form">
-    <div>
-        <label>Medication:</label>
-        <input name="med_name" id="med_name" list="med_suggestions" required>
-        <datalist id="med_suggestions"></datalist>
+    <div class="common-section">
+        <div>
+            <label>Medication:</label>
+            <input name="med_name" id="med_name" list="med_suggestions" required>
+        </div>
+        <div>
+            <label>Quantity:</label>
+            <input name="quantity" type="number" min="1" required>
+        </div>
+        <div>
+            <label>Batch:</label>
+            <input name="batch" required>
+        </div>
+        <div>
+            <label>Price per Unit:</label>
+            <input name="price" type="number" step="0.01" min="0" required>
+        </div>
+        <div>
+            <label>Expiry Date (YYYY-MM-DD):</label>
+            <input name="expiry_date" type="date" required>
+        </div>
+        <div>
+            <label>Stock Receiver:</label>
+            <input name="stock_receiver" required>
+        </div>
+        <div>
+            <label>Order Number:</label>
+            <input name="order_number" required>
+        </div>
+        <div>
+            <label>Supplier:</label>
+            <input name="supplier" required>
+        </div>
+        <div>
+            <label>Invoice Number:</label>
+            <input name="invoice_number" required>
+        </div>
     </div>
-    <div>
-        <label>Quantity:</label>
-        <input name="quantity" type="number" min="1" required>
-    </div>
-    <div>
-        <label>Batch:</label>
-        <input name="batch" required>
-    </div>
-    <div>
-        <label>Price per Unit:</label>
-        <input name="price" type="number" step="0.01" min="0" required>
-    </div>
-    <div>
-        <label>Expiry Date (YYYY-MM-DD):</label>
-        <input name="expiry_date" type="date" required>
-    </div>
-    <div>
-        <label>Stock Receiver:</label>
-        <input name="stock_receiver" required>
-    </div>
-    <div>
-        <label>Order Number:</label>
-        <input name="order_number" required>
-    </div>
-    <div>
-        <label>Supplier:</label>
-        <input name="supplier" required>
-    </div>
-    <div>
-        <label>Invoice Number:</label>
-        <input name="invoice_number" required>
-    </div>
+    <datalist id="med_suggestions"></datalist>
     <div class="form-buttons">
         <input type="submit" value="Receive">
         <button type="button" onclick="document.querySelector('form').reset();">Clear Form</button>
@@ -717,43 +719,45 @@ ADD_MED_TEMPLATE = CSS_STYLE + """
 
 <h2>Add Medication</h2>
 <form method="POST" action="/add-medication" class="add-medication-form">
-    <div>
-        <label>Medication Name:</label>
-        <input name="med_name" id="med_name" list="med_suggestions" required>
-        <datalist id="med_suggestions"></datalist>
+    <div class="common-section">
+        <div>
+            <label>Medication Name:</label>
+            <input name="med_name" id="med_name" list="med_suggestions" required>
+        </div>
+        <div>
+            <label>Initial Balance:</label>
+            <input name="initial_balance" type="number" min="0" required>
+        </div>
+        <div>
+            <label>Batch:</label>
+            <input name="batch" required>
+        </div>
+        <div>
+            <label>Price per Unit:</label>
+            <input name="price" type="number" step="0.01" min="0" required>
+        </div>
+        <div>
+            <label>Expiry Date (YYYY-MM-DD):</label>
+            <input name="expiry_date" type="date" required>
+        </div>
+        <div>
+            <label>Stock Receiver:</label>
+            <input name="stock_receiver" required>
+        </div>
+        <div>
+            <label>Order Number:</label>
+            <input name="order_number" required>
+        </div>
+        <div>
+            <label>Supplier:</label>
+            <input name="supplier" required>
+        </div>
+        <div>
+            <label>Invoice Number:</label>
+            <input name="invoice_number" required>
+        </div>
     </div>
-    <div>
-        <label>Initial Balance:</label>
-        <input name="initial_balance" type="number" min="0" required>
-    </div>
-    <div>
-        <label>Batch:</label>
-        <input name="batch" required>
-    </div>
-    <div>
-        <label>Price per Unit:</label>
-        <input name="price" type="number" step="0.01" min="0" required>
-    </div>
-    <div>
-        <label>Expiry Date (YYYY-MM-DD):</label>
-        <input name="expiry_date" type="date" required>
-    </div>
-    <div>
-        <label>Stock Receiver:</label>
-        <input name="stock_receiver" required>
-    </div>
-    <div>
-        <label>Order Number:</label>
-        <input name="order_number" required>
-    </div>
-    <div>
-        <label>Supplier:</label>
-        <input name="supplier" required>
-    </div>
-    <div>
-        <label>Invoice Number:</label>
-        <input name="invoice_number" required>
-    </div>
+    <datalist id="med_suggestions"></datalist>
     <div class="form-buttons">
         <input type="submit" value="Add Medication">
         <button type="button" onclick="document.querySelector('form').reset();">Clear Form</button>
