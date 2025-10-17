@@ -812,6 +812,8 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <th>Company</th>
             <th>Position</th>
             <th>Age Group</th>
+            <th>Gender</th>
+            <th>Sick Leave (Days)</th>
             <th>Diagnosis</th>
             <th>Prescriber</th>
             <th>Dispenser</th>
@@ -828,6 +830,8 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ t.company }}</td>
             <td>{{ t.position }}</td>
             <td>{{ t.age_group }}</td>
+            <td>{{ t.gender }}</td>
+            <td>{{ t.sick_leave_days }}</td>
             <td>{{ t.diagnosis }}</td>
             <td>{{ t.prescriber }}</td>
             <td>{{ t.dispenser }}</td>
@@ -835,7 +839,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="11">No dispense transactions in this period.</td></tr>
+        <tr><td colspan="13">No dispense transactions in this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -976,8 +980,8 @@ def dispense():
                 gender = request.form['gender']
                 sick_leave_days = int(request.form['sick_leave_days'])
 
-                med_names = [name.strip() for name in request.form.getlist('med_names') if name.strip()]
-                quantities_str = request.form.getlist('quantities')
+                med_names = [name.strip() for name in request.form.getlist('med_names[]') if name.strip()]
+                quantities_str = request.form.getlist('quantities[]')
                 quantities = []
                 for q_str in quantities_str:
                     try:
