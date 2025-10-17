@@ -195,6 +195,13 @@ CSS_STYLE = """
         background-color: #f8d7da;
         color: #721c24;
     }
+    .summary {
+        background-color: #e9ecef;
+        padding: 10px;
+        border-radius: 4px;
+        margin-bottom: 20px;
+        font-weight: bold;
+    }
     @media (max-width: 600px) {
         body {
             padding: 10px;
@@ -873,6 +880,9 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 </table>
 {% elif report_type == 'dispense_list' and dispense_list %}
 <h2>Dispense List for {{ start_date }} to {{ end_date }}</h2>
+<div class="summary">
+    Total patients served: {{ unique_patients }}
+</div>
 <table>
     <thead>
         <tr>
@@ -1241,6 +1251,7 @@ def reports():
         receive_list = []
         stock_data = []
         expiry_data = []
+        unique_patients = 0
         report_type = None
         start_date = None
         end_date = None
@@ -1323,6 +1334,7 @@ def reports():
                         'type': 'dispense',
                         'timestamp': {'$gte': start_dt, '$lte': end_dt}
                     }).sort('timestamp', 1))
+                    unique_patients = len(set(t['patient'] for t in dispense_list))
                 elif report_type == 'receive_list':
                     receive_list = list(transactions.find({
                         'type': 'receive',
@@ -1354,6 +1366,7 @@ def reports():
                     receive_list=[],
                     stock_data=[],
                     expiry_data=[],
+                    unique_patients=0,
                     start_date=None,
                     end_date=None,
                     close_to_expire_days=close_to_expire_days
@@ -1367,6 +1380,7 @@ def reports():
             receive_list=receive_list,
             stock_data=stock_data,
             expiry_data=expiry_data,
+            unique_patients=unique_patients,
             start_date=start_date,
             end_date=end_date,
             close_to_expire_days=close_to_expire_days,
@@ -1383,6 +1397,7 @@ def reports():
             receive_list=[],
             stock_data=[],
             expiry_data=[],
+            unique_patients=0,
             start_date=None,
             end_date=None,
             close_to_expire_days=close_to_expire_days
