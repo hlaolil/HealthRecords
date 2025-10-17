@@ -8,8 +8,8 @@ app = Flask(__name__)
 
 # MongoDB connection function (lazy initialization for fork-safety)
 def get_mongo_client():
-    mongouri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
-    return MongoClient(mongouri, serverSelectionTimeoutMS=5000)
+    monguri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
+    return MongoClient(monguri, serverSelectionTimeoutMS=5000)
 
 # Navigation links
 NAV_LINKS = """
@@ -159,6 +159,18 @@ CSS_STYLE = """
     }
     table tr:hover {
         background-color: #e0e7f5; /* subtle blue hover */
+    }
+    .out-of-stock, .expired {
+        background-color: #f8d7da !important;
+        color: #721c24 !important;
+    }
+    .close-to-expire {
+        background-color: #fff3cd !important;
+        color: #856404 !important;
+    }
+    .normal {
+        background-color: inherit !important;
+        color: inherit !important;
     }
     .message {
         padding: 10px;
@@ -763,7 +775,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     </thead>
     <tbody>
     {% for med in stock_data %}
-        <tr>
+        <tr class="{{ med.status }}">
             <td>{{ med.name }}</td>
             <td>{{ med.balance }}</td>
             <td>{{ med.expiry_date }}</td>
@@ -901,7 +913,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     </thead>
     <tbody>
     {% for med in stock_data %}
-        <tr>
+        <tr class="{{ med.status }}">
             <td>{{ med.name }}</td>
             <td>{{ med.balance }}</td>
             <td>{{ med.expiry_date }}</td>
@@ -936,7 +948,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     </thead>
     <tbody>
     {% for med in expiry_data %}
-        <tr>
+        <tr class="{{ med.status }}">
             <td>{{ med.name }}</td>
             <td>{{ med.balance }}</td>
             <td>{{ med.expiry_date }}</td>
@@ -1183,7 +1195,7 @@ def reports():
         report_type = None
         start_date = None
         end_date = None
-        close_to_expire_days = None
+        close_to_expire_days = 30
 
         if request.method == 'POST':
             try:
@@ -1198,8 +1210,22 @@ def reports():
 
                 if report_type == 'stock_on_hand':
                     stock_data = list(medications.find({}, {'_id': 0}).sort('name', 1))
+                    today = datetime.utcnow().date()
+                    threshold_date = today + timedelta(days=30)
+                    for med in stock_data:
+                        expiry_dt = datetime.strptime(med['expiry_date'], '%Y-%m-%d').date()
+                        if med['balance'] == 0:
+                            med['status'] = 'out-of-stock'
+                        elif expiry_dt < today:
+                            med['status'] = 'expired'
+                        elif expiry_dt <= threshold_date:
+                            med['status'] = 'close-to-expire'
+                        else:
+                            med['status'] = 'normal'
                 elif report_type == 'out_of_stock':
                     stock_data = list(medications.find({'balance': 0}, {'_id': 0}).sort('name', 1))
+                    for med in stock_data:
+                        med['status'] = 'out-of-stock'
                 elif report_type == 'inventory':
                     meds = list(medications.find({}, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1))
                     for med in meds:
@@ -1253,9 +1279,11 @@ def reports():
                         expiry_dt = datetime.strptime(med['expiry_date'], '%Y-%m-%d').date()
                         if expiry_dt < today:
                             med['expiry_status'] = 'Expired'
+                            med['status'] = 'expired'
                             expiry_data.append(med)
                         elif expiry_dt <= threshold_date:
                             med['expiry_status'] = 'Close to Expire'
+                            med['status'] = 'close-to-expire'
                             expiry_data.append(med)
             except ValueError as e:
                 return render_template_string(
@@ -1270,7 +1298,7 @@ def reports():
                     expiry_data=[],
                     start_date=None,
                     end_date=None,
-                    close_to_expire_days=None
+                    close_to_expire_days=close_to_expire_days
                 )
 
         return render_template_string(
@@ -1299,7 +1327,7 @@ def reports():
             expiry_data=[],
             start_date=None,
             end_date=None,
-            close_to_expire_days=None
+            close_to_expire_days=close_to_expire_days
         ), 500
     finally:
         client.close()
