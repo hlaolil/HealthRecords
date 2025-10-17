@@ -41,10 +41,6 @@ CSS_STYLE = """
         color: #343a40;
         margin-top: 30px;
     }
-    h3 {
-        color: #495057;
-        margin-top: 10px;
-    }
     .nav-links {
         text-align: center;
         margin-bottom: 20px;
@@ -877,7 +873,6 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 </table>
 {% elif report_type == 'dispense_list' and dispense_list %}
 <h2>Dispense List for {{ start_date }} to {{ end_date }}</h2>
-<h3>Total Patients Served: {{ total_patients }}</h3>
 <table>
     <thead>
         <tr>
@@ -918,6 +913,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     {% endfor %}
     </tbody>
 </table>
+<p><strong>Total Patients Served: {{ unique_patients }}</strong></p>
 {% elif report_type == 'receive_list' and receive_list %}
 <h2>Receive List for {{ start_date }} to {{ end_date }}</h2>
 <table>
@@ -1250,7 +1246,7 @@ def reports():
         start_date = None
         end_date = None
         close_to_expire_days = 30
-        total_patients = 0
+        unique_patients = 0
 
         if request.method == 'POST':
             try:
@@ -1329,7 +1325,7 @@ def reports():
                         'type': 'dispense',
                         'timestamp': {'$gte': start_dt, '$lte': end_dt}
                     }).sort('timestamp', 1))
-                    total_patients = len(set(t['patient'] for t in dispense_list)) if dispense_list else 0
+                    unique_patients = len(set(t['patient'] for t in dispense_list))
                 elif report_type == 'receive_list':
                     receive_list = list(transactions.find({
                         'type': 'receive',
@@ -1364,7 +1360,7 @@ def reports():
                     start_date=None,
                     end_date=None,
                     close_to_expire_days=close_to_expire_days,
-                    total_patients=0
+                    unique_patients=0
                 )
 
         return render_template_string(
@@ -1378,7 +1374,7 @@ def reports():
             start_date=start_date,
             end_date=end_date,
             close_to_expire_days=close_to_expire_days,
-            total_patients=total_patients,
+            unique_patients=unique_patients,
             nav_links=NAV_LINKS
         )
     except ServerSelectionTimeoutError:
@@ -1395,7 +1391,7 @@ def reports():
             start_date=None,
             end_date=None,
             close_to_expire_days=close_to_expire_days,
-            total_patients=0
+            unique_patients=0
         ), 500
     finally:
         client.close()
