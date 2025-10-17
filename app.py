@@ -82,12 +82,12 @@ CSS_STYLE = """
         gap: 15px;
         margin-bottom: 20px;
     }
-    .med-section {
+    .med-section, .diag-section {
         margin-bottom: 20px;
     }
-    .med-row {
+    .med-row, .diag-row {
         display: grid;
-        grid-template-columns: 1fr 1fr auto;
+        grid-template-columns: 1fr auto;
         gap: 10px;
         margin-bottom: 10px;
         padding: 10px;
@@ -95,12 +95,12 @@ CSS_STYLE = """
         border-radius: 4px;
         align-items: end;
     }
-    .med-row label {
+    .med-row label, .diag-row label {
         display: block;
         margin: 0 0 5px;
         font-weight: bold;
     }
-    .med-row input {
+    .med-row input, .diag-row input {
         width: 100%;
         padding: 8px;
         border: 1px solid #ced4da;
@@ -197,7 +197,7 @@ CSS_STYLE = """
         .common-section {
             grid-template-columns: 1fr; /* Single column on mobile */
         }
-        .med-row {
+        .med-row, .diag-row {
             grid-template-columns: 1fr;
         }
         table th, table td {
@@ -209,7 +209,7 @@ CSS_STYLE = """
 """
 
 
-# ✅ Updated Dispense Template with multiple medications support
+# ✅ Updated Dispense Template with multiple medications and diagnoses support
 DISPENSE_TEMPLATE = CSS_STYLE + """
 <h1>Dispensing</h1>
 {{ nav_links|safe }}
@@ -349,11 +349,6 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         </div>
 
         <div>
-            <label>Diagnosis:</label>
-            <input name="diagnosis" type="text" required>
-        </div>
-
-        <div>
             <label>Prescriber (Doctor):</label>
             <select name="prescriber" required>
                 <option value="">-- Select Doctor --</option>
@@ -387,6 +382,22 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <label>Date:</label>
             <input name="date" type="date" required>
         </div>
+    </div>
+
+    <div class="diag-section">
+        <h3>Diagnoses (up to 3)</h3>
+        <div id="diagnoses">
+            <div class="diag-row">
+                <div>
+                    <label>Diagnosis:</label>
+                    <input name="diagnoses[]" type="text" class="diag-input" required>
+                </div>
+                <div>
+                    <button type="button" onclick="removeDiagRow(this)">Remove</button>
+                </div>
+            </div>
+        </div>
+        <button type="button" onclick="addDiagRow()">Add Diagnosis</button>
     </div>
 
     <div class="med-section">
@@ -430,7 +441,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <th>Age Group</th>
             <th>Gender</th>
             <th>Sick Leave (Days)</th>
-            <th>Diagnosis</th>
+            <th>Diagnoses</th>
             <th>Prescriber</th>
             <th>Dispenser</th>
             <th>Date</th>
@@ -448,7 +459,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <td>{{ t.age_group }}</td>
             <td>{{ t.gender }}</td>
             <td>{{ t.sick_leave_days }}</td>
-            <td>{{ t.diagnosis }}</td>
+            <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
             <td>{{ t.prescriber }}</td>
             <td>{{ t.dispenser }}</td>
             <td>{{ t.date }}</td>
@@ -462,6 +473,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 
 <script>
 let medRowCount = 1;
+let diagRowCount = 1;
 
 function addInputListener(input) {
     input.addEventListener('input', async function() {
@@ -516,14 +528,47 @@ function removeRow(btn) {
     medRowCount--;
 }
 
+function addDiagRow() {
+    if (diagRowCount >= 3) {
+        alert('Maximum 3 diagnoses allowed.');
+        return;
+    }
+    diagRowCount++;
+    const container = document.getElementById('diagnoses');
+    const newRow = document.createElement('div');
+    newRow.className = 'diag-row';
+    newRow.innerHTML = `
+        <div>
+            <label>Diagnosis:</label>
+            <input name="diagnoses[]" type="text" class="diag-input">
+        </div>
+        <div>
+            <button type="button" onclick="removeDiagRow(this)">Remove</button>
+        </div>
+    `;
+    container.appendChild(newRow);
+}
+
+function removeDiagRow(btn) {
+    btn.closest('.diag-row').remove();
+    diagRowCount--;
+}
+
 function clearForm() {
     document.querySelector('.common-section').querySelectorAll('input, select').forEach(el => el.value = '');
+    const diagContainer = document.getElementById('diagnoses');
+    while (diagContainer.children.length > 1) {
+        diagContainer.removeChild(diagContainer.lastChild);
+    }
+    const firstDiagRow = diagContainer.firstChild;
+    firstDiagRow.querySelectorAll('input').forEach(el => el.value = '');
+    diagRowCount = 1;
     const medsContainer = document.getElementById('medications');
     while (medsContainer.children.length > 1) {
         medsContainer.removeChild(medsContainer.lastChild);
     }
-    const firstRow = medsContainer.firstChild;
-    firstRow.querySelectorAll('input').forEach(el => el.value = '');
+    const firstMedRow = medsContainer.firstChild;
+    firstMedRow.querySelectorAll('input').forEach(el => el.value = '');
     medRowCount = 1;
     document.getElementById('med_suggestions').innerHTML = '';
 }
@@ -830,7 +875,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <th>Age Group</th>
             <th>Gender</th>
             <th>Sick Leave (Days)</th>
-            <th>Diagnosis</th>
+            <th>Diagnoses</th>
             <th>Prescriber</th>
             <th>Dispenser</th>
             <th>Date</th>
@@ -848,7 +893,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ t.age_group }}</td>
             <td>{{ t.gender }}</td>
             <td>{{ t.sick_leave_days }}</td>
-            <td>{{ t.diagnosis }}</td>
+            <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
             <td>{{ t.prescriber }}</td>
             <td>{{ t.dispenser }}</td>
             <td>{{ t.date }}</td>
@@ -989,64 +1034,67 @@ def dispense():
                 company = request.form['company']
                 position = request.form['position']
                 age_group = request.form['age_group']
-                diagnosis = request.form['diagnosis']
                 prescriber = request.form['prescriber']
                 dispenser = request.form['dispenser']
                 date_str = request.form['date']
                 gender = request.form['gender']
                 sick_leave_days = int(request.form['sick_leave_days'])
 
-                med_names = [name.strip() for name in request.form.getlist('med_names[]') if name.strip()]
-                quantities_str = request.form.getlist('quantities[]')
-                quantities = []
-                for q_str in quantities_str:
-                    try:
-                        qty = int(q_str)
-                        if qty > 0:
-                            quantities.append(qty)
-                    except ValueError:
-                        pass
-
-                if len(med_names) != len(quantities) or not med_names:
-                    message = 'Please provide at least one valid medication and quantity.'
+                diagnoses = [d.strip() for d in request.form.getlist('diagnoses[]') if d.strip()]
+                if not diagnoses:
+                    message = 'Please provide at least one diagnosis.'
                 else:
-                    success = True
-                    error_msgs = []
-                    dispensed_meds = []
-                    for med_name, quantity in zip(med_names, quantities):
-                        med = medications.find_one({'name': med_name})
-                        if not med:
-                            error_msgs.append(f'Medication "{med_name}" not found.')
-                            success = False
-                            continue
-                        elif med['balance'] < quantity:
-                            error_msgs.append(f'Insufficient stock for "{med_name}".')
-                            success = False
-                            continue
-                        else:
-                            medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
-                            transactions.insert_one({
-                                'type': 'dispense',
-                                'patient': patient,
-                                'company': company,
-                                'position': position,
-                                'age_group': age_group,
-                                'gender': gender,
-                                'sick_leave_days': sick_leave_days,
-                                'diagnosis': diagnosis,
-                                'prescriber': prescriber,
-                                'dispenser': dispenser,
-                                'date': date_str,
-                                'med_name': med_name,
-                                'quantity': quantity,
-                                'timestamp': datetime.utcnow()
-                            })
-                            dispensed_meds.append(med_name)
+                    med_names = [name.strip() for name in request.form.getlist('med_names[]') if name.strip()]
+                    quantities_str = request.form.getlist('quantities[]')
+                    quantities = []
+                    for q_str in quantities_str:
+                        try:
+                            qty = int(q_str)
+                            if qty > 0:
+                                quantities.append(qty)
+                        except ValueError:
+                            pass
 
-                    if success and dispensed_meds:
-                        message = f'Dispensed successfully: {", ".join(dispensed_meds)}'
+                    if len(med_names) != len(quantities) or not med_names:
+                        message = 'Please provide at least one valid medication and quantity.'
                     else:
-                        message = '; '.join(error_msgs) if error_msgs else 'No medications dispensed.'
+                        success = True
+                        error_msgs = []
+                        dispensed_meds = []
+                        for med_name, quantity in zip(med_names, quantities):
+                            med = medications.find_one({'name': med_name})
+                            if not med:
+                                error_msgs.append(f'Medication "{med_name}" not found.')
+                                success = False
+                                continue
+                            elif med['balance'] < quantity:
+                                error_msgs.append(f'Insufficient stock for "{med_name}".')
+                                success = False
+                                continue
+                            else:
+                                medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
+                                transactions.insert_one({
+                                    'type': 'dispense',
+                                    'patient': patient,
+                                    'company': company,
+                                    'position': position,
+                                    'age_group': age_group,
+                                    'gender': gender,
+                                    'sick_leave_days': sick_leave_days,
+                                    'diagnoses': diagnoses,
+                                    'prescriber': prescriber,
+                                    'dispenser': dispenser,
+                                    'date': date_str,
+                                    'med_name': med_name,
+                                    'quantity': quantity,
+                                    'timestamp': datetime.utcnow()
+                                })
+                                dispensed_meds.append(med_name)
+
+                        if success and dispensed_meds:
+                            message = f'Dispensed successfully: {", ".join(dispensed_meds)}'
+                        else:
+                            message = '; '.join(error_msgs) if error_msgs else 'No medications dispensed.'
 
                 tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
                 return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
