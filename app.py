@@ -857,6 +857,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <th>Dispensed</th>
             <th>Received</th>
             <th>Current Balance</th>
+            <th>Amount to Order</th>
         </tr>
     </thead>
     <tbody>
@@ -867,9 +868,10 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ row.dispensed }}</td>
             <td>{{ row.received }}</td>
             <td>{{ row.current_balance }}</td>
+            <td>{{ row.amount_to_order }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="5">No data for this period.</td></tr>
+        <tr><td colspan="6">No data for this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -1287,6 +1289,9 @@ def reports():
                         med['status'] = 'out-of-stock'
                 elif report_type == 'inventory':
                     meds = list(medications.find({}, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1))
+                    start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+                    end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+                    days_in_period = (end_date_obj - start_date_obj).days + 1
                     for med in meds:
                         med_name = med['name']
                         pre_transactions = transactions.find({
@@ -1312,12 +1317,18 @@ def reports():
                             elif tx['type'] == 'receive':
                                 received += tx['quantity']
 
+                        average_daily = dispensed / days_in_period if days_in_period > 0 else 0
+                        average_monthly = average_daily * 30
+                        lead_time_stock = average_daily * 14
+                        amount_to_order = max(0, average_monthly - med['balance'] + lead_time_stock)
+
                         report_data.append({
                             'med_name': med_name,
                             'beginning_balance': max(0, beginning_balance),
                             'dispensed': dispensed,
                             'received': received,
-                            'current_balance': med['balance']
+                            'current_balance': med['balance'],
+                            'amount_to_order': int(amount_to_order) if amount_to_order.is_integer() else round(amount_to_order, 2)
                         })
                 elif report_type == 'dispense_list':
                     dispense_list = list(transactions.find({
