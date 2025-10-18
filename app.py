@@ -702,6 +702,14 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
             <input name="expiry_date" type="date" required>
         </div>
         <div>
+            <label>Schedule:</label>
+            <select name="schedule" required>
+                <option value="">-- Select Schedule --</option>
+                <option value="controlled">Controlled</option>
+                <option value="not controlled">Not Controlled</option>
+            </select>
+        </div>
+        <div>
             <label>Stock Receiver:</label>
             <input name="stock_receiver" required>
         </div>
@@ -838,6 +846,14 @@ ADD_MED_TEMPLATE = CSS_STYLE + """
         <div>
             <label>Expiry Date (YYYY-MM-DD):</label>
             <input name="expiry_date" type="date" required>
+        </div>
+        <div>
+            <label>Schedule:</label>
+            <select name="schedule" required>
+                <option value="">-- Select Schedule --</option>
+                <option value="controlled">Controlled</option>
+                <option value="not controlled">Not Controlled</option>
+            </select>
         </div>
         <div>
             <label>Stock Receiver:</label>
@@ -1292,6 +1308,7 @@ def receive():
                 batch = request.form['batch']
                 price = float(request.form['price'])
                 expiry_date = request.form['expiry_date']
+                schedule = request.form['schedule']
                 stock_receiver = request.form['stock_receiver']
                 order_number = request.form['order_number']
                 supplier = request.form['supplier']
@@ -1304,6 +1321,7 @@ def receive():
                          'batch': batch,
                          'price': price,
                          'expiry_date': expiry_date,
+                         'schedule': schedule,
                          'stock_receiver': stock_receiver,
                          'order_number': order_number,
                          'supplier': supplier,
@@ -1351,6 +1369,7 @@ def add_medication():
                 batch = request.form['batch']
                 price = float(request.form['price'])
                 expiry_date = request.form['expiry_date']
+                schedule = request.form['schedule']
                 stock_receiver = request.form['stock_receiver']
                 order_number = request.form['order_number']
                 supplier = request.form['supplier']
@@ -1366,6 +1385,7 @@ def add_medication():
                     'batch': batch,
                     'price': price,
                     'expiry_date': expiry_date,
+                    'schedule': schedule,
                     'stock_receiver': stock_receiver,
                     'order_number': order_number,
                     'supplier': supplier,
