@@ -173,9 +173,13 @@ CSS_STYLE = """
     table tr:hover {
         background-color: #e0e7f5; /* subtle blue hover */
     }
-    .out-of-stock, .expired {
+    .expired {
         background-color: #f8d7da !important;
         color: #721c24 !important;
+    }
+    .out-of-stock {
+        background-color: #e3f2fd !important;
+        color: #1976d2 !important;
     }
     .close-to-expire {
         background-color: #fff3cd !important;
