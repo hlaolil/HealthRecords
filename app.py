@@ -1,30 +1,59 @@
 import os
 import re
-from flask import Flask, request, render_template_string, jsonify, redirect, url_for
+import requests
+from flask import Flask, request, render_template_string, jsonify, redirect, url_for, session
+from functools import wraps
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
 from datetime import datetime, timedelta
 from uuid import uuid4
 from collections import defaultdict
+from dotenv import load_dotenv 
+load_dotenv()  # Loads .env into os.environ
 
 app = Flask(__name__)
+app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+
+# GitHub OAuth configuration
+GITHUB_CLIENT_ID = os.getenv('GITHUB_CLIENT_ID')
+GITHUB_CLIENT_SECRET = os.getenv('GITHUB_CLIENT_SECRET')
+GITHUB_CALLBACK_URL = os.getenv('GITHUB_CALLBACK_URL', 'http://localhost:5000/auth/callback')
 
 # MongoDB connection function (lazy initialization for fork-safety)
 def get_mongo_client():
     monguri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
     return MongoClient(monguri, serverSelectionTimeoutMS=5000)
 
-# Navigation links
-NAV_LINKS = """
-<p class="nav-links"><strong>Navigate:</strong>
-    <a href="/dispense">Dispensing</a> |
-    <a href="/receive">Receiving</a> |
-    <a href="/add-medication">Add Medication</a> |
-    <a href="/reports">Reports</a>
-</p>
-"""
+# Login required decorator
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user' not in session:
+            return redirect('/login')
+        return f(*args, **kwargs)
+    return decorated_function
 
-# CSS for all templates
+# Navigation links (updated to include user info and logout)
+def get_nav_links():
+    if 'user' in session:
+        user_name = session['user'].get('name', session['user'].get('login', 'User'))
+        return f"""
+        <p class="nav-links"><strong>Navigate:</strong>
+            <a href="/dispense">Dispensing</a> |
+            <a href="/receive">Receiving</a> |
+            <a href="/add-medication">Add Medication</a> |
+            <a href="/reports">Reports</a> |
+            <span>Welcome, {user_name}! <a href="/logout">Logout</a></span>
+        </p>
+        """
+    else:
+        return """
+        <p class="nav-links"><strong>Navigate:</strong>
+            <a href="/login">Login</a>
+        </p>
+        """
+
+# CSS for all templates (unchanged)
 CSS_STYLE = """
 <style>
     body {
@@ -244,6 +273,15 @@ CSS_STYLE = """
         align-items: end;
         gap: 10px;
     }
+    .login-form {
+        max-width: 400px;
+        margin: 100px auto;
+        padding: 20px;
+        background-color: #fff;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        text-align: center;
+    }
     @media (max-width: 600px) {
         body {
             padding: 10px;
@@ -271,8 +309,7 @@ CSS_STYLE = """
 </style>
 """
 
-
-# ✅ Updated Dispense Template with multiple medications and diagnoses support
+# Updated Dispense Template with dynamic nav
 DISPENSE_TEMPLATE = CSS_STYLE + """
 <h1>Dispensing</h1>
 {{ nav_links|safe }}
@@ -531,6 +568,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <th>Diagnoses</th>
             <th>Prescriber</th>
             <th>Dispenser</th>
+            <th>User</th>
             <th>Date</th>
             <th>Timestamp</th>
         </tr>
@@ -549,11 +587,12 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
             <td>{{ t.prescriber }}</td>
             <td>{{ t.dispenser }}</td>
+            <td>{{ t.user }}</td>
             <td>{{ t.date }}</td>
             <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="13">No dispense transactions.</td></tr>
+        <tr><td colspan="14">No dispense transactions.</td></tr>
         {% endfor %}
     </tbody>
 </table>
@@ -672,6 +711,7 @@ document.addEventListener('DOMContentLoaded', function() {
 {% endif %}
 </script>
 """
+
 RECEIVE_TEMPLATE = CSS_STYLE + """
 <h1>Receiving</h1>{{ nav_links|safe }}
 
@@ -771,6 +811,7 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
             <th>Order Number</th>
             <th>Supplier</th>
             <th>Invoice Number</th>
+            <th>User</th>
             <th>Timestamp</th>
         </tr>
     </thead>
@@ -786,10 +827,11 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
             <td>{{ t.order_number }}</td>
             <td>{{ t.supplier }}</td>
             <td>{{ t.invoice_number }}</td>
+            <td>{{ t.user }}</td>
             <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="10">No receive transactions.</td></tr>
+        <tr><td colspan="11">No receive transactions.</td></tr>
         {% endfor %}
     </tbody>
 </table>
@@ -816,7 +858,7 @@ document.getElementById('med_name').addEventListener('input', async function() {
 </script>
 """
 
-# Add Medication Template
+# Add Medication Template (updated with nav and user column if applicable, but since no tx list, just nav)
 ADD_MED_TEMPLATE = CSS_STYLE + """
 <h1>Add New Medication</h1>
 {{ nav_links|safe }}
@@ -902,8 +944,7 @@ document.getElementById('med_name').addEventListener('input', async function() {
 </script>
 """
 
-
-# Reports Template
+# Reports Template (updated with nav and user column in tables)
 REPORTS_TEMPLATE = CSS_STYLE + """
 <h1>Inventory Reports</h1>
 {{ nav_links|safe }}
@@ -1057,6 +1098,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <th>Diagnoses</th>
             <th>Prescriber</th>
             <th>Dispenser</th>
+            <th>User</th>
             <th>Date</th>
             <th>Timestamp</th>
         </tr>
@@ -1075,11 +1117,12 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
             <td>{{ t.prescriber }}</td>
             <td>{{ t.dispenser }}</td>
+            <td>{{ t.user }}</td>
             <td>{{ t.date }}</td>
             <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="13">No dispense transactions in this period.</td></tr>
+        <tr><td colspan="14">No dispense transactions in this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -1118,6 +1161,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <th>Order Number</th>
             <th>Supplier</th>
             <th>Invoice Number</th>
+            <th>User</th>
             <th>Timestamp</th>
         </tr>
     </thead>
@@ -1133,10 +1177,11 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ t.order_number }}</td>
             <td>{{ t.supplier }}</td>
             <td>{{ t.invoice_number }}</td>
+            <td>{{ t.user }}</td>
             <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="10">No receive transactions in this period.</td></tr>
+        <tr><td colspan="11">No receive transactions in this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -1175,6 +1220,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
                 <th>Balance After</th>
                 <th>Prescriber</th>
                 <th>Issuer/Receiver</th>
+                <th>User</th>
                 <th>Reference/Patient</th>
             </tr>
         </thead>
@@ -1187,6 +1233,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
                 <td>{{ tx.balance_after }}</td>
                 <td>{{ tx.get('prescriber', '') }}</td>
                 <td>{{ tx.get('dispenser', tx.get('stock_receiver', '')) }}</td>
+                <td>{{ tx.get('user', '') }}</td>
                 <td>{{ tx.get('patient', tx.get('order_number', tx.get('supplier', ''))) }}</td>
             </tr>
         {% endfor %}
@@ -1201,12 +1248,83 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 {% endif %}
 """
 
+# Login Template
+LOGIN_TEMPLATE = CSS_STYLE + """
+<h1>Pharmacy App Login</h1>
+<div class="login-form">
+    <h2>Authenticate with GitHub</h2>
+    {% if error %}
+        <p class="message error">{{ error }}</p>
+    {% endif %}
+    <a href="{{ login_url }}"><button style="background-color: #0056b3; color: #fff; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: bold;">Login with GitHub</button></a>
+</div>
+"""
+
 # Routes
 @app.route('/', methods=['GET'])
+@login_required
 def home():
     return redirect('/reports')
 
+@app.route('/login', methods=['GET'])
+def login():
+    if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+        return "GitHub OAuth not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET.", 500
+    login_url = f"https://github.com/login/oauth/authorize?client_id={GITHUB_CLIENT_ID}&scope=user&redirect_uri={GITHUB_CALLBACK_URL}"
+    return render_template_string(LOGIN_TEMPLATE, login_url=login_url, error=session.pop('error', None))
+
+@app.route('/auth/callback')
+def callback():
+    code = request.args.get('code')
+    if not code:
+        session['error'] = 'Authorization failed.'
+        return redirect('/login')
+    
+    # Exchange code for access token
+    token_resp = requests.post(
+        'https://github.com/login/oauth/access_token',
+        params={
+            'client_id': GITHUB_CLIENT_ID,
+            'client_secret': GITHUB_CLIENT_SECRET,
+            'code': code,
+            'redirect_uri': GITHUB_CALLBACK_URL
+        },
+        headers={'Accept': 'application/json'}
+    )
+    if token_resp.status_code != 200:
+        session['error'] = 'Failed to get access token.'
+        return redirect('/login')
+    
+    token_data = token_resp.json()
+    access_token = token_data.get('access_token')
+    if not access_token:
+        session['error'] = 'No access token received.'
+        return redirect('/login')
+    
+    # Get user info
+    user_resp = requests.get(
+        'https://api.github.com/user',
+        headers={'Authorization': f'Bearer {access_token}'}
+    )
+    if user_resp.status_code != 200:
+        session['error'] = 'Failed to fetch user info.'
+        return redirect('/login')
+    
+    user = user_resp.json()
+    session['user'] = {
+        'id': user['id'],
+        'login': user['login'],
+        'name': user['name'] or user['login']
+    }
+    return redirect('/dispense')
+
+@app.route('/logout', methods=['GET'])
+def logout():
+    session.pop('user', None)
+    return redirect('/login')
+
 @app.route('/dispense', methods=['GET', 'POST'])
+@login_required
 def dispense():
     try:
         client = get_mongo_client()
@@ -1218,6 +1336,7 @@ def dispense():
         start_date = request.values.get('start_date')
         end_date = request.values.get('end_date')
         search = request.values.get('search')
+        current_user = session['user']['name']
 
         # Build query for tx_list
         base_query = {'type': 'dispense'}
@@ -1303,6 +1422,7 @@ def dispense():
                                     'diagnoses': diagnoses,
                                     'prescriber': prescriber,
                                     'dispenser': dispenser,
+                                    'user': current_user,
                                     'date': date_str,
                                     'med_name': med_name,
                                     'quantity': quantity,
@@ -1315,17 +1435,18 @@ def dispense():
                         else:
                             message = '; '.join(error_msgs) if error_msgs else 'No medications dispensed.'
 
-                return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message, start_date=start_date, end_date=end_date, search=search)
+                return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-                return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message, start_date=start_date, end_date=end_date, search=search)
-        return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message, start_date=start_date, end_date=end_date, search=search)
+                return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search)
+        return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search)
     except ServerSelectionTimeoutError:
-        return render_template_string(DISPENSE_TEMPLATE, tx_list=[], nav_links=NAV_LINKS, message="Database connection failed. Please try again later.", start_date='', end_date='', search=''), 500
+        return render_template_string(DISPENSE_TEMPLATE, tx_list=[], nav_links=get_nav_links(), message="Database connection failed. Please try again later.", start_date='', end_date='', search=''), 500
     finally:
         client.close()
 
 @app.route('/receive', methods=['GET', 'POST'])
+@login_required
 def receive():
     try:
         client = get_mongo_client()
@@ -1337,6 +1458,7 @@ def receive():
         start_date = request.values.get('start_date')
         end_date = request.values.get('end_date')
         search = request.values.get('search')
+        current_user = session['user']['name']
 
         # Build query for tx_list
         base_query = {'type': 'receive'}
@@ -1401,20 +1523,22 @@ def receive():
                     'order_number': order_number,
                     'supplier': supplier,
                     'invoice_number': invoice_number,
+                    'user': current_user,
                     'timestamp': datetime.utcnow()
                 })
                 message = 'Received successfully!'
-                return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message, start_date=start_date, end_date=end_date, search=search)
+                return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-                return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message, start_date=start_date, end_date=end_date, search=search)
-        return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message, start_date=start_date, end_date=end_date, search=search)
+                return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search)
+        return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search)
     except ServerSelectionTimeoutError:
-        return render_template_string(RECEIVE_TEMPLATE, tx_list=[], nav_links=NAV_LINKS, message="Database connection failed. Please try again later.", start_date='', end_date='', search=''), 500
+        return render_template_string(RECEIVE_TEMPLATE, tx_list=[], nav_links=get_nav_links(), message="Database connection failed. Please try again later.", start_date='', end_date='', search=''), 500
     finally:
         client.close()
 
 @app.route('/add-medication', methods=['GET', 'POST'])
+@login_required
 def add_medication():
     try:
         client = get_mongo_client()
@@ -1422,6 +1546,7 @@ def add_medication():
         medications = db['medications']
         transactions = db['transactions']
         message = None
+        current_user = session['user']['name']
 
         if request.method == 'POST':
             try:
@@ -1438,7 +1563,7 @@ def add_medication():
 
                 if medications.find_one({'name': med_name}):
                     message = f'Medication "{med_name}" already exists. Use Receiving to add stock.'
-                    return render_template_string(ADD_MED_TEMPLATE, nav_links=NAV_LINKS, message=message)
+                    return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
 
                 medications.insert_one({
                     'name': med_name,
@@ -1464,20 +1589,22 @@ def add_medication():
                     'order_number': order_number,
                     'supplier': supplier,
                     'invoice_number': invoice_number,
+                    'user': current_user,
                     'timestamp': datetime.utcnow()
                 })
                 message = 'Medication added successfully!'
-                return render_template_string(ADD_MED_TEMPLATE, nav_links=NAV_LINKS, message=message)
+                return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-                return render_template_string(ADD_MED_TEMPLATE, nav_links=NAV_LINKS, message=message)
-        return render_template_string(ADD_MED_TEMPLATE, nav_links=NAV_LINKS, message=message)
+                return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
+        return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
     except ServerSelectionTimeoutError:
-        return render_template_string(ADD_MED_TEMPLATE, nav_links=NAV_LINKS, message="Database connection failed. Please try again later."), 500
+        return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message="Database connection failed. Please try again later."), 500
     finally:
         client.close()
 
 @app.route('/reports', methods=['GET', 'POST'])
+@login_required
 def reports():
     try:
         client = get_mongo_client()
@@ -1501,7 +1628,7 @@ def reports():
             if not search_str:
                 return True
             search_lower = search_str.lower()
-            check_fields = ['patient', 'med_name', 'company', 'position', 'prescriber', 'dispenser', 'stock_receiver', 'order_number', 'supplier', 'invoice_number', 'batch']
+            check_fields = ['patient', 'med_name', 'company', 'position', 'prescriber', 'dispenser', 'stock_receiver', 'order_number', 'supplier', 'invoice_number', 'batch', 'user']
             for field in check_fields:
                 val = tx.get(field, '')
                 val_str = str(val).lower()
@@ -1751,7 +1878,7 @@ def reports():
             start_date=start_date,
             end_date=end_date,
             total_transactions=total_transactions,
-            nav_links=NAV_LINKS,
+            nav_links=get_nav_links(),
             message=message,
             search=search,
             report_title=report_title
@@ -1759,7 +1886,7 @@ def reports():
     except ServerSelectionTimeoutError:
         return render_template_string(
             REPORTS_TEMPLATE,
-            nav_links=NAV_LINKS,
+            nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
             report_type=None,
             report_data=[],
@@ -1777,6 +1904,7 @@ def reports():
         client.close()
 
 @app.route('/api/medications', methods=['GET'])
+@login_required
 def get_medication_suggestions():
     try:
         client = get_mongo_client()
