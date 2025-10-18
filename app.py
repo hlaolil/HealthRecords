@@ -1,9 +1,11 @@
 import os
-from flask import Flask, request, render_template_string, jsonify, redirect
+import re
+from flask import Flask, request, render_template_string, jsonify, redirect, url_for
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
 from datetime import datetime, timedelta
 from uuid import uuid4
+from collections import defaultdict
 
 app = Flask(__name__)
 
@@ -204,6 +206,44 @@ CSS_STYLE = """
         background-color: #f8d7da;
         color: #721c24;
     }
+    .filter-form {
+        background-color: #fff;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-bottom: 20px;
+    }
+    .filter-section {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 15px;
+        align-items: end;
+    }
+    .filter-section label {
+        display: block;
+        font-weight: bold;
+        margin-bottom: 5px;
+    }
+    .filter-section input {
+        width: 100%;
+        padding: 8px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        box-sizing: border-box;
+    }
+    .filter-section a {
+        color: #0056b3;
+        text-decoration: none;
+        margin-left: 10px;
+    }
+    .filter-section a:hover {
+        text-decoration: underline;
+    }
+    .button-div {
+        display: flex;
+        align-items: end;
+        gap: 10px;
+    }
     @media (max-width: 600px) {
         body {
             padding: 10px;
@@ -223,6 +263,9 @@ CSS_STYLE = """
         table th, table td {
             font-size: 14px;
             padding: 8px;
+        }
+        .filter-section {
+            grid-template-columns: 1fr;
         }
     }
 </style>
@@ -410,7 +453,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <div class="diag-row">
                 <div>
                     <label>Diagnosis:</label>
-                    <input name="diagnoses[]" type="text" class="diag-input" required>
+                    <input name="diagnoses" type="text" class="diag-input" required>
                 </div>
                 <div>
                     <button type="button" onclick="removeDiagRow(this)">Remove</button>
@@ -427,11 +470,11 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <div class="med-row">
                 <div>
                     <label>Medication:</label>
-                    <input name="med_names[]" list="med_suggestions" class="med-input" required>
+                    <input name="med_names" list="med_suggestions" class="med-input" required>
                 </div>
                 <div>
                     <label>Quantity:</label>
-                    <input name="quantities[]" type="number" min="1" required>
+                    <input name="quantities" type="number" min="1" required>
                 </div>
                 <div>
                     <button type="button" onclick="removeRow(this)">Remove</button>
@@ -445,11 +488,35 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         <input type="submit" value="Dispense">
         <button type="button" onclick="clearForm()">Clear Form</button>
     </div>
+
+    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
+    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
+    <input type="hidden" name="search" value="{{ search or '' }}">
 </form>
 
 <hr>
 
 <h3>Dispense Transactions</h3>
+<form method="GET" action="{{ url_for('dispense') }}" class="filter-form">
+    <div class="filter-section">
+        <div>
+            <label>Start Date:</label>
+            <input name="start_date" type="date" value="{{ start_date or '' }}">
+        </div>
+        <div>
+            <label>End Date:</label>
+            <input name="end_date" type="date" value="{{ end_date or '' }}">
+        </div>
+        <div>
+            <label>Search:</label>
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search patient, medication, company...">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Filter">
+            <a href="{{ url_for('dispense') }}">Clear</a>
+        </div>
+    </div>
+</form>
 <table>
     <thead>
         <tr>
@@ -528,11 +595,11 @@ function addRow() {
     newRow.innerHTML = `
         <div>
             <label>Medication:</label>
-            <input name="med_names[]" list="med_suggestions" class="med-input" required>
+            <input name="med_names" list="med_suggestions" class="med-input" required>
         </div>
         <div>
             <label>Quantity:</label>
-            <input name="quantities[]" type="number" min="1" required>
+            <input name="quantities" type="number" min="1" required>
         </div>
         <div>
             <button type="button" onclick="removeRow(this)">Remove</button>
@@ -560,7 +627,7 @@ function addDiagRow() {
     newRow.innerHTML = `
         <div>
             <label>Diagnosis:</label>
-            <input name="diagnoses[]" type="text" class="diag-input">
+            <input name="diagnoses" type="text" class="diag-input">
         </div>
         <div>
             <button type="button" onclick="removeDiagRow(this)">Remove</button>
@@ -636,6 +703,14 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
             <input name="expiry_date" type="date" required>
         </div>
         <div>
+            <label>Schedule:</label>
+            <select name="schedule" required>
+                <option value="">-- Select Schedule --</option>
+                <option value="controlled">Controlled</option>
+                <option value="not controlled">Not Controlled</option>
+            </select>
+        </div>
+        <div>
             <label>Stock Receiver:</label>
             <input name="stock_receiver" required>
         </div>
@@ -657,9 +732,33 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
         <input type="submit" value="Receive">
         <button type="button" onclick="document.querySelector('form').reset();">Clear Form</button>
     </div>
+
+    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
+    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
+    <input type="hidden" name="search" value="{{ search or '' }}">
 </form>
 
 <h2>Receive Transactions</h2>
+<form method="GET" action="{{ url_for('receive') }}" class="filter-form">
+    <div class="filter-section">
+        <div>
+            <label>Start Date:</label>
+            <input name="start_date" type="date" value="{{ start_date or '' }}">
+        </div>
+        <div>
+            <label>End Date:</label>
+            <input name="end_date" type="date" value="{{ end_date or '' }}">
+        </div>
+        <div>
+            <label>Search:</label>
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search medication, batch, supplier...">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Filter">
+            <a href="{{ url_for('receive') }}">Clear</a>
+        </div>
+    </div>
+</form>
 <table>
     <thead>
         <tr>
@@ -750,6 +849,14 @@ ADD_MED_TEMPLATE = CSS_STYLE + """
             <input name="expiry_date" type="date" required>
         </div>
         <div>
+            <label>Schedule:</label>
+            <select name="schedule" required>
+                <option value="">-- Select Schedule --</option>
+                <option value="controlled">Controlled</option>
+                <option value="not controlled">Not Controlled</option>
+            </select>
+        </div>
+        <div>
             <label>Stock Receiver:</label>
             <input name="stock_receiver" required>
         </div>
@@ -806,23 +913,39 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 {% endif %}
 
 <h2>Generate Report</h2>
-<form method="POST" action="/reports">
+<form method="POST" action="{{ url_for('reports') }}">
     <label>Report Type:</label>
     <select name="report_type" required>
         <option value="stock_on_hand">Stock on Hand</option>
+        <option value="expired_list">Expired Drugs List</option>
+        <option value="near_expired_list">Near Expired Drug List</option>
+        <option value="out_of_stock_list">Out of Stock List</option>
         <option value="inventory">Inventory Report</option>
         <option value="dispense_list">Dispense List</option>
         <option value="receive_list">Receive List</option>
+        <option value="controlled_drug_register">Controlled Drug Register</option>
     </select><br>
-    {% if report_type != 'stock_on_hand' %}
-    <label>Start Date (YYYY-MM-DD):</label><input name="start_date" type="date" required><br>
-    <label>End Date (YYYY-MM-DD):</label><input name="end_date" type="date" required><br>
-    {% endif %}
+    <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" type="date"><br>
+    <label>End Date (YYYY-MM-DD, if applicable):</label><input name="end_date" type="date"><br>
+    <label>Search (optional):</label><input name="search" type="text" placeholder="Filter results by relevant fields"><br>
     <input type="submit" value="Generate Report">
 </form>
 
-{% if report_type == 'stock_on_hand' and stock_data %}
-<h2>Stock on Hand</h2>
+{% if report_type in ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list'] and stock_data %}
+<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
+    <input type="hidden" name="report_type" value="{{ report_type }}">
+    <div class="filter-section">
+        <div>
+            <label>Search Medication:</label>
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="Filter by medication name">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Filter">
+            <a href="{{ url_for('reports') }}">Back to Menu</a>
+        </div>
+    </div>
+</form>
+<h2>{{ report_title }}</h2>
 <table>
     <thead>
         <tr>
@@ -843,11 +966,32 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>${{ "%.2f"|format(med.price) }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="5">No medications in stock.</td></tr>
+        <tr><td colspan="5">No medications matching the criteria.</td></tr>
     {% endfor %}
     </tbody>
 </table>
 {% elif report_type == 'inventory' and report_data %}
+<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
+    <input type="hidden" name="report_type" value="inventory">
+    <div class="filter-section">
+        <div>
+            <label>Start Date:</label>
+            <input name="start_date" type="date" value="{{ start_date or '' }}">
+        </div>
+        <div>
+            <label>End Date:</label>
+            <input name="end_date" type="date" value="{{ end_date or '' }}">
+        </div>
+        <div>
+            <label>Search Medication:</label>
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="Filter by medication name">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Refine">
+            <a href="{{ url_for('reports') }}">Back to Menu</a>
+        </div>
+    </div>
+</form>
 <h2>Inventory Report for {{ start_date }} to {{ end_date }}</h2>
 <table>
     <thead>
@@ -876,6 +1020,27 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     </tbody>
 </table>
 {% elif report_type == 'dispense_list' and dispense_list %}
+<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
+    <input type="hidden" name="report_type" value="dispense_list">
+    <div class="filter-section">
+        <div>
+            <label>Start Date:</label>
+            <input name="start_date" type="date" value="{{ start_date or '' }}">
+        </div>
+        <div>
+            <label>End Date:</label>
+            <input name="end_date" type="date" value="{{ end_date or '' }}">
+        </div>
+        <div>
+            <label>Search:</label>
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search patient, medication, company...">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Refine">
+            <a href="{{ url_for('reports') }}">Back to Menu</a>
+        </div>
+    </div>
+</form>
 <h2>Dispense List for {{ start_date }} to {{ end_date }}</h2>
 <h3>Total Transactions: {{ total_transactions }}</h3>
 <table>
@@ -919,6 +1084,27 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     </tbody>
 </table>
 {% elif report_type == 'receive_list' and receive_list %}
+<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
+    <input type="hidden" name="report_type" value="receive_list">
+    <div class="filter-section">
+        <div>
+            <label>Start Date:</label>
+            <input name="start_date" type="date" value="{{ start_date or '' }}">
+        </div>
+        <div>
+            <label>End Date:</label>
+            <input name="end_date" type="date" value="{{ end_date or '' }}">
+        </div>
+        <div>
+            <label>Search:</label>
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search medication, batch, supplier...">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Refine">
+            <a href="{{ url_for('reports') }}">Back to Menu</a>
+        </div>
+    </div>
+</form>
 <h2>Receive List for {{ start_date }} to {{ end_date }}</h2>
 <table>
     <thead>
@@ -954,6 +1140,64 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     {% endfor %}
     </tbody>
 </table>
+{% elif report_type == 'controlled_drug_register' and controlled_register %}
+<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
+    <input type="hidden" name="report_type" value="controlled_drug_register">
+    <div class="filter-section">
+        <div>
+            <label>Start Date:</label>
+            <input name="start_date" type="date" value="{{ start_date or '' }}">
+        </div>
+        <div>
+            <label>End Date:</label>
+            <input name="end_date" type="date" value="{{ end_date or '' }}">
+        </div>
+        <div>
+            <label>Search:</label>
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search transactions by patient, medication, supplier...">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Refine">
+            <a href="{{ url_for('reports') }}">Back to Menu</a>
+        </div>
+    </div>
+</form>
+<h2>Controlled Drug Register for {{ start_date }} to {{ end_date }}</h2>
+{% for reg in controlled_register %}
+    <h3>{{ reg.med_name }} - Beginning Balance: {{ reg.beginning_balance }} | Ending Balance: {{ reg.ending_balance }} | Received: {{ reg.received }} | Dispensed: {{ reg.dispensed }}</h3>
+    {% if reg.transactions %}
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Quantity</th>
+                <th>Balance After</th>
+                <th>Prescriber</th>
+                <th>Issuer/Receiver</th>
+                <th>Reference/Patient</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for tx in reg.transactions %}
+            <tr>
+                <td>{{ tx.get('date', tx.timestamp.strftime('%Y-%m-%d')) }}</td>
+                <td>{{ tx.type }}</td>
+                <td>{{ tx.quantity }}</td>
+                <td>{{ tx.balance_after }}</td>
+                <td>{{ tx.get('prescriber', '') }}</td>
+                <td>{{ tx.get('dispenser', tx.get('stock_receiver', '')) }}</td>
+                <td>{{ tx.get('patient', tx.get('order_number', tx.get('supplier', ''))) }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No transactions in this period.</p>
+    {% endif %}
+{% endfor %}
+{% else %}
+<p>No controlled drugs found or no data for this period.</p>
 {% endif %}
 """
 
@@ -970,7 +1214,36 @@ def dispense():
         medications = db['medications']
         transactions = db['transactions']
         message = None
-        tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
+
+        start_date = request.values.get('start_date')
+        end_date = request.values.get('end_date')
+        search = request.values.get('search')
+
+        # Build query for tx_list
+        base_query = {'type': 'dispense'}
+        date_query = {}
+        if start_date:
+            date_query['$gte'] = datetime.strptime(start_date, '%Y-%m-%d')
+        if end_date:
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
+            date_query['$lte'] = end_dt
+        if date_query:
+            base_query['timestamp'] = date_query
+        if search:
+            or_query = [
+                {'patient': {'$regex': search, '$options': 'i'}},
+                {'med_name': {'$regex': search, '$options': 'i'}},
+                {'company': {'$regex': search, '$options': 'i'}},
+                {'position': {'$regex': search, '$options': 'i'}},
+                {'age_group': {'$regex': search, '$options': 'i'}},
+                {'gender': {'$regex': search, '$options': 'i'}},
+                {'prescriber': {'$regex': search, '$options': 'i'}},
+                {'dispenser': {'$regex': search, '$options': 'i'}},
+                {'date': {'$regex': search, '$options': 'i'}},
+                {'diagnoses.0': {'$regex': search, '$options': 'i'}},
+            ]
+            base_query['$or'] = or_query
+        tx_list = list(transactions.find(base_query).sort('timestamp', -1))
 
         if request.method == 'POST':
             try:
@@ -984,12 +1257,12 @@ def dispense():
                 gender = request.form['gender']
                 sick_leave_days = int(request.form['sick_leave_days'])
 
-                diagnoses = [d.strip() for d in request.form.getlist('diagnoses[]') if d.strip()]
+                diagnoses = [d.strip() for d in request.form.getlist('diagnoses') if d.strip()]
                 if not diagnoses:
                     message = 'Please provide at least one diagnosis.'
                 else:
-                    med_names = [name.strip() for name in request.form.getlist('med_names[]') if name.strip()]
-                    quantities_str = request.form.getlist('quantities[]')
+                    med_names = [name.strip() for name in request.form.getlist('med_names') if name.strip()]
+                    quantities_str = request.form.getlist('quantities')
                     quantities = []
                     for q_str in quantities_str:
                         try:
@@ -1012,7 +1285,7 @@ def dispense():
                                 error_msgs.append(f'Medication "{med_name}" not found.')
                                 success = False
                                 continue
-                            elif med['balance'] < quantity:
+                            elif med.get('balance', 0) < quantity:
                                 error_msgs.append(f'Insufficient stock for "{med_name}".')
                                 success = False
                                 continue
@@ -1042,14 +1315,13 @@ def dispense():
                         else:
                             message = '; '.join(error_msgs) if error_msgs else 'No medications dispensed.'
 
-                tx_list = list(transactions.find({'type': 'dispense'}).sort('timestamp', -1))
-                return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
+                return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message, start_date=start_date, end_date=end_date, search=search)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-                return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
-        return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
+                return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message, start_date=start_date, end_date=end_date, search=search)
+        return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message, start_date=start_date, end_date=end_date, search=search)
     except ServerSelectionTimeoutError:
-        return render_template_string(DISPENSE_TEMPLATE, tx_list=[], nav_links=NAV_LINKS, message="Database connection failed. Please try again later."), 500
+        return render_template_string(DISPENSE_TEMPLATE, tx_list=[], nav_links=NAV_LINKS, message="Database connection failed. Please try again later.", start_date='', end_date='', search=''), 500
     finally:
         client.close()
 
@@ -1061,7 +1333,33 @@ def receive():
         medications = db['medications']
         transactions = db['transactions']
         message = None
-        tx_list = list(transactions.find({'type': 'receive'}).sort('timestamp', -1))
+
+        start_date = request.values.get('start_date')
+        end_date = request.values.get('end_date')
+        search = request.values.get('search')
+
+        # Build query for tx_list
+        base_query = {'type': 'receive'}
+        date_query = {}
+        if start_date:
+            date_query['$gte'] = datetime.strptime(start_date, '%Y-%m-%d')
+        if end_date:
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
+            date_query['$lte'] = end_dt
+        if date_query:
+            base_query['timestamp'] = date_query
+        if search:
+            or_query = [
+                {'med_name': {'$regex': search, '$options': 'i'}},
+                {'batch': {'$regex': search, '$options': 'i'}},
+                {'supplier': {'$regex': search, '$options': 'i'}},
+                {'stock_receiver': {'$regex': search, '$options': 'i'}},
+                {'order_number': {'$regex': search, '$options': 'i'}},
+                {'invoice_number': {'$regex': search, '$options': 'i'}},
+                {'expiry_date': {'$regex': search, '$options': 'i'}},
+            ]
+            base_query['$or'] = or_query
+        tx_list = list(transactions.find(base_query).sort('timestamp', -1))
 
         if request.method == 'POST':
             try:
@@ -1070,6 +1368,7 @@ def receive():
                 batch = request.form['batch']
                 price = float(request.form['price'])
                 expiry_date = request.form['expiry_date']
+                schedule = request.form['schedule']
                 stock_receiver = request.form['stock_receiver']
                 order_number = request.form['order_number']
                 supplier = request.form['supplier']
@@ -1082,6 +1381,7 @@ def receive():
                          'batch': batch,
                          'price': price,
                          'expiry_date': expiry_date,
+                         'schedule': schedule,
                          'stock_receiver': stock_receiver,
                          'order_number': order_number,
                          'supplier': supplier,
@@ -1096,6 +1396,7 @@ def receive():
                     'batch': batch,
                     'price': price,
                     'expiry_date': expiry_date,
+                    'schedule': schedule,
                     'stock_receiver': stock_receiver,
                     'order_number': order_number,
                     'supplier': supplier,
@@ -1103,14 +1404,13 @@ def receive():
                     'timestamp': datetime.utcnow()
                 })
                 message = 'Received successfully!'
-                tx_list = list(transactions.find({'type': 'receive'}).sort('timestamp', -1))
-                return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
+                return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message, start_date=start_date, end_date=end_date, search=search)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-                return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
-        return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message)
+                return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message, start_date=start_date, end_date=end_date, search=search)
+        return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=NAV_LINKS, message=message, start_date=start_date, end_date=end_date, search=search)
     except ServerSelectionTimeoutError:
-        return render_template_string(RECEIVE_TEMPLATE, tx_list=[], nav_links=NAV_LINKS, message="Database connection failed. Please try again later."), 500
+        return render_template_string(RECEIVE_TEMPLATE, tx_list=[], nav_links=NAV_LINKS, message="Database connection failed. Please try again later.", start_date='', end_date='', search=''), 500
     finally:
         client.close()
 
@@ -1130,6 +1430,7 @@ def add_medication():
                 batch = request.form['batch']
                 price = float(request.form['price'])
                 expiry_date = request.form['expiry_date']
+                schedule = request.form['schedule']
                 stock_receiver = request.form['stock_receiver']
                 order_number = request.form['order_number']
                 supplier = request.form['supplier']
@@ -1145,6 +1446,7 @@ def add_medication():
                     'batch': batch,
                     'price': price,
                     'expiry_date': expiry_date,
+                    'schedule': schedule,
                     'stock_receiver': stock_receiver,
                     'order_number': order_number,
                     'supplier': supplier,
@@ -1157,6 +1459,7 @@ def add_medication():
                     'batch': batch,
                     'price': price,
                     'expiry_date': expiry_date,
+                    'schedule': schedule,
                     'stock_receiver': stock_receiver,
                     'order_number': order_number,
                     'supplier': supplier,
@@ -1185,103 +1488,257 @@ def reports():
         dispense_list = []
         receive_list = []
         stock_data = []
+        controlled_register = []
         report_type = None
         start_date = None
         end_date = None
         total_transactions = 0
+        message = None
+        search = None
+        report_title = None
+
+        def matches_search(tx, search_str):
+            if not search_str:
+                return True
+            search_lower = search_str.lower()
+            check_fields = ['patient', 'med_name', 'company', 'position', 'prescriber', 'dispenser', 'stock_receiver', 'order_number', 'supplier', 'invoice_number', 'batch']
+            for field in check_fields:
+                val = tx.get(field, '')
+                val_str = str(val).lower()
+                if search_lower in val_str:
+                    return True
+            # Handle diagnoses
+            diagnoses = tx.get('diagnoses', [])
+            if isinstance(diagnoses, list):
+                diag_str = ' '.join(str(d).lower() for d in diagnoses)
+                if search_lower in diag_str:
+                    return True
+            return False
+
+        stock_report_types = ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list']
 
         if request.method == 'POST':
-            try:
-                report_type = request.form['report_type']
-                if report_type not in ['stock_on_hand']:
-                    start_date = request.form['start_date']
-                    end_date = request.form['end_date']
-                    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-                    end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
+            report_type = request.form.get('report_type')
+            start_date = request.form.get('start_date')
+            end_date = request.form.get('end_date')
+            search = request.form.get('search')
+            if report_type:
+                try:
+                    if report_type in stock_report_types:
+                        # No dates needed
+                        pass
+                    else:
+                        if not start_date or not end_date:
+                            raise ValueError('Start and end dates are required for this report type.')
+                        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
 
-                if report_type == 'stock_on_hand':
-                    stock_data = list(medications.find({}, {'_id': 0}).sort('name', 1))
-                    today = datetime.utcnow().date()
-                    threshold_date = today + timedelta(days=30)
-                    for med in stock_data:
-                        expiry_dt = datetime.strptime(med['expiry_date'], '%Y-%m-%d').date()
-                        if med['balance'] == 0:
-                            med['status'] = 'out-of-stock'
-                        elif expiry_dt < today:
-                            med['status'] = 'expired'
-                        elif expiry_dt <= threshold_date:
-                            med['status'] = 'close-to-expire'
-                        else:
-                            med['status'] = 'normal'
-                elif report_type == 'inventory':
-                    meds = list(medications.find({}, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1))
-                    start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
-                    end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
-                    days_in_period = (end_date_obj - start_date_obj).days + 1
-                    for med in meds:
-                        med_name = med['name']
-                        pre_transactions = transactions.find({
-                            'med_name': med_name,
-                            'timestamp': {'$lt': start_dt}
-                        })
-                        beginning_balance = 0
-                        for tx in pre_transactions:
-                            if tx['type'] == 'receive':
-                                beginning_balance += tx['quantity']
-                            elif tx['type'] == 'dispense':
-                                beginning_balance -= tx['quantity']
+                    # now process the report
+                    if report_type in stock_report_types:
+                        med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
+                        all_meds = list(medications.find(med_filter, {'_id': 0}).sort('name', 1))
+                        today = datetime.now().date()
+                        threshold_date = today + timedelta(days=30)
+                        stock_data = []
+                        for med in all_meds:
+                            if 'expiry_date' not in med:
+                                continue
+                            try:
+                               expiry_dt = med['expiry_date'].date()
 
-                        period_transactions = transactions.find({
-                            'med_name': med_name,
-                            'timestamp': {'$gte': start_dt, '$lte': end_dt}
-                        })
-                        dispensed = 0
-                        received = 0
-                        for tx in period_transactions:
-                            if tx['type'] == 'dispense':
-                                dispensed += tx['quantity']
-                            elif tx['type'] == 'receive':
-                                received += tx['quantity']
+                            except ValueError:
+                                continue
+                            balance = med.get('balance', 0)
+                            if balance == 0:
+                                status = 'out-of-stock'
+                            elif expiry_dt < today:
+                                status = 'expired'
+                            elif expiry_dt <= threshold_date:
+                                status = 'close-to-expire'
+                            else:
+                                status = 'normal'
+                            med_copy = med.copy()
+                            med_copy['status'] = status
+                            stock_data.append(med_copy)
 
-                        average_daily = dispensed / days_in_period if days_in_period > 0 else 0
-                        average_monthly = average_daily * 30
-                        lead_time_stock = average_daily * 14
-                        amount_to_order = max(0, average_monthly - med['balance'] + lead_time_stock)
-
-                        report_data.append({
-                            'med_name': med_name,
-                            'beginning_balance': max(0, beginning_balance),
-                            'dispensed': dispensed,
-                            'received': received,
-                            'current_balance': med['balance'],
-                            'amount_to_order': int(amount_to_order) if amount_to_order.is_integer() else round(amount_to_order, 2)
-                        })
-                elif report_type == 'dispense_list':
-                    dispense_list = list(transactions.find({
-                        'type': 'dispense',
-                        'timestamp': {'$gte': start_dt, '$lte': end_dt}
-                    }).sort('timestamp', 1))
-                    unique_txs = set((t['patient'], t['date'], t['prescriber'], t['dispenser']) for t in dispense_list)
-                    total_transactions = len(unique_txs) if dispense_list else 0
-                elif report_type == 'receive_list':
-                    receive_list = list(transactions.find({
-                        'type': 'receive',
-                        'timestamp': {'$gte': start_dt, '$lte': end_dt}
-                    }).sort('timestamp', 1))
-            except (ValueError, KeyError) as e:
-                return render_template_string(
-                    REPORTS_TEMPLATE,
-                    nav_links=NAV_LINKS,
-                    message=f'Invalid input: {str(e)}',
-                    report_type=None,
-                    report_data=[],
-                    dispense_list=[],
-                    receive_list=[],
-                    stock_data=[],
-                    start_date=None,
-                    end_date=None,
-                    total_transactions=0
-                )
+                        if report_type == 'stock_on_hand':
+                            report_title = 'Stock on Hand'
+                        elif report_type == 'expired_list':
+                            stock_data = [m for m in stock_data if m['status'] == 'expired']
+                            report_title = 'Expired Drugs List'
+                        elif report_type == 'near_expired_list':
+                            stock_data = [m for m in stock_data if m['status'] == 'close-to-expire']
+                            report_title = 'Near Expired Drug List'
+                        elif report_type == 'out_of_stock_list':
+                            stock_data = [m for m in stock_data if m['status'] == 'out-of-stock']
+                            report_title = 'Out of Stock List'
+                    elif report_type == 'inventory':
+                        med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
+                        meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1))
+                        start_date_obj = start_dt.date()
+                        end_date_obj = end_dt.date()
+                        days_in_period = max(1, (end_date_obj - start_date_obj).days + 1)
+                        for med in meds:
+                            med_name = med['name']
+                            pre_transactions = list(transactions.find({
+                                'med_name': med_name,
+                                'timestamp': {'$lt': start_dt}
+                            }))
+                            beginning_balance = 0
+                            for tx in pre_transactions:
+                                qty = tx.get('quantity', 0)
+                                if tx['type'] == 'receive':
+                                    beginning_balance += qty
+                                elif tx['type'] == 'dispense':
+                                    beginning_balance -= qty
+                            period_transactions = list(transactions.find({
+                                'med_name': med_name,
+                                'timestamp': {'$gte': start_dt, '$lte': end_dt}
+                            }))
+                            dispensed = 0
+                            received = 0
+                            for tx in period_transactions:
+                                qty = tx.get('quantity', 0)
+                                if tx['type'] == 'dispense':
+                                    dispensed += qty
+                                elif tx['type'] == 'receive':
+                                    received += qty
+                            average_daily = dispensed / days_in_period
+                            average_monthly = average_daily * 30
+                            lead_time_stock = average_daily * 14
+                            amount_to_order = max(0, average_monthly - med.get('balance', 0) + lead_time_stock)
+                            report_data.append({
+                                'med_name': med_name,
+                                'beginning_balance': max(0, beginning_balance),
+                                'dispensed': dispensed,
+                                'received': received,
+                                'current_balance': med.get('balance', 0),
+                                'amount_to_order': int(amount_to_order) if amount_to_order.is_integer() else round(amount_to_order, 2)
+                            })
+                    elif report_type == 'dispense_list':
+                        base_query = {'type': 'dispense'}
+                        if start_date and end_date:
+                            base_query['timestamp'] = {'$gte': start_dt, '$lte': end_dt}
+                        if search:
+                            or_query = [
+                                {'patient': {'$regex': search, '$options': 'i'}},
+                                {'med_name': {'$regex': search, '$options': 'i'}},
+                                {'company': {'$regex': search, '$options': 'i'}},
+                                {'position': {'$regex': search, '$options': 'i'}},
+                                {'age_group': {'$regex': search, '$options': 'i'}},
+                                {'gender': {'$regex': search, '$options': 'i'}},
+                                {'prescriber': {'$regex': search, '$options': 'i'}},
+                                {'dispenser': {'$regex': search, '$options': 'i'}},
+                                {'date': {'$regex': search, '$options': 'i'}},
+                                {'diagnoses.0': {'$regex': search, '$options': 'i'}},
+                            ]
+                            base_query['$or'] = or_query
+                        dispense_list = list(transactions.find(base_query).sort('timestamp', 1))
+                        unique_txs = set()
+                        for t in dispense_list:
+                            unique_txs.add((
+                                t.get('patient', ''),
+                                t.get('date', ''),
+                                t.get('prescriber', ''),
+                                t.get('dispenser', '')
+                            ))
+                        total_transactions = len(unique_txs)
+                    elif report_type == 'receive_list':
+                        base_query = {'type': 'receive'}
+                        if start_date and end_date:
+                            base_query['timestamp'] = {'$gte': start_dt, '$lte': end_dt}
+                        if search:
+                            or_query = [
+                                {'med_name': {'$regex': search, '$options': 'i'}},
+                                {'batch': {'$regex': search, '$options': 'i'}},
+                                {'supplier': {'$regex': search, '$options': 'i'}},
+                                {'stock_receiver': {'$regex': search, '$options': 'i'}},
+                                {'order_number': {'$regex': search, '$options': 'i'}},
+                                {'invoice_number': {'$regex': search, '$options': 'i'}},
+                                {'expiry_date': {'$regex': search, '$options': 'i'}},
+                            ]
+                            base_query['$or'] = or_query
+                        receive_list = list(transactions.find(base_query).sort('timestamp', 1))
+                    elif report_type == 'controlled_drug_register':
+                        controlled_meds_cursor = medications.find({'schedule': 'controlled'}, {'_id': 0, 'name': 1})
+                        controlled_meds = [m['name'] for m in controlled_meds_cursor]
+                        if controlled_meds:
+                            # Fetch all relevant transactions in period
+                            period_query = {
+                                'med_name': {'$in': controlled_meds},
+                                'type': {'$in': ['receive', 'dispense']},
+                                'timestamp': {'$gte': start_dt, '$lte': end_dt}
+                            }
+                            all_tx = list(transactions.find(period_query).sort('timestamp', 1))
+                            tx_by_med = defaultdict(list)
+                            for tx in all_tx:
+                                tx_by_med[tx['med_name']].append(tx)
+                            for med_name in sorted(controlled_meds):
+                                # Compute beginning balance
+                                pre_tx = list(transactions.find({
+                                    'med_name': med_name,
+                                    'type': {'$in': ['receive', 'dispense']},
+                                    'timestamp': {'$lt': start_dt}
+                                }).sort('timestamp', 1))
+                                beginning_balance = 0
+                                for ptx in pre_tx:
+                                    qty = ptx.get('quantity', 0)
+                                    if ptx['type'] == 'receive':
+                                        beginning_balance += qty
+                                    elif ptx['type'] == 'dispense':
+                                        beginning_balance -= qty
+                                med_txs = tx_by_med[med_name]
+                                received_in_period = sum(tx['quantity'] for tx in med_txs if tx['type'] == 'receive')
+                                dispensed_in_period = sum(tx['quantity'] for tx in med_txs if tx['type'] == 'dispense')
+                                ending_balance = beginning_balance + received_in_period - dispensed_in_period
+                                # Compute running balances
+                                current_balance = beginning_balance
+                                running_entries = []
+                                for tx in med_txs:
+                                    qty = tx['quantity']
+                                    if tx['type'] == 'receive':
+                                        current_balance += qty
+                                    else:
+                                        current_balance -= qty
+                                    tx_copy = tx.copy()
+                                    tx_copy['balance_after'] = current_balance
+                                    running_entries.append(tx_copy)
+                                # Filter transactions
+                                filtered_entries = [e for e in running_entries if matches_search(e, search)]
+                                controlled_register.append({
+                                    'med_name': med_name,
+                                    'beginning_balance': max(0, beginning_balance),
+                                    'ending_balance': max(0, ending_balance),
+                                    'received': received_in_period,
+                                    'dispensed': dispensed_in_period,
+                                    'transactions': filtered_entries
+                                })
+                except ValueError as e:
+                    message = f'Invalid input: {str(e)}'
+                    report_type = None
+                    start_date = None
+                    end_date = None
+                    search = None
+                    report_data = []
+                    dispense_list = []
+                    receive_list = []
+                    stock_data = []
+                    controlled_register = []
+                    total_transactions = 0
+                    report_title = None
+            else:
+                message = 'Please select a report type.'
+                report_type = None
+                start_date = None
+                end_date = None
+                search = None
+                report_data = []
+                dispense_list = []
+                receive_list = []
+                stock_data = []
+                controlled_register = []
+                total_transactions = 0
+                report_title = None
 
         return render_template_string(
             REPORTS_TEMPLATE,
@@ -1290,10 +1747,14 @@ def reports():
             dispense_list=dispense_list,
             receive_list=receive_list,
             stock_data=stock_data,
+            controlled_register=controlled_register,
             start_date=start_date,
             end_date=end_date,
             total_transactions=total_transactions,
-            nav_links=NAV_LINKS
+            nav_links=NAV_LINKS,
+            message=message,
+            search=search,
+            report_title=report_title
         )
     except ServerSelectionTimeoutError:
         return render_template_string(
@@ -1305,9 +1766,12 @@ def reports():
             dispense_list=[],
             receive_list=[],
             stock_data=[],
+            controlled_register=[],
             start_date=None,
             end_date=None,
-            total_transactions=0
+            total_transactions=0,
+            search=None,
+            report_title=None
         ), 500
     finally:
         client.close()
