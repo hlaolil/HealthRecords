@@ -1,4 +1,5 @@
 import os
+import re
 from flask import Flask, request, render_template_string, jsonify, redirect, url_for
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
@@ -451,7 +452,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <div class="diag-row">
                 <div>
                     <label>Diagnosis:</label>
-                    <input name="diagnoses[]" type="text" class="diag-input" required>
+                    <input name="diagnoses" type="text" class="diag-input" required>
                 </div>
                 <div>
                     <button type="button" onclick="removeDiagRow(this)">Remove</button>
@@ -468,11 +469,11 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <div class="med-row">
                 <div>
                     <label>Medication:</label>
-                    <input name="med_names[]" list="med_suggestions" class="med-input" required>
+                    <input name="med_names" list="med_suggestions" class="med-input" required>
                 </div>
                 <div>
                     <label>Quantity:</label>
-                    <input name="quantities[]" type="number" min="1" required>
+                    <input name="quantities" type="number" min="1" required>
                 </div>
                 <div>
                     <button type="button" onclick="removeRow(this)">Remove</button>
@@ -593,11 +594,11 @@ function addRow() {
     newRow.innerHTML = `
         <div>
             <label>Medication:</label>
-            <input name="med_names[]" list="med_suggestions" class="med-input" required>
+            <input name="med_names" list="med_suggestions" class="med-input" required>
         </div>
         <div>
             <label>Quantity:</label>
-            <input name="quantities[]" type="number" min="1" required>
+            <input name="quantities" type="number" min="1" required>
         </div>
         <div>
             <button type="button" onclick="removeRow(this)">Remove</button>
@@ -625,7 +626,7 @@ function addDiagRow() {
     newRow.innerHTML = `
         <div>
             <label>Diagnosis:</label>
-            <input name="diagnoses[]" type="text" class="diag-input">
+            <input name="diagnoses" type="text" class="diag-input">
         </div>
         <div>
             <button type="button" onclick="removeDiagRow(this)">Remove</button>
@@ -899,6 +900,9 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     <label>Report Type:</label>
     <select name="report_type" required>
         <option value="stock_on_hand">Stock on Hand</option>
+        <option value="expired_list">Expired Drugs List</option>
+        <option value="near_expired_list">Near Expired Drug List</option>
+        <option value="out_of_stock_list">Out of Stock List</option>
         <option value="inventory">Inventory Report</option>
         <option value="dispense_list">Dispense List</option>
         <option value="receive_list">Receive List</option>
@@ -909,9 +913,9 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     <input type="submit" value="Generate Report">
 </form>
 
-{% if report_type == 'stock_on_hand' and stock_data %}
+{% if report_type in ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list'] and stock_data %}
 <form method="POST" action="{{ url_for('reports') }}" class="filter-form">
-    <input type="hidden" name="report_type" value="stock_on_hand">
+    <input type="hidden" name="report_type" value="{{ report_type }}">
     <div class="filter-section">
         <div>
             <label>Search Medication:</label>
@@ -923,7 +927,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         </div>
     </div>
 </form>
-<h2>Stock on Hand</h2>
+<h2>{{ report_title }}</h2>
 <table>
     <thead>
         <tr>
@@ -944,7 +948,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>${{ "%.2f"|format(med.price) }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="5">No medications in stock.</td></tr>
+        <tr><td colspan="5">No medications matching the criteria.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -1177,12 +1181,12 @@ def dispense():
                 gender = request.form['gender']
                 sick_leave_days = int(request.form['sick_leave_days'])
 
-                diagnoses = [d.strip() for d in request.form.getlist('diagnoses[]') if d.strip()]
+                diagnoses = [d.strip() for d in request.form.getlist('diagnoses') if d.strip()]
                 if not diagnoses:
                     message = 'Please provide at least one diagnosis.'
                 else:
-                    med_names = [name.strip() for name in request.form.getlist('med_names[]') if name.strip()]
-                    quantities_str = request.form.getlist('quantities[]')
+                    med_names = [name.strip() for name in request.form.getlist('med_names') if name.strip()]
+                    quantities_str = request.form.getlist('quantities')
                     quantities = []
                     for q_str in quantities_str:
                         try:
@@ -1205,7 +1209,7 @@ def dispense():
                                 error_msgs.append(f'Medication "{med_name}" not found.')
                                 success = False
                                 continue
-                            elif med['balance'] < quantity:
+                            elif med.get('balance', 0) < quantity:
                                 error_msgs.append(f'Insufficient stock for "{med_name}".')
                                 success = False
                                 continue
@@ -1408,6 +1412,9 @@ def reports():
         total_transactions = 0
         message = None
         search = None
+        report_title = None
+
+        stock_report_types = ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list']
 
         if request.method == 'POST':
             report_type = request.form.get('report_type')
@@ -1416,37 +1423,55 @@ def reports():
             search = request.form.get('search')
             if report_type:
                 try:
-                    if report_type == 'stock_on_hand':
-                        start_dt = None
-                        end_dt = None
+                    if report_type in stock_report_types:
+                        # No dates needed
+                        pass
                     else:
                         if not start_date or not end_date:
-                            raise ValueError('Start and end dates are required for this report.')
+                            raise ValueError('Start and end dates are required for this report type.')
                         start_dt = datetime.strptime(start_date, '%Y-%m-%d')
                         end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
 
                     # now process the report
-                    if report_type == 'stock_on_hand':
-                        stock_filter = {'name': {'$regex': search, '$options': 'i'}} if search else {}
-                        stock_data = list(medications.find(stock_filter, {'_id': 0}).sort('name', 1))
-                        today = datetime.utcnow().date()
+                    if report_type in stock_report_types:
+                        med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
+                        all_meds = list(medications.find(med_filter, {'_id': 0}).sort('name', 1))
+                        today = datetime.now().date()
                         threshold_date = today + timedelta(days=30)
-                        for med in stock_data:
+                        stock_data = []
+                        for med in all_meds:
+                            if 'expiry_date' not in med:
+                                continue
                             try:
                                 expiry_dt = datetime.strptime(med['expiry_date'], '%Y-%m-%d').date()
                             except ValueError:
-                                expiry_dt = today  # Treat invalid expiry as expired
+                                continue
                             balance = med.get('balance', 0)
                             if balance == 0:
-                                med['status'] = 'out-of-stock'
+                                status = 'out-of-stock'
                             elif expiry_dt < today:
-                                med['status'] = 'expired'
+                                status = 'expired'
                             elif expiry_dt <= threshold_date:
-                                med['status'] = 'close-to-expire'
+                                status = 'close-to-expire'
                             else:
-                                med['status'] = 'normal'
+                                status = 'normal'
+                            med_copy = med.copy()
+                            med_copy['status'] = status
+                            stock_data.append(med_copy)
+
+                        if report_type == 'stock_on_hand':
+                            report_title = 'Stock on Hand'
+                        elif report_type == 'expired_list':
+                            stock_data = [m for m in stock_data if m['status'] == 'expired']
+                            report_title = 'Expired Drugs List'
+                        elif report_type == 'near_expired_list':
+                            stock_data = [m for m in stock_data if m['status'] == 'close-to-expire']
+                            report_title = 'Near Expired Drug List'
+                        elif report_type == 'out_of_stock_list':
+                            stock_data = [m for m in stock_data if m['status'] == 'out-of-stock']
+                            report_title = 'Out of Stock List'
                     elif report_type == 'inventory':
-                        med_filter = {'name': {'$regex': search, '$options': 'i'}} if search else {}
+                        med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
                         meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1))
                         start_date_obj = start_dt.date()
                         end_date_obj = end_dt.date()
@@ -1489,7 +1514,9 @@ def reports():
                                 'amount_to_order': int(amount_to_order) if amount_to_order.is_integer() else round(amount_to_order, 2)
                             })
                     elif report_type == 'dispense_list':
-                        base_query = {'type': 'dispense', 'timestamp': {'$gte': start_dt, '$lte': end_dt}}
+                        base_query = {'type': 'dispense'}
+                        if start_date and end_date:
+                            base_query['timestamp'] = {'$gte': start_dt, '$lte': end_dt}
                         if search:
                             or_query = [
                                 {'patient': {'$regex': search, '$options': 'i'}},
@@ -1515,7 +1542,9 @@ def reports():
                             ))
                         total_transactions = len(unique_txs)
                     elif report_type == 'receive_list':
-                        base_query = {'type': 'receive', 'timestamp': {'$gte': start_dt, '$lte': end_dt}}
+                        base_query = {'type': 'receive'}
+                        if start_date and end_date:
+                            base_query['timestamp'] = {'$gte': start_dt, '$lte': end_dt}
                         if search:
                             or_query = [
                                 {'med_name': {'$regex': search, '$options': 'i'}},
@@ -1528,8 +1557,8 @@ def reports():
                             ]
                             base_query['$or'] = or_query
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1))
-                except Exception as e:
-                    message = f'Error generating report: {str(e)}'
+                except ValueError as e:
+                    message = f'Invalid input: {str(e)}'
                     report_type = None
                     start_date = None
                     end_date = None
@@ -1539,6 +1568,7 @@ def reports():
                     receive_list = []
                     stock_data = []
                     total_transactions = 0
+                    report_title = None
             else:
                 message = 'Please select a report type.'
                 report_type = None
@@ -1550,6 +1580,7 @@ def reports():
                 receive_list = []
                 stock_data = []
                 total_transactions = 0
+                report_title = None
 
         return render_template_string(
             REPORTS_TEMPLATE,
@@ -1563,7 +1594,8 @@ def reports():
             total_transactions=total_transactions,
             nav_links=NAV_LINKS,
             message=message,
-            search=search
+            search=search,
+            report_title=report_title
         )
     except ServerSelectionTimeoutError:
         return render_template_string(
@@ -1578,7 +1610,8 @@ def reports():
             start_date=None,
             end_date=None,
             total_transactions=0,
-            search=None
+            search=None,
+            report_title=None
         ), 500
     finally:
         client.close()
