@@ -5,6 +5,7 @@ from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
 from datetime import datetime, timedelta
 from uuid import uuid4
+from collections import defaultdict
 
 app = Flask(__name__)
 
@@ -922,6 +923,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         <option value="inventory">Inventory Report</option>
         <option value="dispense_list">Dispense List</option>
         <option value="receive_list">Receive List</option>
+        <option value="controlled_drug_register">Controlled Drug Register</option>
     </select><br>
     <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" type="date"><br>
     <label>End Date (YYYY-MM-DD, if applicable):</label><input name="end_date" type="date"><br>
@@ -1138,6 +1140,64 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     {% endfor %}
     </tbody>
 </table>
+{% elif report_type == 'controlled_drug_register' and controlled_register %}
+<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
+    <input type="hidden" name="report_type" value="controlled_drug_register">
+    <div class="filter-section">
+        <div>
+            <label>Start Date:</label>
+            <input name="start_date" type="date" value="{{ start_date or '' }}">
+        </div>
+        <div>
+            <label>End Date:</label>
+            <input name="end_date" type="date" value="{{ end_date or '' }}">
+        </div>
+        <div>
+            <label>Search:</label>
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search transactions by patient, medication, supplier...">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Refine">
+            <a href="{{ url_for('reports') }}">Back to Menu</a>
+        </div>
+    </div>
+</form>
+<h2>Controlled Drug Register for {{ start_date }} to {{ end_date }}</h2>
+{% for reg in controlled_register %}
+    <h3>{{ reg.med_name }} - Beginning Balance: {{ reg.beginning_balance }} | Ending Balance: {{ reg.ending_balance }} | Received: {{ reg.received }} | Dispensed: {{ reg.dispensed }}</h3>
+    {% if reg.transactions %}
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Quantity</th>
+                <th>Balance After</th>
+                <th>Prescriber</th>
+                <th>Issuer/Receiver</th>
+                <th>Reference/Patient</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for tx in reg.transactions %}
+            <tr>
+                <td>{{ tx.get('date', tx.timestamp.strftime('%Y-%m-%d')) }}</td>
+                <td>{{ tx.type }}</td>
+                <td>{{ tx.quantity }}</td>
+                <td>{{ tx.balance_after }}</td>
+                <td>{{ tx.get('prescriber', '') }}</td>
+                <td>{{ tx.get('dispenser', tx.get('stock_receiver', '')) }}</td>
+                <td>{{ tx.get('patient', tx.get('order_number', tx.get('supplier', ''))) }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No transactions in this period.</p>
+    {% endif %}
+{% endfor %}
+{% else %}
+<p>No controlled drugs found or no data for this period.</p>
 {% endif %}
 """
 
@@ -1336,6 +1396,7 @@ def receive():
                     'batch': batch,
                     'price': price,
                     'expiry_date': expiry_date,
+                    'schedule': schedule,
                     'stock_receiver': stock_receiver,
                     'order_number': order_number,
                     'supplier': supplier,
@@ -1398,6 +1459,7 @@ def add_medication():
                     'batch': batch,
                     'price': price,
                     'expiry_date': expiry_date,
+                    'schedule': schedule,
                     'stock_receiver': stock_receiver,
                     'order_number': order_number,
                     'supplier': supplier,
@@ -1426,6 +1488,7 @@ def reports():
         dispense_list = []
         receive_list = []
         stock_data = []
+        controlled_register = []
         report_type = None
         start_date = None
         end_date = None
@@ -1433,6 +1496,24 @@ def reports():
         message = None
         search = None
         report_title = None
+
+        def matches_search(tx, search_str):
+            if not search_str:
+                return True
+            search_lower = search_str.lower()
+            check_fields = ['patient', 'med_name', 'company', 'position', 'prescriber', 'dispenser', 'stock_receiver', 'order_number', 'supplier', 'invoice_number', 'batch']
+            for field in check_fields:
+                val = tx.get(field, '')
+                val_str = str(val).lower()
+                if search_lower in val_str:
+                    return True
+            # Handle diagnoses
+            diagnoses = tx.get('diagnoses', [])
+            if isinstance(diagnoses, list):
+                diag_str = ' '.join(str(d).lower() for d in diagnoses)
+                if search_lower in diag_str:
+                    return True
+            return False
 
         stock_report_types = ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list']
 
@@ -1463,7 +1544,8 @@ def reports():
                             if 'expiry_date' not in med:
                                 continue
                             try:
-                                expiry_dt = datetime.strptime(med['expiry_date'], '%Y-%m-%d').date()
+                               expiry_dt = med['expiry_date'].date()
+
                             except ValueError:
                                 continue
                             balance = med.get('balance', 0)
@@ -1577,6 +1659,60 @@ def reports():
                             ]
                             base_query['$or'] = or_query
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1))
+                    elif report_type == 'controlled_drug_register':
+                        controlled_meds_cursor = medications.find({'schedule': 'controlled'}, {'_id': 0, 'name': 1})
+                        controlled_meds = [m['name'] for m in controlled_meds_cursor]
+                        if controlled_meds:
+                            # Fetch all relevant transactions in period
+                            period_query = {
+                                'med_name': {'$in': controlled_meds},
+                                'type': {'$in': ['receive', 'dispense']},
+                                'timestamp': {'$gte': start_dt, '$lte': end_dt}
+                            }
+                            all_tx = list(transactions.find(period_query).sort('timestamp', 1))
+                            tx_by_med = defaultdict(list)
+                            for tx in all_tx:
+                                tx_by_med[tx['med_name']].append(tx)
+                            for med_name in sorted(controlled_meds):
+                                # Compute beginning balance
+                                pre_tx = list(transactions.find({
+                                    'med_name': med_name,
+                                    'type': {'$in': ['receive', 'dispense']},
+                                    'timestamp': {'$lt': start_dt}
+                                }).sort('timestamp', 1))
+                                beginning_balance = 0
+                                for ptx in pre_tx:
+                                    qty = ptx.get('quantity', 0)
+                                    if ptx['type'] == 'receive':
+                                        beginning_balance += qty
+                                    elif ptx['type'] == 'dispense':
+                                        beginning_balance -= qty
+                                med_txs = tx_by_med[med_name]
+                                received_in_period = sum(tx['quantity'] for tx in med_txs if tx['type'] == 'receive')
+                                dispensed_in_period = sum(tx['quantity'] for tx in med_txs if tx['type'] == 'dispense')
+                                ending_balance = beginning_balance + received_in_period - dispensed_in_period
+                                # Compute running balances
+                                current_balance = beginning_balance
+                                running_entries = []
+                                for tx in med_txs:
+                                    qty = tx['quantity']
+                                    if tx['type'] == 'receive':
+                                        current_balance += qty
+                                    else:
+                                        current_balance -= qty
+                                    tx_copy = tx.copy()
+                                    tx_copy['balance_after'] = current_balance
+                                    running_entries.append(tx_copy)
+                                # Filter transactions
+                                filtered_entries = [e for e in running_entries if matches_search(e, search)]
+                                controlled_register.append({
+                                    'med_name': med_name,
+                                    'beginning_balance': max(0, beginning_balance),
+                                    'ending_balance': max(0, ending_balance),
+                                    'received': received_in_period,
+                                    'dispensed': dispensed_in_period,
+                                    'transactions': filtered_entries
+                                })
                 except ValueError as e:
                     message = f'Invalid input: {str(e)}'
                     report_type = None
@@ -1587,6 +1723,7 @@ def reports():
                     dispense_list = []
                     receive_list = []
                     stock_data = []
+                    controlled_register = []
                     total_transactions = 0
                     report_title = None
             else:
@@ -1599,6 +1736,7 @@ def reports():
                 dispense_list = []
                 receive_list = []
                 stock_data = []
+                controlled_register = []
                 total_transactions = 0
                 report_title = None
 
@@ -1609,6 +1747,7 @@ def reports():
             dispense_list=dispense_list,
             receive_list=receive_list,
             stock_data=stock_data,
+            controlled_register=controlled_register,
             start_date=start_date,
             end_date=end_date,
             total_transactions=total_transactions,
@@ -1627,6 +1766,7 @@ def reports():
             dispense_list=[],
             receive_list=[],
             stock_data=[],
+            controlled_register=[],
             start_date=None,
             end_date=None,
             total_transactions=0,
