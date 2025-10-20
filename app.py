@@ -1745,13 +1745,15 @@ def reports():
                         threshold_date = today + timedelta(days=30)
                         stock_data = []
                         for med in all_meds:
-                            if 'expiry_date' not in med:
+                            expiry_str = med.get('expiry_date')  # Safely get value; None if missing
+                            if not expiry_str:  # Skip if None or empty
                                 continue
                             try:
-                               expiry_dt = datetime.strptime(med['expiry_date'], '%Y-%m-%d').date()
+                                expiry_dt = datetime.strptime(expiry_str, '%Y-%m-%d').date()
+                            except ValueError as e:
+                                app.logger.error(f"Invalid expiry_date format '{expiry_str}' for med {med.get('_id', 'unknown')}: {e}")
+                                continue  # Or set expiry_dt = None and proceed if you want to include the med with unknown expiry
 
-                            except ValueError:
-                                continue
                             balance = med.get('balance', 0)
                             if balance == 0:
                                 status = 'out-of-stock'
@@ -1979,7 +1981,6 @@ def reports():
         ), 500
     finally:
         client.close()
-
 @app.route('/api/medications', methods=['GET'])
 @login_required
 def get_medication_suggestions():
