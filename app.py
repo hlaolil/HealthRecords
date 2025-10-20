@@ -1746,29 +1746,37 @@ def reports():
                         stock_data = []
                         for med in all_meds:
                             expiry_str = med.get('expiry_date')
-                            if not expiry_str:
-                                continue
-                            try:
-                                if 'T' in expiry_str:
-                                    # Full ISO datetime: Extract date part only
-                                    date_part = expiry_str.split('T')[0]
-                                    expiry_dt = datetime.strptime(date_part, '%Y-%m-%d').date()
-                                else:
-                                    # Date-only string
-                                    expiry_dt = datetime.strptime(expiry_str, '%Y-%m-%d').date()
-                            except ValueError as e:
-                                app.logger.warning(f"Invalid expiry_date '{expiry_str}' for med '{med.get('name', 'unknown')}': {e} - Skipping.")
-                                continue
+                            expiry_dt = None
+                            if expiry_str:
+                                try:
+                                    if 'T' in expiry_str:
+                                        # Full ISO datetime: Extract date part only
+                                        date_part = expiry_str.split('T')[0]
+                                        expiry_dt = datetime.strptime(date_part, '%Y-%m-%d').date()
+                                    else:
+                                        # Date-only string
+                                        expiry_dt = datetime.strptime(expiry_str, '%Y-%m-%d').date()
+                                except ValueError as e:
+                                    app.logger.warning(f"Invalid expiry_date '{expiry_str}' for med '{med.get('name', 'unknown')}': {e} - Treating as no expiry.")
+                                    expiry_dt = None
+
+                            # Handle missing or empty batch: set to 'N/A'
+                            batch_val = med.get('batch')
+                            if not batch_val:  # Covers None, empty string, or falsy
+                                med['batch'] = 'N/A'
 
                             balance = med.get('balance', 0)
                             if balance == 0:
                                 status = 'out-of-stock'
-                            elif expiry_dt < today:
-                                status = 'expired'
-                            elif expiry_dt <= threshold_date:
-                                status = 'close-to-expire'
                             else:
-                                status = 'normal'
+                                if expiry_dt is None:
+                                    status = 'normal'  # Include even without expiry
+                                elif expiry_dt < today:
+                                    status = 'expired'
+                                elif expiry_dt <= threshold_date:
+                                    status = 'close-to-expire'
+                                else:
+                                    status = 'normal'
                             med_copy = med.copy()
                             med_copy['status'] = status
                             stock_data.append(med_copy)
