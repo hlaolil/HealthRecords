@@ -19,6 +19,65 @@ GITHUB_CLIENT_ID = os.getenv('GITHUB_CLIENT_ID')
 GITHUB_CLIENT_SECRET = os.getenv('GITHUB_CLIENT_SECRET')
 GITHUB_CALLBACK_URL = os.getenv('GITHUB_CALLBACK_URL', 'http://localhost:5000/auth/callback')
 
+# Diagnosis options
+DIAGNOSES_OPTIONS = [
+    'ARDS', 'Abscess', 'Acne (Moderate to severe)', 'Acute Bronchitis', 'Acute Gastroenteritis (AGE)', 
+    'Acute appendicitis', 'Acute otitis media', 'Acute sinusitis', 'Acute stress disorder', 
+    'Acute tonsilitis /pharyngitis', 'Alcohol intoxication', 'Allergic conjunctivitis', 
+    'Allergic rhinitis', 'Allergic skin reaction (unspecified)', 'Allergies', 'Anaemia', 
+    'Anal fissure', 'Angina', 'Antiphspholipid syndrome', 'Anxiety disorder/ panic disorder', 
+    'Aphthous ulcers/oral lessions', 'Aquagenic pruritus', 'Arthralgia', 'Asthma', 
+    'Awating PCR results', 'Bacterial conjunctivitis', 'Bipolar disorder', 'Boutoner deformity', 
+    'Bowel obstruction', 'Brachial plexus compression', 'Breast lump', 'Bulous skin lessions', 
+    'Burns', 'Bursitis', 'CCF', 'CNS_PNS', 'COPD', 'COVID_19', 'CVS_Immunological', 
+    'Calcaneous spur', 'Candidiasis(oral/esophageal)', 'Cardiac dysrythmia', 'Cardiomegally', 
+    'Cataract', 'Cellulitis', 'Chelazion', 'Chemical conjunctivitis', 'Chemical pneumonitis', 
+    'Chronic Suppurative Otits media (CSOM)', 'Chronic fatique syndrome', 'Chronic sinusitis', 
+    'Circumcission', 'Common Cold', 'Constipation', 'Costochondritis', 'Crush syndrome', 
+    'DVT', 'Dental', 'Dental abscess', 'Dental caries', 'Dental decay', 'Depressive disorder', 
+    'Dermatitis/Eczema', 'Dermatological', 'Diarrhoea', 'Disc Hernia', 'Dislocation', 
+    'Dog bite', 'Dry Eyes', 'Dysentery', 'ENT', 'Ear wax impaction', 'Emphysema', 
+    'Endocrinological', 'Epidermoid cyst', 'Epilepsy / Seizure disorder', 'Epistaxis', 
+    'Eyelid infection', 'Feet corns/calluses', 'Foreign body', 'Foreign body (in soft tissue)', 
+    'Foreign body ear', 'Fractures', 'Fungal infections/Tineas/ Dermatophyte', 
+    'GERD / Esophageal sphincter dysfunction', 'GIT', 'GUT_Urological_Gynae', 
+    'Ganglion cyst', 'Gingivitis', "Golfer's elbow", 'Gout', 'Grief/bereavement', 
+    'HIV', 'HIV -Associated vasculitis', 'HTN', 'HTN/DM', 'Hairy leucoplakia', 
+    'Hallus valgus deformity', 'Head injury (TBI) (mild , moderate, Severe)', 
+    'Headaches (tension, migrane, cluster etc)', 'Hepatitis (alcohol induced, viral etc)', 
+    'Herpes labialis (cold sore)', 'Herpes zoster', 'Hiccups', 'High altitude syndrome', 
+    'Hypercholesterolaemia', 'Hypertriglyceridaemia', 'Hypotension', 'I & D', 
+    'Illio-tibial band syndrome', 'Indigestion', 'Inflamatory bowel disease / IBS', 
+    'Influenza', 'Ingrown', 'Injury', 'Insect bite', 'Insomnia', 
+    'Insufficient sleep syndrome', 'Internal/external haemorrhoids', 'Kaposis Sarcoma', 
+    'LRTI (unspecified)', 'Laryngitis', 'Lightening injury', 'Ligmament (unspecified) sprain', 
+    'Lipoma', 'Loose teeth (unspecified cause)', 'Lower GI bleed (unspecified)', 
+    'Lymphadenitis', 'Mechanical low back pain', 'Medication induced cough(ACE-I etc)', 
+    'Medication side effects', 'Mucus hypersecretion', 'Muscle (unspecified) strain', 
+    'Musculoskeletal', 'Myalgia/muscle tension/ spasm', 'Myocardiac infaction/ ACS', 
+    'Nasal lession/infection', 'Nasal polyp', 'Nausea and Vomiting', 'Negative on AgRDT', 
+    'Neuralgia / neuritis', 'Non specific spinal pain (cervicalgia, thoracalgia, lumbalgia)', 
+    'Obstructive sleep apnea', 'Opthalmological', 'Oral lession(s)', 'Osteoarthritis', 
+    'Otitis externa', 'PICA', 'PJP', 'PUD/gastritis', 'Pancreatitis', 'Papule, pastules', 
+    'Parasthesia', 'Peri-orbital lession (undefined)', 'Perianal abscess', 'Periodontitis', 
+    'Peripheral neuropathy', 'Peripheral vascular disease', 'Pinguecula', 'Planta fascitis', 
+    'Pleural effusion', 'Pleuritic chest pain/pleuritis', 'Pneumonia', 'Polyarthralgia', 
+    'Poor vision', 'Positive on AgRDT', 'Post covid hyperactive airway DX', 
+    'Preseptal cellulitis', 'Psychiatric', 'Psychosomatic Disorder', 'Pterygium', 
+    'Radiculopathy (cervical, thoracic, lumber)', 'Respiratory', 'Rheumatoid arthritis', 
+    'Rheumatological_Ortho', 'Rynaulds phenomenon', 'Scabies', 'Sceptic nasal piercing', 
+    'Sciatica', 'Smoke inhilation injury', 'Spinal abnormality (scoliosis, kyphosis etc)', 
+    'Spondylolisthesis', 'Spondylosis', 'Spondylosis/spondylolisthesis', 'Stye /', 
+    'Surgical', 'Surgical site infection (post ganglion cyst removal)', 'Swan neck deformity', 
+    'Syncope', 'TB (lungs, pleura, meningeal, spine etc)', 'TB Meningitis', 'TIA / CVA', 
+    'Temporal arteritis', 'Tendon injury', 'Tendonitis', 'Tennis elbow', 'Thoracic back pain', 
+    'Tinnitus', 'Toothache (no obvious decay/caries)', 'Torticolis', 'Traumatic conjunctivitis', 
+    'Tumour (mass) undefined', 'Typhoid', 'URTI (Unspecified)', 'Ulcer', 
+    'Upper GI bleed', 'Urticaria', 'Venous insufficiency', 'Viral conjunctivitis', 
+    'Viral rhinitis/ common cold', 'Warts', 'Worm infestation', 'faecal incontinence', 
+    'hordeolum', 'injuries', 'injuries on duty', 'injury (RTA)', 'nail'
+]
+
 # MongoDB connection function (lazy initialization for fork-safety)
 def get_mongo_client():
     monguri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
@@ -309,7 +368,7 @@ CSS_STYLE = """
 </style>
 """
 
-# Updated Dispense Template with dynamic nav
+# Updated Dispense Template with dynamic nav and diagnosis suggestions
 DISPENSE_TEMPLATE = CSS_STYLE + """
 <h1>Dispensing</h1>
 {{ nav_links|safe }}
@@ -486,11 +545,12 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 
     <div class="diag-section">
         <h3>Diagnoses (up to 3)</h3>
+        <datalist id="diag_suggestions"></datalist>
         <div id="diagnoses">
             <div class="diag-row">
                 <div>
                     <label>Diagnosis:</label>
-                    <input name="diagnoses" type="text" class="diag-input" required>
+                    <input name="diagnoses" list="diag_suggestions" type="text" class="diag-input" required>
                 </div>
                 <div>
                     <button type="button" onclick="removeDiagRow(this)">Remove</button>
@@ -601,22 +661,22 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 let medRowCount = 1;
 let diagRowCount = 1;
 
-function addInputListener(input) {
+function addInputListener(input, endpoint) {
     input.addEventListener('input', async function() {
         const query = this.value;
-        const datalist = document.getElementById('med_suggestions');
+        const datalist = document.getElementById(endpoint === '/api/medications' ? 'med_suggestions' : 'diag_suggestions');
         datalist.innerHTML = '';
         if (query.length < 1) return;
 
-        const response = await fetch(`/api/medications?query=${encodeURIComponent(query)}`);
-        const meds = await response.json();
-        if (meds.error) {
-            console.error(meds.error);
+        const response = await fetch(`${endpoint}?query=${encodeURIComponent(query)}`);
+        const suggestions = await response.json();
+        if (suggestions.error) {
+            console.error(suggestions.error);
             return;
         }
-        meds.forEach(med => {
+        suggestions.forEach(sugg => {
             const option = document.createElement('option');
-            option.value = med;
+            option.value = sugg;
             datalist.appendChild(option);
         });
     });
@@ -646,7 +706,7 @@ function addRow() {
     `;
     container.appendChild(newRow);
     const newInput = newRow.querySelector('.med-input');
-    addInputListener(newInput);
+    addInputListener(newInput, '/api/medications');
 }
 
 function removeRow(btn) {
@@ -666,13 +726,15 @@ function addDiagRow() {
     newRow.innerHTML = `
         <div>
             <label>Diagnosis:</label>
-            <input name="diagnoses" type="text" class="diag-input">
+            <input name="diagnoses" list="diag_suggestions" type="text" class="diag-input">
         </div>
         <div>
             <button type="button" onclick="removeDiagRow(this)">Remove</button>
         </div>
     `;
     container.appendChild(newRow);
+    const newInput = newRow.querySelector('.diag-input');
+    addInputListener(newInput, '/api/diagnoses');
 }
 
 function removeDiagRow(btn) {
@@ -697,12 +759,15 @@ function clearForm() {
     firstMedRow.querySelectorAll('input').forEach(el => el.value = '');
     medRowCount = 1;
     document.getElementById('med_suggestions').innerHTML = '';
+    document.getElementById('diag_suggestions').innerHTML = '';
 }
 
 // Initialize listeners for existing inputs
 document.addEventListener('DOMContentLoaded', function() {
-    const existingInputs = document.querySelectorAll('.med-input');
-    existingInputs.forEach(addInputListener);
+    const existingMedInputs = document.querySelectorAll('.med-input');
+    existingMedInputs.forEach(input => addInputListener(input, '/api/medications'));
+    const existingDiagInputs = document.querySelectorAll('.diag-input');
+    existingDiagInputs.forEach(input => addInputListener(input, '/api/diagnoses'));
 });
 
 // Clear form after successful dispense
@@ -1920,6 +1985,13 @@ def get_medication_suggestions():
         return jsonify({'error': 'Database connection failed'}), 500
     finally:
         client.close()
+
+@app.route('/api/diagnoses', methods=['GET'])
+@login_required
+def get_diagnosis_suggestions():
+    query = request.args.get('query', '').lower()
+    matching = [d for d in DIAGNOSES_OPTIONS if query in d.lower()][:10]
+    return jsonify(matching)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
