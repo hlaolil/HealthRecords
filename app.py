@@ -1745,14 +1745,20 @@ def reports():
                         threshold_date = today + timedelta(days=30)
                         stock_data = []
                         for med in all_meds:
-                            expiry_str = med.get('expiry_date')  # Safely get value; None if missing
-                            if not expiry_str:  # Skip if None or empty
+                            expiry_str = med.get('expiry_date')
+                            if not expiry_str:
                                 continue
                             try:
-                                expiry_dt = datetime.strptime(expiry_str, '%Y-%m-%d').date()
+                                if 'T' in expiry_str:
+                                    # Full ISO datetime: Extract date part only
+                                    date_part = expiry_str.split('T')[0]
+                                    expiry_dt = datetime.strptime(date_part, '%Y-%m-%d').date()
+                                else:
+                                    # Date-only string
+                                    expiry_dt = datetime.strptime(expiry_str, '%Y-%m-%d').date()
                             except ValueError as e:
-                                app.logger.error(f"Invalid expiry_date format '{expiry_str}' for med {med.get('_id', 'unknown')}: {e}")
-                                continue  # Or set expiry_dt = None and proceed if you want to include the med with unknown expiry
+                                app.logger.warning(f"Invalid expiry_date '{expiry_str}' for med '{med.get('name', 'unknown')}': {e} - Skipping.")
+                                continue
 
                             balance = med.get('balance', 0)
                             if balance == 0:
@@ -1981,24 +1987,6 @@ def reports():
         ), 500
     finally:
         client.close()
-@app.route('/api/medications', methods=['GET'])
-@login_required
-def get_medication_suggestions():
-    try:
-        client = get_mongo_client()
-        db = client['pharmacy_db']
-        medications = db['medications']
-        query = request.args.get('query', '')
-        meds = list(medications.find(
-            {'name': {'$regex': f'^{query}', '$options': 'i'}},
-            {'_id': 0, 'name': 1}
-        ).sort('name', 1))
-        return jsonify([med['name'] for med in meds])
-    except ServerSelectionTimeoutError:
-        return jsonify({'error': 'Database connection failed'}), 500
-    finally:
-        client.close()
-
 @app.route('/api/diagnoses', methods=['GET'])
 @login_required
 def get_diagnosis_suggestions():
