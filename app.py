@@ -628,20 +628,20 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 <table>
     <thead>
         <tr>
-            <th>Medication</th>
-            <th>Quantity</th>
+            <th>Date</th>
             <th>Patient</th>
             <th>Company</th>
             <th>Position</th>
-            <th>Age Group</th>
             <th>Gender</th>
-            <th>Sick Leave (Days)</th>
+            <th>Age Group</th>
+            <th>Timestamp</th>
+            <th>User</th>
             <th>Diagnoses</th>
             <th>Prescriber</th>
             <th>Dispenser</th>
-            <th>User</th>
-            <th>Date</th>
-            <th>Timestamp</th>
+            <th>Sick Leave (Days)</th>
+            <th>Medication</th>
+            <th>Quantity</th>
         </tr>
     </thead>
     <tbody>
