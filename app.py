@@ -92,7 +92,7 @@ DIAGNOSES_OPTIONS = [
 # MongoDB connection function (lazy initialization for fork-safety)
 def get_mongo_client():
     monguri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
-    return MongoClient(monguri, serverSelectionTimeoutMS=5000)
+    return MongoClient(monguri, serverSelectionTimeoutMS=120000)
 
 # Login required decorator
 def login_required(f):
