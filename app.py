@@ -2105,7 +2105,7 @@ def reports():
                             report_title = 'Out of Stock List'
                     elif report_type == 'inventory':
                         med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
-                        meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1).limit(100))  # Temp limit for testing
+                        meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1).limit(150))  # Temp limit for testing
                         start_date_obj = start_dt.date()
                         end_date_obj = end_dt.date()
                         days_in_period = max(1, (end_date_obj - start_date_obj).days + 1)
