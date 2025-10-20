@@ -398,97 +398,12 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 
         <div>
             <label for="company">Company:</label>
-            <select id="company" name="company" required>
-              <option value="">-- Select Company --</option>
-              <option>BLW</option>
-              <option>BUSY BEE</option>
-              <option>CMS</option>
-              <option>Consulmet</option>
-              <option>Enaex</option>
-              <option>Eminence</option>
-              <option>Government</option>
-              <option>IFS</option>
-              <option>LD</option>
-              <option>LISELO</option>
-              <option>LMPS</option>
-              <option>Mendi</option>
-              <option>MGC</option>
-              <option>MINOPEX</option>
-              <option>NMC</option>
-              <option>Other</option>
-              <option>PLATO</option>
-              <option>Public</option>
-              <option>THOLO</option>
-              <option>TOMRA</option>
-              <option>UL4</option>
-              <option>UNITRANS</option>
-            </select>
+            <input id="company" name="company" list="company_suggestions" type="text" required>
         </div>
 
         <div>
             <label for="position">Position:</label>
-            <select id="position" name="position" required>
-              <option value="">-- Select Position --</option>
-              <option>Administration</option>
-              <option>Artisan</option>
-              <option>Blasting</option>
-              <option>Boiler Maker</option>
-              <option>Chef</option>
-              <option>CI</option>
-              <option>Cleaner</option>
-              <option>Controller</option>
-              <option>Director</option>
-              <option>Drilling</option>
-              <option>Drivers</option>
-              <option>Electricians</option>
-              <option>Emergency Coordinator</option>
-              <option>Environmnet</option>
-              <option>Finance</option>
-              <option>Fitters</option>
-              <option>Food Service Attendant</option>
-              <option>General Worker</option>
-              <option>Geologist</option>
-              <option>Hse</option>
-              <option>Housekeeping</option>
-              <option>IT</option>
-              <option>Intern</option>
-              <option>Kitchen</option>
-              <option>Lab Technologist</option>
-              <option>Maintenance</option>
-              <option>Management</option>
-              <option>Manager</option>
-              <option>Mechanics</option>
-              <option>Medical Doctor</option>
-              <option>Metallurgy</option>
-              <option>Mining</option>
-              <option>Nurse</option>
-              <option>Operator</option>
-              <option>Other</option>
-              <option>PHC</option>
-              <option>Pharmacist</option>
-              <option>Plant Operator</option>
-              <option>Police</option>
-              <option>Procurement</option>
-              <option>Process</option>
-              <option>Production</option>
-              <option>Public</option>
-              <option>Recovery</option>
-              <option>Security</option>
-              <option>Sorting</option>
-              <option>Storekeeper</option>
-              <option>Survey</option>
-              <option>Technician</option>
-              <option>Training</option>
-              <option>Tourist</option>
-              <option>Treatment</option>
-              <option>Tyreman</option>
-              <option>UNITRANS</option>
-              <option>Visitor</option>
-              <option>Water Works</option>
-              <option>Welder</option>
-              <option>Workshop Cleaners</option>
-              <option>X-Ray Technologist</option>
-            </select>
+            <input id="position" name="position" list="position_suggestions" type="text" required>
         </div>
 
         <div>
@@ -599,6 +514,9 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
     <input type="hidden" name="start_date" value="{{ start_date or '' }}">
     <input type="hidden" name="end_date" value="{{ end_date or '' }}">
     <input type="hidden" name="search" value="{{ search or '' }}">
+
+    <datalist id="company_suggestions"></datalist>
+    <datalist id="position_suggestions"></datalist>
 </form>
 
 <hr>
@@ -671,6 +589,95 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 <script>
 let medRowCount = 1;
 let diagRowCount = 1;
+
+// Company options array for autocomplete
+const companyOptions = [
+    "BLW",
+    "BUSY BEE",
+    "CMS",
+    "Consulmet",
+    "Enaex",
+    "Eminence",
+    "Government",
+    "IFS",
+    "LD",
+    "LISELO",
+    "LMPS",
+    "Mendi",
+    "MGC",
+    "MINOPEX",
+    "NMC",
+    "Other",
+    "PLATO",
+    "Public",
+    "THOLO",
+    "TOMRA",
+    "UL4",
+    "UNITRANS"
+];
+
+// Position options array for autocomplete
+const positionOptions = [
+    "Administration",
+    "Artisan",
+    "Blasting",
+    "Boiler Maker",
+    "Chef",
+    "CI",
+    "Cleaner",
+    "Controller",
+    "Director",
+    "Drilling",
+    "Drivers",
+    "Electricians",
+    "Emergency Coordinator",
+    "Environmnet",
+    "Finance",
+    "Fitters",
+    "Food Service Attendant",
+    "General Worker",
+    "Geologist",
+    "Hse",
+    "Housekeeping",
+    "IT",
+    "Intern",
+    "Kitchen",
+    "Lab Technologist",
+    "Maintenance",
+    "Management",
+    "Manager",
+    "Mechanics",
+    "Medical Doctor",
+    "Metallurgy",
+    "Mining",
+    "Nurse",
+    "Operator",
+    "Other",
+    "PHC",
+    "Pharmacist",
+    "Plant Operator",
+    "Police",
+    "Procurement",
+    "Process",
+    "Production",
+    "Public",
+    "Recovery",
+    "Security",
+    "Sorting",
+    "Storekeeper",
+    "Survey",
+    "Technician",
+    "Training",
+    "Tourist",
+    "Treatment",
+    "Tyreman",
+    "UNITRANS",
+    "Visitor",
+    "Water Works",
+    "Welder",
+    "Workshop Cleaners",
+    "X-Ray Technologist"
+];
 
 // Medication options array for autocomplete
 const medicationOptions = [
@@ -933,38 +940,53 @@ const medicationOptions = [
     "Morfine tabs , 10mg"
 ];
 
-function addInputListener(input, isMedication) {
+function addInputListener(input, type) {
     input.addEventListener('input', function() {
         const query = this.value.toLowerCase();
-        const datalist = document.getElementById(isMedication ? 'med_suggestions' : 'diag_suggestions');
+        let datalist, options;
+        switch(type) {
+            case 'company':
+                datalist = document.getElementById('company_suggestions');
+                options = companyOptions;
+                break;
+            case 'position':
+                datalist = document.getElementById('position_suggestions');
+                options = positionOptions;
+                break;
+            case 'medication':
+                datalist = document.getElementById('med_suggestions');
+                options = medicationOptions;
+                break;
+            case 'diagnosis':
+                datalist = document.getElementById('diag_suggestions');
+                // For diagnoses, keep API if needed; here assuming client-side or API
+                fetch(`/api/diagnoses?query=${encodeURIComponent(query)}`)
+                    .then(response => response.json())
+                    .then(suggestions => {
+                        if (suggestions.error) {
+                            console.error(suggestions.error);
+                            return;
+                        }
+                        datalist.innerHTML = '';
+                        suggestions.forEach(sugg => {
+                            const option = document.createElement('option');
+                            option.value = sugg;
+                            datalist.appendChild(option);
+                        });
+                    })
+                    .catch(error => console.error('Error fetching diagnoses:', error));
+                return;
+            default:
+                return;
+        }
         datalist.innerHTML = '';
         if (query.length < 1) return;
-
-        if (isMedication) {
-            // Client-side filtering for medications
-            const filtered = medicationOptions.filter(option => option.toLowerCase().includes(query));
-            filtered.forEach(sugg => {
-                const option = document.createElement('option');
-                option.value = sugg;
-                datalist.appendChild(option);
-            });
-        } else {
-            // Keep API for diagnoses if needed; otherwise, adapt similarly
-            fetch(`/api/diagnoses?query=${encodeURIComponent(query)}`)
-                .then(response => response.json())
-                .then(suggestions => {
-                    if (suggestions.error) {
-                        console.error(suggestions.error);
-                        return;
-                    }
-                    suggestions.forEach(sugg => {
-                        const option = document.createElement('option');
-                        option.value = sugg;
-                        datalist.appendChild(option);
-                    });
-                })
-                .catch(error => console.error('Error fetching diagnoses:', error));
-        }
+        const filtered = options.filter(option => option.toLowerCase().includes(query));
+        filtered.forEach(sugg => {
+            const option = document.createElement('option');
+            option.value = sugg;
+            datalist.appendChild(option);
+        });
     });
 }
 
@@ -992,7 +1014,7 @@ function addRow() {
     `;
     container.appendChild(newRow);
     const newInput = newRow.querySelector('.med-input');
-    addInputListener(newInput, true);  // true for medication
+    addInputListener(newInput, 'medication');
 }
 
 function removeRow(btn) {
@@ -1020,7 +1042,7 @@ function addDiagRow() {
     `;
     container.appendChild(newRow);
     const newInput = newRow.querySelector('.diag-input');
-    addInputListener(newInput, false);  // false for diagnosis
+    addInputListener(newInput, 'diagnosis');
 }
 
 function removeDiagRow(btn) {
@@ -1046,14 +1068,20 @@ function clearForm() {
     medRowCount = 1;
     document.getElementById('med_suggestions').innerHTML = '';
     document.getElementById('diag_suggestions').innerHTML = '';
+    document.getElementById('company_suggestions').innerHTML = '';
+    document.getElementById('position_suggestions').innerHTML = '';
 }
 
 // Initialize listeners for existing inputs
 document.addEventListener('DOMContentLoaded', function() {
+    const companyInput = document.getElementById('company');
+    if (companyInput) addInputListener(companyInput, 'company');
+    const positionInput = document.getElementById('position');
+    if (positionInput) addInputListener(positionInput, 'position');
     const existingMedInputs = document.querySelectorAll('.med-input');
-    existingMedInputs.forEach(input => addInputListener(input, true));
+    existingMedInputs.forEach(input => addInputListener(input, 'medication'));
     const existingDiagInputs = document.querySelectorAll('.diag-input');
-    existingDiagInputs.forEach(input => addInputListener(input, false));
+    existingDiagInputs.forEach(input => addInputListener(input, 'diagnosis'));
 });
 
 // Clear form after successful dispense
