@@ -2046,7 +2046,7 @@ def reports():
                         if not start_date or not end_date:
                             raise ValueError('Start and end dates are required for this report type.')
                         start_dt = datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
-                        end_dt = datetime.strptime(end_date, '%Y-%m-%d', '%Y-%m-%d').replace(tzinfo=timezone.utc) + timedelta(days=1) - timedelta(seconds=1)
+                        end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc) + timedelta(days=1) - timedelta(seconds=1)
 
                     # now process the report
                     if report_type in stock_report_types:
