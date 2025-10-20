@@ -647,20 +647,21 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
     <tbody>
         {% for t in tx_list %}
         <tr>
-            <td>{{ t.med_name }}</td>
-            <td>{{ t.quantity }}</td>
+            <td>{{ t.date }}</td>
             <td>{{ t.patient }}</td>
             <td>{{ t.company }}</td>
-            <td>{{ t.position }}</td>
-            <td>{{ t.age_group }}</td>
-            <td>{{ t.gender }}</td>
-            <td>{{ t.sick_leave_days }}</td>
+             <td>{{ t.position }}</td>
+             <td>{{ t.gender }}</td>
+             <td>{{ t.age_group }}</td>
+            <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            <td>{{ t.user }}</td>
             <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
             <td>{{ t.prescriber }}</td>
             <td>{{ t.dispenser }}</td>
-            <td>{{ t.user }}</td>
-            <td>{{ t.date }}</td>
-            <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            <td>{{ t.sick_leave_days }}</td>
+            <td>{{ t.med_name }}</td>
+            <td>{{ t.quantity }}</td>
+            
         </tr>
         {% else %}
         <tr><td colspan="14">No dispense transactions.</td></tr>
