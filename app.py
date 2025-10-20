@@ -75,7 +75,18 @@ DIAGNOSES_OPTIONS = [
     'Tumour (mass) undefined', 'Typhoid', 'URTI (Unspecified)', 'Ulcer', 
     'Upper GI bleed', 'Urticaria', 'Venous insufficiency', 'Viral conjunctivitis', 
     'Viral rhinitis/ common cold', 'Warts', 'Worm infestation', 'faecal incontinence', 
-    'hordeolum', 'injuries', 'injuries on duty', 'injury (RTA)', 'nail'
+    'hordeolum', 'injuries', 'injuries on duty', 'injury (RTA)', 'nail',
+    'STI (MUS, VDS, Herpes genitalia, syphilis etc)', 'Post HIV exposure', 'Post operative adhessions',
+    'Vaginal candidiasis', 'Cervixitis', 'UTI', 'Pelvic hypertension', 'Dysmenorrhoea', 'PID',
+    'Hormonal imbalance', 'PCOS', 'Ovarian cyst (simple/complex)', 'Pelvic mass (undefined)',
+    'Fibroid uterus', 'Pregnancy', 'Supplementation', 'Normal mentrual period', 'Menorrhagia',
+    'Miscarriage (threatened, incomplete, complete etc)', 'Secondary ammenorrhoea(unspecified)',
+    'Post menopausal syndrome', 'Post menauposal bleeding', 'Dysfunctional uterine beeding',
+    'Inhibited sexual desire (female)', 'Erectile dysfunction (male)', 'Epididimorchitis',
+    'Urine Incontinence', 'Hydrocele', 'Acute urinary retension', 'Urinary catheter blockage',
+    'BPH', 'Acute kidney injury (unspecified)', 'Chronic kidney disease (CKD)',
+    'Drug induced kidney injury', 'Urethral stricture/Urinary outlet obstruction', 'Kidney stone',
+    'Bladder stone', 'Warts', 'DM', 'Hyperglycaemia', 'Hypoglycaemia', 'DKA', 'HHS'
 ]
 
 # MongoDB connection function (lazy initialization for fork-safety)
