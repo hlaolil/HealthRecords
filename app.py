@@ -2105,14 +2105,14 @@ def reports():
                             report_title = 'Out of Stock List'
                     elif report_type == 'inventory':
                         med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
-                        meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1))
+                        meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1).limit(50))  # Temp limit for testing
                         start_date_obj = start_dt.date()
                         end_date_obj = end_dt.date()
                         days_in_period = max(1, (end_date_obj - start_date_obj).days + 1)
                         for med in meds:
                             med_name = med['name']
                             try:
-                                # Aggregate pre-period balance (server-side sum)
+                                # Fixed pre-period balance (nested $cond)
                                 pre_pipeline = [
                                     {'$match': {
                                         'med_name': med_name,
@@ -2122,11 +2122,17 @@ def reports():
                                         '_id': None,
                                         'beginning_balance': {
                                             '$sum': {
-                                                '$cond': [
-                                                    {'$eq': ['$type', 'receive']}, '$quantity',
-                                                    {'$eq': ['$type', 'dispense']}, {'$multiply': ['$quantity', -1]},
-                                                    0
-                                                ]
+                                                '$cond': {
+                                                    'if': {'$eq': ['$type', 'receive']},
+                                                    'then': '$quantity',
+                                                    'else': {
+                                                        '$cond': {
+                                                            'if': {'$eq': ['$type', 'dispense']},
+                                                            'then': {'$multiply': ['$quantity', -1]},
+                                                            'else': 0
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }}
@@ -2134,7 +2140,7 @@ def reports():
                                 pre_result = list(transactions.aggregate(pre_pipeline))
                                 beginning_balance = pre_result[0].get('beginning_balance', 0) if pre_result else 0
 
-                                # Aggregate period transactions (server-side sum)
+                                # Fixed period transactions (simple $cond per type)
                                 period_pipeline = [
                                     {'$match': {
                                         'med_name': med_name,
@@ -2142,8 +2148,24 @@ def reports():
                                     }},
                                     {'$group': {
                                         '_id': None,
-                                        'dispensed': {'$sum': {'$cond': [{'$eq': ['$type', 'dispense']}, '$quantity', 0]}},
-                                        'received': {'$sum': {'$cond': [{'$eq': ['$type', 'receive']}, '$quantity', 0]}}
+                                        'dispensed': {
+                                            '$sum': {
+                                                '$cond': [
+                                                    {'$eq': ['$type', 'dispense']},
+                                                    '$quantity',
+                                                    0
+                                                ]
+                                            }
+                                        },
+                                        'received': {
+                                            '$sum': {
+                                                '$cond': [
+                                                    {'$eq': ['$type', 'receive']},
+                                                    '$quantity',
+                                                    0
+                                                ]
+                                            }
+                                        }
                                     }}
                                 ]
                                 period_result = list(transactions.aggregate(period_pipeline))
@@ -2235,7 +2257,7 @@ def reports():
                                 tx_by_med[tx['med_name']].append(tx)
                             for med_name in sorted(controlled_meds):
                                 try:
-                                    # Aggregate pre-period balance
+                                    # Fixed pre-period balance (nested $cond)
                                     pre_pipeline = [
                                         {'$match': {
                                             'med_name': med_name,
@@ -2246,11 +2268,17 @@ def reports():
                                             '_id': None,
                                             'beginning_balance': {
                                                 '$sum': {
-                                                    '$cond': [
-                                                        {'$eq': ['$type', 'receive']}, '$quantity',
-                                                        {'$eq': ['$type', 'dispense']}, {'$multiply': ['$quantity', -1]},
-                                                        0
-                                                    ]
+                                                    '$cond': {
+                                                        'if': {'$eq': ['$type', 'receive']},
+                                                        'then': '$quantity',
+                                                        'else': {
+                                                            '$cond': {
+                                                                'if': {'$eq': ['$type', 'dispense']},
+                                                                'then': {'$multiply': ['$quantity', -1]},
+                                                                'else': 0
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }}
