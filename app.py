@@ -1991,7 +1991,6 @@ def add_medication():
         return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message="Database connection failed. Please try again later."), 500
     finally:
         client.close()
-
 @app.route('/reports', methods=['GET', 'POST'])
 @login_required
 def reports():
@@ -2046,14 +2045,14 @@ def reports():
                     else:
                         if not start_date or not end_date:
                             raise ValueError('Start and end dates are required for this report type.')
-                        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-                        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
+                        start_dt = datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                        end_dt = datetime.strptime(end_date, '%Y-%m-%d', '%Y-%m-%d').replace(tzinfo=timezone.utc) + timedelta(days=1) - timedelta(seconds=1)
 
                     # now process the report
                     if report_type in stock_report_types:
                         med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
                         all_meds = list(medications.find(med_filter, {'_id': 0}).sort('name', 1))
-                        today = datetime.now().date()
+                        today = datetime.now(timezone.utc).date()
                         threshold_date = today + timedelta(days=30)
                         stock_data = []
                         for med in all_meds:
@@ -2112,41 +2111,68 @@ def reports():
                         days_in_period = max(1, (end_date_obj - start_date_obj).days + 1)
                         for med in meds:
                             med_name = med['name']
-                            pre_transactions = list(transactions.find({
-                                'med_name': med_name,
-                                'timestamp': {'$lt': start_dt}
-                            }))
-                            beginning_balance = 0
-                            for tx in pre_transactions:
-                                qty = tx.get('quantity', 0)
-                                if tx['type'] == 'receive':
-                                    beginning_balance += qty
-                                elif tx['type'] == 'dispense':
-                                    beginning_balance -= qty
-                            period_transactions = list(transactions.find({
-                                'med_name': med_name,
-                                'timestamp': {'$gte': start_dt, '$lte': end_dt}
-                            }))
-                            dispensed = 0
-                            received = 0
-                            for tx in period_transactions:
-                                qty = tx.get('quantity', 0)
-                                if tx['type'] == 'dispense':
-                                    dispensed += qty
-                                elif tx['type'] == 'receive':
-                                    received += qty
-                            average_daily = dispensed / days_in_period
-                            average_monthly = average_daily * 30
-                            lead_time_stock = average_daily * 14
-                            amount_to_order = max(0, average_monthly - med.get('balance', 0) + lead_time_stock)
-                            report_data.append({
-                                'med_name': med_name,
-                                'beginning_balance': max(0, beginning_balance),
-                                'dispensed': dispensed,
-                                'received': received,
-                                'current_balance': med.get('balance', 0),
-                                'amount_to_order': int(amount_to_order) if amount_to_order.is_integer() else round(amount_to_order, 2)
-                            })
+                            try:
+                                # Aggregate pre-period balance (server-side sum)
+                                pre_pipeline = [
+                                    {'$match': {
+                                        'med_name': med_name,
+                                        'timestamp': {'$lt': start_dt}
+                                    }},
+                                    {'$group': {
+                                        '_id': None,
+                                        'beginning_balance': {
+                                            '$sum': {
+                                                '$cond': [
+                                                    {'$eq': ['$type', 'receive']}, '$quantity',
+                                                    {'$eq': ['$type', 'dispense']}, {'$multiply': ['$quantity', -1]},
+                                                    0
+                                                ]
+                                            }
+                                        }
+                                    }}
+                                ]
+                                pre_result = list(transactions.aggregate(pre_pipeline))
+                                beginning_balance = pre_result[0].get('beginning_balance', 0) if pre_result else 0
+
+                                # Aggregate period transactions (server-side sum)
+                                period_pipeline = [
+                                    {'$match': {
+                                        'med_name': med_name,
+                                        'timestamp': {'$gte': start_dt, '$lte': end_dt}
+                                    }},
+                                    {'$group': {
+                                        '_id': None,
+                                        'dispensed': {'$sum': {'$cond': [{'$eq': ['$type', 'dispense']}, '$quantity', 0]}},
+                                        'received': {'$sum': {'$cond': [{'$eq': ['$type', 'receive']}, '$quantity', 0]}}
+                                    }}
+                                ]
+                                period_result = list(transactions.aggregate(period_pipeline))
+                                dispensed = period_result[0].get('dispensed', 0) if period_result else 0
+                                received = period_result[0].get('received', 0) if period_result else 0
+
+                                average_daily = dispensed / days_in_period
+                                average_monthly = average_daily * 30
+                                lead_time_stock = average_daily * 14
+                                amount_to_order = max(0, average_monthly - med.get('balance', 0) + lead_time_stock)
+                                report_data.append({
+                                    'med_name': med_name,
+                                    'beginning_balance': max(0, beginning_balance),
+                                    'dispensed': dispensed,
+                                    'received': received,
+                                    'current_balance': med.get('balance', 0),
+                                    'amount_to_order': int(amount_to_order) if amount_to_order.is_integer() else round(amount_to_order, 2)
+                                })
+                            except Exception as query_err:
+                                app.logger.error(f"Query failed for med {med_name}: {query_err}")
+                                # Fallback to 0s to avoid crashing the whole report
+                                report_data.append({
+                                    'med_name': med_name,
+                                    'beginning_balance': 0,
+                                    'dispensed': 0,
+                                    'received': 0,
+                                    'current_balance': med.get('balance', 0),
+                                    'amount_to_order': 0
+                                })
                     elif report_type == 'dispense_list':
                         base_query = {'type': 'dispense'}
                         if start_date and end_date:
@@ -2165,7 +2191,8 @@ def reports():
                                 {'diagnoses.0': {'$regex': search, '$options': 'i'}},
                             ]
                             base_query['$or'] = or_query
-                        dispense_list = list(transactions.find(base_query).sort('timestamp', 1))
+                        # Add limit to prevent overload
+                        dispense_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
                         unique_txs = set()
                         for t in dispense_list:
                             unique_txs.add((
@@ -2190,61 +2217,77 @@ def reports():
                                 {'expiry_date': {'$regex': search, '$options': 'i'}},
                             ]
                             base_query['$or'] = or_query
-                        receive_list = list(transactions.find(base_query).sort('timestamp', 1))
+                        # Add limit
+                        receive_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
                     elif report_type == 'controlled_drug_register':
                         controlled_meds_cursor = medications.find({'schedule': 'controlled'}, {'_id': 0, 'name': 1})
                         controlled_meds = [m['name'] for m in controlled_meds_cursor]
                         if controlled_meds:
-                            # Fetch all relevant transactions in period
+                            # Fetch all relevant transactions in period with limit
                             period_query = {
                                 'med_name': {'$in': controlled_meds},
                                 'type': {'$in': ['receive', 'dispense']},
                                 'timestamp': {'$gte': start_dt, '$lte': end_dt}
                             }
-                            all_tx = list(transactions.find(period_query).sort('timestamp', 1))
+                            all_tx = list(transactions.find(period_query).sort('timestamp', 1).limit(10000))
                             tx_by_med = defaultdict(list)
                             for tx in all_tx:
                                 tx_by_med[tx['med_name']].append(tx)
                             for med_name in sorted(controlled_meds):
-                                # Compute beginning balance
-                                pre_tx = list(transactions.find({
-                                    'med_name': med_name,
-                                    'type': {'$in': ['receive', 'dispense']},
-                                    'timestamp': {'$lt': start_dt}
-                                }).sort('timestamp', 1))
-                                beginning_balance = 0
-                                for ptx in pre_tx:
-                                    qty = ptx.get('quantity', 0)
-                                    if ptx['type'] == 'receive':
-                                        beginning_balance += qty
-                                    elif ptx['type'] == 'dispense':
-                                        beginning_balance -= qty
-                                med_txs = tx_by_med[med_name]
-                                received_in_period = sum(tx['quantity'] for tx in med_txs if tx['type'] == 'receive')
-                                dispensed_in_period = sum(tx['quantity'] for tx in med_txs if tx['type'] == 'dispense')
-                                ending_balance = beginning_balance + received_in_period - dispensed_in_period
-                                # Compute running balances
-                                current_balance = beginning_balance
-                                running_entries = []
-                                for tx in med_txs:
-                                    qty = tx['quantity']
-                                    if tx['type'] == 'receive':
-                                        current_balance += qty
-                                    else:
-                                        current_balance -= qty
-                                    tx_copy = tx.copy()
-                                    tx_copy['balance_after'] = current_balance
-                                    running_entries.append(tx_copy)
-                                # Filter transactions
-                                filtered_entries = [e for e in running_entries if matches_search(e, search)]
-                                controlled_register.append({
-                                    'med_name': med_name,
-                                    'beginning_balance': max(0, beginning_balance),
-                                    'ending_balance': max(0, ending_balance),
-                                    'received': received_in_period,
-                                    'dispensed': dispensed_in_period,
-                                    'transactions': filtered_entries
-                                })
+                                try:
+                                    # Aggregate pre-period balance
+                                    pre_pipeline = [
+                                        {'$match': {
+                                            'med_name': med_name,
+                                            'type': {'$in': ['receive', 'dispense']},
+                                            'timestamp': {'$lt': start_dt}
+                                        }},
+                                        {'$group': {
+                                            '_id': None,
+                                            'beginning_balance': {
+                                                '$sum': {
+                                                    '$cond': [
+                                                        {'$eq': ['$type', 'receive']}, '$quantity',
+                                                        {'$eq': ['$type', 'dispense']}, {'$multiply': ['$quantity', -1]},
+                                                        0
+                                                    ]
+                                                }
+                                            }
+                                        }}
+                                    ]
+                                    pre_result = list(transactions.aggregate(pre_pipeline))
+                                    beginning_balance = pre_result[0].get('beginning_balance', 0) if pre_result else 0
+
+                                    med_txs = tx_by_med[med_name]
+                                    received_in_period = sum(tx['quantity'] for tx in med_txs if tx['type'] == 'receive')
+                                    dispensed_in_period = sum(tx['quantity'] for tx in med_txs if tx['type'] == 'dispense')
+                                    ending_balance = beginning_balance + received_in_period - dispensed_in_period
+                                    # Compute running balances
+                                    current_balance = beginning_balance
+                                    running_entries = []
+                                    for tx in med_txs:
+                                        qty = tx['quantity']
+                                        if tx['type'] == 'receive':
+                                            current_balance += qty
+                                        else:
+                                            current_balance -= qty
+                                        tx_copy = tx.copy()
+                                        tx_copy['balance_after'] = current_balance
+                                        running_entries.append(tx_copy)
+                                    # Filter transactions
+                                    filtered_entries = [e for e in running_entries if matches_search(e, search)]
+                                    controlled_register.append({
+                                        'med_name': med_name,
+                                        'beginning_balance': max(0, beginning_balance),
+                                        'ending_balance': max(0, ending_balance),
+                                        'received': received_in_period,
+                                        'dispensed': dispensed_in_period,
+                                        'transactions': filtered_entries
+                                    })
+                                except Exception as query_err:
+                                    app.logger.error(f"Query failed for controlled med {med_name}: {query_err}")
+                                    # Skip this med to avoid crashing
+                                    continue
                 except ValueError as e:
                     message = f'Invalid input: {str(e)}'
                     report_type = None
@@ -2307,6 +2350,7 @@ def reports():
         ), 500
     finally:
         client.close()
+
 @app.route('/api/diagnoses', methods=['GET'])
 @login_required
 def get_diagnosis_suggestions():
