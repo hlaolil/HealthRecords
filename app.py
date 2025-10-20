@@ -379,31 +379,6 @@ CSS_STYLE = """
 </style>
 """
 
-# Updated templates with client-side autocomplete for medications using the provided options
-# The datalist is now populated dynamically from a JavaScript array for offline/autocomplete functionality
-# API fetches are replaced with client-side filtering for medications
-
-CSS_STYLE = """
-<style>
-/* Assuming CSS_STYLE is defined elsewhere; placeholder for brevity */
-.dispense-form, .receive-form, .add-medication-form { max-width: 800px; margin: 0 auto; }
-.common-section, .diag-section, .med-section { margin-bottom: 20px; }
-.common-section > div, .diag-row > div, .med-row > div { margin-bottom: 10px; display: inline-block; width: 45%; }
-label { display: block; font-weight: bold; }
-input, select { width: 100%; padding: 5px; margin-top: 5px; }
-button { padding: 5px 10px; margin: 5px; }
-.form-buttons { text-align: center; }
-.filter-section > div { display: inline-block; margin-right: 10px; }
-table { width: 100%; border-collapse: collapse; }
-th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-th { background-color: #f2f2f2; }
-.message { padding: 10px; margin: 10px 0; border-radius: 4px; }
-.success { background-color: #d4edda; color: #155724; }
-.error { background-color: #f8d7da; color: #721c24; }
-.med-row, .diag-row { border: 1px solid #ccc; padding: 10px; margin: 10px 0; background: #f9f9f9; }
-</style>
-"""
-
 DISPENSE_TEMPLATE = CSS_STYLE + """
 <h1>Dispensing</h1>
 {{ nav_links|safe }}
