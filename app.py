@@ -1748,7 +1748,7 @@ def reports():
                             if 'expiry_date' not in med:
                                 continue
                             try:
-                               expiry_dt = med['expiry_date'].date()
+                               expiry_dt = datetime.strptime(med['expiry_date'], '%Y-%m-%d').date()
 
                             except ValueError:
                                 continue
