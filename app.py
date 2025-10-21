@@ -179,7 +179,8 @@ CSS_STYLE = """
     }
     .dispense-form,
     .receive-form,
-    .add-medication-form {
+    .add-medication-form,
+    .edit-medication-form {
         display: block;
     }
     .common-section {
@@ -351,6 +352,32 @@ CSS_STYLE = """
         border-radius: 8px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         text-align: center;
+    }
+    .action-buttons button {
+        background-color: #28a745;
+        color: white;
+        border: none;
+        padding: 5px 10px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 12px;
+        margin-right: 5px;
+    }
+    .action-buttons button:hover {
+        background-color: #218838;
+    }
+    .action-buttons .delete-btn {
+        background-color: #dc3545;
+    }
+    .action-buttons .delete-btn:hover {
+        background-color: #c82333;
+    }
+    .edit-btn {
+        background-color: #ffc107;
+        color: #212529;
+    }
+    .edit-btn:hover {
+        background-color: #e0a800;
     }
     @media (max-width: 600px) {
         body {
@@ -1869,7 +1896,55 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 """
-# Reports Template (updated with nav and user column in tables)
+# Edit Medication Template
+EDIT_MED_TEMPLATE = CSS_STYLE + """
+<h1>Edit Medication</h1>
+{{ nav_links|safe }}
+
+{% if message %}
+    <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+
+<h2>Edit {{ med_data.name if med_data else '' }}</h2>
+<form method="POST" action="{{ url_for('edit_medication', med_name=med_name) }}" class="edit-medication-form">
+    <div class="common-section">
+        <div>
+            <label>Medication Name:</label>
+            <input name="med_name" value="{{ med_data.name if med_data else '' }}" readonly>
+        </div>
+        <div>
+            <label>Balance:</label>
+            <input name="balance" type="number" min="0" value="{{ med_data.balance if med_data else '' }}" required>
+        </div>
+        <div>
+            <label>Batch:</label>
+            <input name="batch" value="{{ med_data.batch if med_data else '' }}" required>
+        </div>
+        <div>
+            <label>Price per Unit:</label>
+            <input name="price" type="number" step="0.01" min="0" value="{{ med_data.price if med_data else '' }}" required>
+        </div>
+        <div>
+            <label>Expiry Date (YYYY-MM-DD):</label>
+            <input name="expiry_date" type="date" value="{{ med_data.expiry_date if med_data else '' }}" required>
+        </div>
+        <div>
+            <label>Schedule:</label>
+            <select name="schedule" required>
+                <option value="">-- Select Schedule --</option>
+                <option value="controlled" {% if med_data and med_data.schedule == 'controlled' %}selected{% endif %}>Controlled</option>
+                <option value="not controlled" {% if med_data and med_data.schedule == 'not controlled' %}selected{% endif %}>Not Controlled</option>
+            </select>
+        </div>
+    </div>
+    <div class="form-buttons">
+        <input type="submit" value="Update Medication">
+        <a href="{{ url_for('reports', report_type='stock_on_hand') }}"><button type="button">Cancel</button></a>
+    </div>
+</form>
+"""
+
+# Reports Template (updated with nav and user column in tables, and edit button in stock table)
 REPORTS_TEMPLATE = CSS_STYLE + """
 <h1>Inventory Reports</h1>
 {{ nav_links|safe }}
@@ -1931,10 +2006,11 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ med.expiry_date }}</td>
             <td>{{ med.batch }}</td>
             <td>${{ "%.2f"|format(med.price) }}</td>
-            <td>
+            <td class="action-buttons">
+                <a href="{{ url_for('edit_medication', med_name=med.name|urlencode) }}"><button class="edit-btn">Edit</button></a>
                 <form method="POST" action="{{ url_for('delete_medication') }}" style="display: inline;">
                     <input type="hidden" name="med_name" value="{{ med.name }}">
-                    <button type="submit" onclick="return confirm('Are you sure you want to delete {{ med.name }}? This will remove it from the inventory.');" style="background-color: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;">Delete</button>
+                    <button type="submit" class="delete-btn" onclick="return confirm('Are you sure you want to delete {{ med.name }}? This will remove it from the inventory.');">Delete</button>
                 </form>
             </td>
         </tr>
@@ -2559,6 +2635,60 @@ def add_medication():
         return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
     except ServerSelectionTimeoutError:
         return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message="Database connection failed. Please try again later."), 500
+    finally:
+        client.close()
+
+@app.route('/edit-medication/<med_name>', methods=['GET', 'POST'])
+@login_required
+def edit_medication(med_name):
+    try:
+        client = get_mongo_client()
+        db = client['pharmacy_db']
+        medications = db['medications']
+        message = None
+        med_data = None
+
+        # URL decode med_name if necessary
+        med_name = requests.utils.unquote(med_name)
+
+        med = medications.find_one({'name': med_name})
+        if not med:
+            message = f'Medication "{med_name}" not found.'
+            return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=None, med_name=med_name)
+
+        med_data = med
+
+        if request.method == 'POST':
+            try:
+                balance = int(request.form['balance'])
+                batch = request.form['batch']
+                price = float(request.form['price'])
+                expiry_date = request.form['expiry_date']
+                schedule = request.form['schedule']
+
+                # Update the medication
+                medications.update_one(
+                    {'name': med_name},
+                    {'$set': {
+                        'balance': balance,
+                        'batch': batch,
+                        'price': price,
+                        'expiry_date': expiry_date,
+                        'schedule': schedule
+                    }}
+                )
+                message = 'Medication updated successfully!'
+                # Refresh med_data after update
+                med_data = medications.find_one({'name': med_name})
+                return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=med_data, med_name=med_name)
+            except ValueError as e:
+                message = f'Invalid input: {str(e)}'
+                return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=med_data, med_name=med_name)
+
+        return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=med_data, med_name=med_name)
+    except ServerSelectionTimeoutError:
+        message = "Database connection failed. Please try again later."
+        return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=None, med_name=med_name), 500
     finally:
         client.close()
 
