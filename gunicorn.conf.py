@@ -1,3 +1,3 @@
 # gunicorn.conf.py
-timeout = 180  # increase timeout to 2 minutes
-workers = 3    # optional: add more workers
+timeout = 300  # increase timeout to 2 minutes
+workers = 4    # optional: add more workers
