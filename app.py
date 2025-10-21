@@ -714,6 +714,7 @@ const positionOptions = [
     "Production",
     "Public",
     "Recovery",
+    "Rope Access",
     "Security",
     "Sorting",
     "Storekeeper",
