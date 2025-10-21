@@ -717,6 +717,7 @@ const positionOptions = [
     "Security",
     "Sorting",
     "Storekeeper",
+    "Supervisor",
     "Survey",
     "Technician",
     "Training",
