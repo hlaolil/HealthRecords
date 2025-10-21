@@ -384,87 +384,79 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 {{ nav_links|safe }}
 
 {% if message %}
-    <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+    <p class="message {% if 'successfully' in message|lower or 'updated' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
 
-<h2>Dispense Medication</h2>
+<h2>{% if tx_data %}Edit Dispense{% else %}Dispense Medication{% endif %}</h2>
 
 <form method="POST" action="{{ url_for('dispense') }}" class="dispense-form">
+    <input type="hidden" name="transaction_id" value="{{ tx_data.transaction_id if tx_data else '' }}">
     <div class="common-section">
         <div>
             <label>Patient:</label>
-            <input name="patient" type="text" required>
+            <input name="patient" type="text" value="{{ tx_data.patient if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
         </div>
 
         <div>
             <label for="company">Company:</label>
-            <input id="company" name="company" list="company_suggestions" type="text" required>
+            <input id="company" name="company" list="company_suggestions" type="text" value="{{ tx_data.company if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
         </div>
 
         <div>
             <label for="position">Position:</label>
-            <input id="position" name="position" list="position_suggestions" type="text" required>
+            <input id="position" name="position" list="position_suggestions" type="text" value="{{ tx_data.position if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
         </div>
 
         <div>
             <label>Age Group:</label>
-            <select name="age_group" required>
+            <select name="age_group" {% if not tx_data %}required{% endif %}>
                 <option value="">-- Select Age Group --</option>
-                <option value="18-24">18-24</option>
-                <option value="25-34">25-34</option>
-                <option value="35-45">35-45</option>
-                <option value="45-54">45-54</option>
-                <option value="54-65">54-65</option>
+                {% set age_options = ['18-24', '25-34', '35-45', '45-54', '54-65'] %}
+                {% for opt in age_options %}
+                    <option value="{{ opt }}" {% if tx_data and tx_data.age_group == opt %}selected{% endif %}>{{ opt }}</option>
+                {% endfor %}
             </select>
         </div>
 
         <div>
             <label>Gender:</label>
-            <select name="gender" required>
+            <select name="gender" {% if not tx_data %}required{% endif %}>
                 <option value="">-- Select --</option>
-                <option value="Male">Male</option>
-                <option value="Female">Female</option>
+                <option value="Male" {% if tx_data and tx_data.gender == 'Male' %}selected{% endif %}>Male</option>
+                <option value="Female" {% if tx_data and tx_data.gender == 'Female' %}selected{% endif %}>Female</option>
             </select>
         </div>
 
         <div>
             <label>Number of Sick Leave Days:</label>
-            <input name="sick_leave_days" type="number" min="0" required>
+            <input name="sick_leave_days" type="number" min="0" value="{{ tx_data.sick_leave_days if tx_data else '' }}" required>
         </div>
 
         <div>
             <label>Prescriber (Doctor):</label>
-            <select name="prescriber" required>
+            {% set prescribers = ['Dr. T. Khothatso', 'Locum', 'Malesoetsa Leohla', 'Mamosa Seetsa', 'Mamosaase Nqosa', 'Mapalo Mapesela', 'Mathuto Kutoane', 'Thapelo Mphole'] %}
+            <select name="prescriber" {% if not tx_data %}required{% endif %}>
                 <option value="">-- Select Doctor --</option>
-                <option>Dr. T. Khothatso</option>
-                <option>Locum</option>
-                <option>Malesoetsa Leohla</option>
-                <option>Mamosa Seetsa</option>
-                <option>Mamosaase Nqosa</option>
-                <option>Mapalo Mapesela</option>
-                <option>Mathuto Kutoane</option>
-                <option>Thapelo Mphole</option>
+                {% for p in prescribers %}
+                    <option value="{{ p }}" {% if tx_data and tx_data.prescriber == p %}selected{% endif %}>{{ p }}</option>
+                {% endfor %}
             </select>
         </div>
 
         <div>
             <label>Dispenser (Issuer):</label>
-            <select name="dispenser" required>
+            {% set dispensers = ['Letlotlo Hlaoli', 'Locum', 'Malesoetsa Leohla', 'Mamosa Seetsa', 'Mamosaase Nqosa', 'Mapalo Mapesela', 'Mathuto Kutoane', 'Thapelo Mphole'] %}
+            <select name="dispenser" {% if not tx_data %}required{% endif %}>
                 <option value="">-- Select Issuer --</option>
-                <option>Letlotlo Hlaoli</option>
-                <option>Locum</option>
-                <option>Malesoetsa Leohla</option>
-                <option>Mamosa Seetsa</option>
-                <option>Mamosaase Nqosa</option>
-                <option>Mapalo Mapesela</option>
-                <option>Mathuto Kutoane</option>
-                <option>Thapelo Mphole</option>
+                {% for d in dispensers %}
+                    <option value="{{ d }}" {% if tx_data and tx_data.dispenser == d %}selected{% endif %}>{{ d }}</option>
+                {% endfor %}
             </select>
         </div>
 
         <div>
             <label>Date:</label>
-            <input name="date" type="date" required>
+            <input name="date" type="date" value="{{ tx_data.date if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
         </div>
     </div>
 
@@ -472,15 +464,29 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         <h3>Diagnoses (up to 3)</h3>
         <datalist id="diag_suggestions"></datalist>
         <div id="diagnoses">
-            <div class="diag-row">
-                <div>
-                    <label>Diagnosis:</label>
-                    <input name="diagnoses" list="diag_suggestions" type="text" class="diag-input" required>
+            {% if tx_data and tx_data.diags %}
+                {% for d in tx_data.diags %}
+                    <div class="diag-row">
+                        <div>
+                            <label>Diagnosis:</label>
+                            <input name="diagnoses" list="diag_suggestions" type="text" class="diag-input" value="{{ d }}" {% if loop.first %}required{% endif %}>
+                        </div>
+                        <div>
+                            <button type="button" onclick="removeDiagRow(this)">Remove</button>
+                        </div>
+                    </div>
+                {% endfor %}
+            {% else %}
+                <div class="diag-row">
+                    <div>
+                        <label>Diagnosis:</label>
+                        <input name="diagnoses" list="diag_suggestions" type="text" class="diag-input" required>
+                    </div>
+                    <div>
+                        <button type="button" onclick="removeDiagRow(this)">Remove</button>
+                    </div>
                 </div>
-                <div>
-                    <button type="button" onclick="removeDiagRow(this)">Remove</button>
-                </div>
-            </div>
+            {% endif %}
         </div>
         <button type="button" onclick="addDiagRow()">Add Diagnosis</button>
     </div>
@@ -489,25 +495,43 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         <h3>Medications (up to 12)</h3>
         <datalist id="med_suggestions"></datalist>
         <div id="medications">
-            <div class="med-row">
-                <div>
-                    <label>Medication:</label>
-                    <input name="med_names" list="med_suggestions" class="med-input" required>
+            {% if tx_data and tx_data.meds %}
+                {% for med in tx_data.meds %}
+                    <div class="med-row">
+                        <div>
+                            <label>Medication:</label>
+                            <input name="med_names" list="med_suggestions" class="med-input" value="{{ med[0] }}">
+                        </div>
+                        <div>
+                            <label>Quantity:</label>
+                            <input name="quantities" type="number" min="1" value="{{ med[1] }}">
+                        </div>
+                        <div>
+                            <button type="button" onclick="removeRow(this)">Remove</button>
+                        </div>
+                    </div>
+                {% endfor %}
+            {% else %}
+                <div class="med-row">
+                    <div>
+                        <label>Medication:</label>
+                        <input name="med_names" list="med_suggestions" class="med-input" required>
+                    </div>
+                    <div>
+                        <label>Quantity:</label>
+                        <input name="quantities" type="number" min="1" required>
+                    </div>
+                    <div>
+                        <button type="button" onclick="removeRow(this)">Remove</button>
+                    </div>
                 </div>
-                <div>
-                    <label>Quantity:</label>
-                    <input name="quantities" type="number" min="1" required>
-                </div>
-                <div>
-                    <button type="button" onclick="removeRow(this)">Remove</button>
-                </div>
-            </div>
+            {% endif %}
         </div>
         <button type="button" onclick="addRow()">Add Medication</button>
     </div>
 
     <div class="form-buttons">
-        <input type="submit" value="Dispense">
+        <input type="submit" value="{% if tx_data %}Update{% else %}Dispense{% endif %}">
         <button type="button" onclick="clearForm()">Clear Form</button>
     </div>
 
@@ -559,6 +583,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <th>Sick Leave (Days)</th>
             <th>Medication</th>
             <th>Quantity</th>
+            <th>Actions</th>
         </tr>
     </thead>
     <tbody>
@@ -578,17 +603,17 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <td>{{ t.sick_leave_days }}</td>
             <td>{{ t.med_name }}</td>
             <td>{{ t.quantity }}</td>
-            
+            <td><a href="{{ url_for('dispense', edit=t.transaction_id, start_date=start_date, end_date=end_date, search=search) }}">Edit</a></td>
         </tr>
         {% else %}
-        <tr><td colspan="14">No dispense transactions.</td></tr>
+        <tr><td colspan="15">No dispense transactions.</td></tr>
         {% endfor %}
     </tbody>
 </table>
 
 <script>
-let medRowCount = 1;
-let diagRowCount = 1;
+let medRowCount = {{ (tx_data.meds|length if tx_data else 1) }};
+let diagRowCount = {{ (tx_data.diags|length if tx_data else 1) }};
 
 // Company options array for autocomplete
 const companyOptions = [
@@ -1085,8 +1110,11 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // Clear form after successful dispense
-{% if message and 'successfully' in message|lower %}
-    clearForm();
+{% if message and ('successfully' in message|lower or 'updated' in message|lower) %}
+    // Do not clear if editing, but since message after post, and redirect not, but for now, clear only if new
+    {% if not tx_data %}
+        clearForm();
+    {% endif %}
 {% endif %}
 </script>
 """
@@ -2259,7 +2287,36 @@ def dispense():
             base_query['$or'] = or_query
         tx_list = list(transactions.find(base_query).sort('timestamp', -1))
 
+        tx_data = None
+        edit_id = request.args.get('edit')
+        if edit_id:
+            tx = transactions.find_one({'transaction_id': edit_id, 'type': 'dispense'})
+            if tx:
+                common = {k: v for k, v in tx.items() if k not in ['_id', 'med_name', 'quantity', 'type', 'timestamp', 'transaction_id', 'user']}
+                meds_cursor = transactions.find({'transaction_id': edit_id, 'type': 'dispense'}, {'med_name': 1, 'quantity': 1})
+                meds = [(m['med_name'], m['quantity']) for m in meds_cursor]
+                common['meds'] = meds
+                common['diags'] = common.get('diagnoses', [])
+                common['transaction_id'] = edit_id
+                tx_data = common
+
         if request.method == 'POST':
+            transaction_id = request.form.get('transaction_id')
+            if transaction_id:
+                # Edit mode
+                old_meds = list(transactions.find({'transaction_id': transaction_id}))
+                for old_tx in old_meds:
+                    med_name = old_tx['med_name']
+                    old_qty = old_tx['quantity']
+                    medications.update_one({'name': med_name}, {'$inc': {'balance': old_qty}})
+                transactions.delete_many({'transaction_id': transaction_id})
+                tx_id = transaction_id
+                message_prefix = 'Updated'
+            else:
+                # New
+                tx_id = str(uuid4())
+                message_prefix = 'Dispensed'
+
             try:
                 patient = request.form['patient']
                 company = request.form['company']
@@ -2289,7 +2346,6 @@ def dispense():
                     if len(med_names) != len(quantities) or not med_names:
                         message = 'Please provide at least one valid medication and quantity.'
                     else:
-                        tx_id = str(uuid4())
                         success = True
                         error_msgs = []
                         dispensed_meds = []
@@ -2326,17 +2382,16 @@ def dispense():
                                 dispensed_meds.append(med_name)
 
                         if success and dispensed_meds:
-                            message = f'Dispensed successfully: {", ".join(dispensed_meds)}'
+                            message = f'{message_prefix} successfully: {", ".join(dispensed_meds)}'
                         else:
-                            message = '; '.join(error_msgs) if error_msgs else 'No medications dispensed.'
+                            message = '; '.join(error_msgs) if error_msgs else f'No medications {message_prefix.lower()}.'
 
-                return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-                return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search)
-        return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search)
+
+        return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search, tx_data=tx_data)
     except ServerSelectionTimeoutError:
-        return render_template_string(DISPENSE_TEMPLATE, tx_list=[], nav_links=get_nav_links(), message="Database connection failed. Please try again later.", start_date='', end_date='', search=''), 500
+        return render_template_string(DISPENSE_TEMPLATE, tx_list=[], nav_links=get_nav_links(), message="Database connection failed. Please try again later.", start_date='', end_date='', search='', tx_data=None), 500
     finally:
         client.close()
 
