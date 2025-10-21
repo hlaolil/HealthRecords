@@ -847,7 +847,7 @@ const medicationOptions = [
     "Methylsal Ointment, 500 mg",
     "Metjoclopramide Injection, 010 mg",
     "Metoclopramide Tabs, 010 mg",
-    "Metronidazole tabs,  400 mg",
+    "Metronidazole tabs, 400 mg",
     "Miconazol Oral Gel, 030 g",
     "Miconazole Cream, 002 %",
     "Midazolam, 010 mg",
