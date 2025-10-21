@@ -103,14 +103,17 @@ def login_required(f):
 # Navigation links (updated to include user info and logout)
 def get_nav_links():
     if 'user' in session:
-        user_name = session['user'].get('name', session['user'].get('login', 'User'))
+        user = session['user']
+        is_admin = user.get('role') == 'admin'
+        name = user.get('name', user.get('login', 'User'))
+        add_med_link = '<a href="/add-medication">Add Medication</a> | ' if is_admin else ''
         return f"""
         <p class="nav-links"><strong>Navigate:</strong>
             <a href="/dispense">Dispensing</a> |
             <a href="/receive">Receiving</a> |
-            <a href="/add-medication">Add Medication</a> |
+            {add_med_link}
             <a href="/reports">Reports</a> |
-            <span>Welcome, {user_name}! <a href="/logout">Logout</a></span>
+            <span>Welcome, {name}! <a href="/logout">Logout</a></span>
         </p>
         """
     else:
@@ -2004,11 +2007,15 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ med.batch }}</td>
             <td>${{ "%.2f"|format(med.price) }}</td>
             <td class="action-buttons">
+                {% if is_admin %}
                 <a href="{{ url_for('edit_medication', med_name=med.name|urlencode) }}"><button class="edit-btn">Edit</button></a>
                 <form method="POST" action="{{ url_for('delete_medication') }}" style="display: inline;">
                     <input type="hidden" name="med_name" value="{{ med.name }}">
                     <button type="submit" class="delete-btn" onclick="return confirm('Are you sure you want to delete {{ med.name }}? This will remove it from the inventory.');">Delete</button>
                 </form>
+                {% else %}
+                <span>-</span>
+                {% endif %}
             </td>
         </tr>
     {% else %}
@@ -2290,6 +2297,11 @@ REGISTER_TEMPLATE = CSS_STYLE + """
         <input type="password" name="password" required><br>
         <label>Full Name:</label>
         <input type="text" name="name" required><br>
+        <label>Role:</label>
+        <select name="role" required>
+            <option value="employee">Employee</option>
+            <option value="admin">Admin</option>
+        </select><br>
         <input type="submit" value="Register">
     </form>
     <p><a href="/login">Already have an account? Login here.</a></p>
@@ -2319,7 +2331,8 @@ def login():
             if user_doc and check_password_hash(user_doc['password_hash'], password):
                 session['user'] = {
                     'login': username,
-                    'name': user_doc.get('name', username)
+                    'name': user_doc.get('name', username),
+                    'role': user_doc.get('role', 'employee')
                 }
                 return redirect('/dispense')
             else:
@@ -2339,7 +2352,8 @@ def register():
         username = request.form.get('username')
         password = request.form.get('password')
         name = request.form.get('name')
-        if not username or not password or not name:
+        role = request.form.get('role')
+        if not username or not password or not name or not role:
             session['error'] = 'All fields are required.'
             return redirect('/register')
         
@@ -2355,7 +2369,8 @@ def register():
             users.insert_one({
                 'username': username,
                 'password_hash': password_hash,
-                'name': name
+                'name': name,
+                'role': role
             })
             session['message'] = 'Registration successful! Please login.'
             return redirect('/login')
@@ -2618,6 +2633,9 @@ def receive():
 @app.route('/add-medication', methods=['GET', 'POST'])
 @login_required
 def add_medication():
+    if session['user'].get('role') != 'admin':
+        flash('Access denied. Only admins can add new medications.')
+        return redirect('/reports')
     try:
         client = get_mongo_client()
         db = client['pharmacy_db']
@@ -2684,6 +2702,9 @@ def add_medication():
 @app.route('/edit-medication/<med_name>', methods=['GET', 'POST'])
 @login_required
 def edit_medication(med_name):
+    if session['user'].get('role') != 'admin':
+        flash('Access denied. Only admins can edit medications.')
+        return redirect('/reports')
     try:
         client = get_mongo_client()
         db = client['pharmacy_db']
@@ -2738,6 +2759,9 @@ def edit_medication(med_name):
 @app.route('/delete-medication', methods=['POST'])
 @login_required
 def delete_medication():
+    if session['user'].get('role') != 'admin':
+        flash('Access denied. Only admins can delete medications.')
+        return redirect('/reports')
     med_name = request.form.get('med_name')
     if not med_name:
         session['message'] = 'No medication specified.'
@@ -2764,6 +2788,7 @@ def delete_medication():
 @app.route('/reports', methods=['GET', 'POST'])
 @login_required
 def reports():
+    is_admin = session['user'].get('role') == 'admin'
     try:
         client = get_mongo_client()
         db = client['pharmacy_db']
@@ -3127,7 +3152,8 @@ def reports():
             nav_links=get_nav_links(),
             message=message,
             search=search,
-            report_title=report_title
+            report_title=report_title,
+            is_admin=is_admin
         )
     except ServerSelectionTimeoutError:
         return render_template_string(
@@ -3144,7 +3170,8 @@ def reports():
             end_date=None,
             total_transactions=0,
             search=None,
-            report_title=None
+            report_title=None,
+            is_admin=is_admin
         ), 500
     finally:
         client.close()
