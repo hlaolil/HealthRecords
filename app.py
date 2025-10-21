@@ -1918,6 +1918,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <th>Expiry Date</th>
             <th>Batch</th>
             <th>Price</th>
+            <th>Actions</th>
         </tr>
     </thead>
     <tbody>
@@ -1928,9 +1929,15 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ med.expiry_date }}</td>
             <td>{{ med.batch }}</td>
             <td>${{ "%.2f"|format(med.price) }}</td>
+            <td>
+                <form method="POST" action="{{ url_for('delete_medication') }}" style="display: inline;">
+                    <input type="hidden" name="med_name" value="{{ med.name }}">
+                    <button type="submit" onclick="return confirm('Are you sure you want to delete {{ med.name }}? This will remove it from the inventory.');" style="background-color: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;">Delete</button>
+                </form>
+            </td>
         </tr>
     {% else %}
-        <tr><td colspan="5">No medications matching the criteria.</td></tr>
+        <tr><td colspan="6">No medications matching the criteria.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -2552,6 +2559,33 @@ def add_medication():
         return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message="Database connection failed. Please try again later."), 500
     finally:
         client.close()
+
+@app.route('/delete-medication', methods=['POST'])
+@login_required
+def delete_medication():
+    med_name = request.form.get('med_name')
+    if not med_name:
+        session['message'] = 'No medication specified.'
+        return redirect('/reports')
+    try:
+        client = get_mongo_client()
+        db = client['pharmacy_db']
+        medications = db['medications']
+        med = medications.find_one({'name': med_name})
+        if not med:
+            session['message'] = f'Medication "{med_name}" not found.'
+            return redirect('/reports')
+        result = medications.delete_one({'name': med_name})
+        if result.deleted_count > 0:
+            session['message'] = f'Medication "{med_name}" deleted successfully.'
+        else:
+            session['message'] = f'Failed to delete "{med_name}".'
+    except Exception as e:
+        session['message'] = f'Error deleting medication: {str(e)}'
+    finally:
+        client.close()
+    return redirect('/reports')
+
 @app.route('/reports', methods=['GET', 'POST'])
 @login_required
 def reports():
@@ -2569,7 +2603,7 @@ def reports():
         start_date = None
         end_date = None
         total_transactions = 0
-        message = None
+        message = session.pop('message', None)
         search = None
         report_title = None
 
