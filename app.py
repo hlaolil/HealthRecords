@@ -1966,7 +1966,6 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         <option value="near_expired_list">Near Expired Drug List</option>
         <option value="out_of_stock_list">Out of Stock List</option>
         <option value="inventory">Inventory Report</option>
-        <option value="dispense_list">Dispense List</option>
         <option value="receive_list">Receive List</option>
         <option value="controlled_drug_register">Controlled Drug Register</option>
     </select><br>
@@ -2073,72 +2072,6 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         </tr>
     {% else %}
         <tr><td colspan="6">No data for this period.</td></tr>
-    {% endfor %}
-    </tbody>
-</table>
-{% elif report_type == 'dispense_list' and dispense_list %}
-<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
-    <input type="hidden" name="report_type" value="dispense_list">
-    <div class="filter-section">
-        <div>
-            <label>Start Date:</label>
-            <input name="start_date" type="date" value="{{ start_date or '' }}">
-        </div>
-        <div>
-            <label>End Date:</label>
-            <input name="end_date" type="date" value="{{ end_date or '' }}">
-        </div>
-        <div>
-            <label>Search:</label>
-            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search patient, medication, company...">
-        </div>
-        <div class="button-div">
-            <input type="submit" value="Refine">
-            <a href="{{ url_for('reports') }}">Back to Menu</a>
-        </div>
-    </div>
-</form>
-<h2>Dispense List for {{ start_date }} to {{ end_date }}</h2>
-<h3>Total Transactions: {{ total_transactions }}</h3>
-<table>
-    <thead>
-        <tr>
-            <th>Medication</th>
-            <th>Quantity</th>
-            <th>Patient</th>
-            <th>Company</th>
-            <th>Position</th>
-            <th>Age Group</th>
-            <th>Gender</th>
-            <th>Sick Leave (Days)</th>
-            <th>Diagnoses</th>
-            <th>Prescriber</th>
-            <th>Dispenser</th>
-            <th>User</th>
-            <th>Date</th>
-            <th>Timestamp</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for t in dispense_list %}
-        <tr>
-            <td>{{ t.med_name }}</td>
-            <td>{{ t.quantity }}</td>
-            <td>{{ t.patient }}</td>
-            <td>{{ t.company }}</td>
-            <td>{{ t.position }}</td>
-            <td>{{ t.age_group }}</td>
-            <td>{{ t.gender }}</td>
-            <td>{{ t.sick_leave_days }}</td>
-            <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
-            <td>{{ t.prescriber }}</td>
-            <td>{{ t.dispenser }}</td>
-            <td>{{ t.user }}</td>
-            <td>{{ t.date }}</td>
-            <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="14">No dispense transactions in this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -2835,7 +2768,6 @@ def reports():
         medications = db['medications']
         transactions = db['transactions']
         report_data = []
-        dispense_list = []
         receive_list = []
         stock_data = []
         controlled_register = []
@@ -3030,35 +2962,6 @@ def reports():
                                     'current_balance': med.get('balance', 0),
                                     'amount_to_order': 0
                                 })
-                    elif report_type == 'dispense_list':
-                        base_query = {'type': 'dispense'}
-                        if start_date and end_date:
-                            base_query['timestamp'] = {'$gte': start_dt, '$lte': end_dt}
-                        if search:
-                            or_query = [
-                                {'patient': {'$regex': search, '$options': 'i'}},
-                                {'med_name': {'$regex': search, '$options': 'i'}},
-                                {'company': {'$regex': search, '$options': 'i'}},
-                                {'position': {'$regex': search, '$options': 'i'}},
-                                {'age_group': {'$regex': search, '$options': 'i'}},
-                                {'gender': {'$regex': search, '$options': 'i'}},
-                                {'prescriber': {'$regex': search, '$options': 'i'}},
-                                {'dispenser': {'$regex': search, '$options': 'i'}},
-                                {'date': {'$regex': search, '$options': 'i'}},
-                                {'diagnoses.0': {'$regex': search, '$options': 'i'}},
-                            ]
-                            base_query['$or'] = or_query
-                        # Add limit to prevent overload
-                        dispense_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
-                        unique_txs = set()
-                        for t in dispense_list:
-                            unique_txs.add((
-                                t.get('patient', ''),
-                                t.get('date', ''),
-                                t.get('prescriber', ''),
-                                t.get('dispenser', '')
-                            ))
-                        total_transactions = len(unique_txs)
                     elif report_type == 'receive_list':
                         base_query = {'type': 'receive'}
                         if start_date and end_date:
@@ -3158,7 +3061,6 @@ def reports():
                     end_date = None
                     search = None
                     report_data = []
-                    dispense_list = []
                     receive_list = []
                     stock_data = []
                     controlled_register = []
@@ -3171,7 +3073,6 @@ def reports():
                 end_date = None
                 search = None
                 report_data = []
-                dispense_list = []
                 receive_list = []
                 stock_data = []
                 controlled_register = []
@@ -3182,7 +3083,6 @@ def reports():
             REPORTS_TEMPLATE,
             report_type=report_type,
             report_data=report_data,
-            dispense_list=dispense_list,
             receive_list=receive_list,
             stock_data=stock_data,
             controlled_register=controlled_register,
@@ -3202,7 +3102,6 @@ def reports():
             message="Database connection failed. Please try again later.",
             report_type=None,
             report_data=[],
-            dispense_list=[],
             receive_list=[],
             stock_data=[],
             controlled_register=[],
