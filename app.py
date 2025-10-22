@@ -10,11 +10,24 @@ from uuid import uuid4
 from collections import defaultdict
 from dotenv import load_dotenv 
 from werkzeug.security import generate_password_hash, check_password_hash
+from authlib.integrations.flask_client import OAuth
 
 load_dotenv()  # Loads .env into os.environ
 
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+
+oauth = OAuth(app)
+github = oauth.register(
+    name='github',
+    client_id=os.getenv('GITHUB_CLIENT_ID'),
+    client_secret=os.getenv('GITHUB_CLIENT_SECRET'),
+    access_token_url='https://github.com/login/oauth/access_token',
+    authorize_url='https://github.com/login/oauth/authorize',
+    api_base_url='https://api.github.com/',
+    userinfo_endpoint='https://api.github.com/user',
+    client_kwargs={'scope': 'read:user user:email'},
+)
 
 # Diagnosis options
 DIAGNOSES_OPTIONS = [
@@ -378,6 +391,18 @@ CSS_STYLE = """
     }
     .edit-btn:hover {
         background-color: #e0a800;
+    }
+    .github-login {
+        margin-top: 20px;
+        padding: 10px;
+        background-color: #24292e;
+        color: white;
+        text-decoration: none;
+        border-radius: 4px;
+        display: inline-block;
+    }
+    .github-login:hover {
+        background-color: #1a1f23;
     }
     @media (max-width: 600px) {
         body {
@@ -2267,6 +2292,13 @@ LOGIN_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Login</h1>
 <div class="login-form">
     <h2>Login</h2>
+    {% with messages = get_flashed_messages() %}
+        {% if messages %}
+            {% for message in messages %}
+                <p class="message error">{{ message }}</p>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
     {% if error %}
         <p class="message error">{{ error }}</p>
     {% endif %}
@@ -2278,6 +2310,7 @@ LOGIN_TEMPLATE = CSS_STYLE + """
         <input type="submit" value="Login">
     </form>
     <p><a href="/register">Don't have an account? Register here.</a></p>
+    <a href="{{ url_for('github_login') }}" class="github-login">Login with GitHub</a>
 </div>
 """
 
@@ -2286,6 +2319,13 @@ REGISTER_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Registration</h1>
 <div class="register-form">
     <h2>Register</h2>
+    {% with messages = get_flashed_messages() %}
+        {% if messages %}
+            {% for message in messages %}
+                <p class="message error">{{ message }}</p>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
     {% if error %}
         <p class="message error">{{ error }}</p>
     {% endif %}
@@ -2316,6 +2356,57 @@ REGISTER_TEMPLATE = CSS_STYLE + """
 def home():
     return redirect('/reports')
 
+@app.route('/login/github')
+def github_login():
+    if 'user' in session:
+        return redirect('/dispense')
+    redirect_uri = url_for('github_callback', _external=True)
+    return github.authorize_redirect(redirect_uri)
+
+@app.route('/login/github/cb')
+def github_callback():
+    if 'user' in session:
+        return redirect('/dispense')
+    token = github.authorize_access_token()
+    if token is None:
+        flash('Access denied: reason=' + request.args['error'] + ' error_description=' + request.args['error_description'])
+        return redirect(url_for('login'))
+    resp = github.get('user', token=token)
+    user_info = resp.json()
+    username = user_info['login']
+    email = user_info.get('email')
+    name = user_info.get('name', username)
+    client = None
+    try:
+        client = get_mongo_client()
+        db = client['pharmacy_db']
+        users = db['users']
+        user_doc = users.find_one({'username': username})
+        if not user_doc:
+            users.insert_one({
+                'username': username,
+                'name': name,
+                'role': 'employee',
+                'email': email,
+                'auth_method': 'github'
+            })
+            user_doc = {'name': name, 'role': 'employee'}
+        session['user'] = {
+            'login': username,
+            'name': user_doc.get('name', username),
+            'role': user_doc.get('role', 'employee')
+        }
+    except ServerSelectionTimeoutError:
+        flash('Database connection failed. Please try again later.')
+        return redirect('/login')
+    except Exception as e:
+        flash(f'Error during login: {str(e)}')
+        return redirect('/login')
+    finally:
+        if client:
+            client.close()
+    return redirect('/dispense')
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -2330,7 +2421,7 @@ def login():
             db = client['pharmacy_db']
             users = db['users']
             user_doc = users.find_one({'username': username})
-            if user_doc and check_password_hash(user_doc['password_hash'], password):
+            if user_doc and (user_doc.get('auth_method') == 'local' and check_password_hash(user_doc['password_hash'], password)):
                 session['user'] = {
                     'login': username,
                     'name': user_doc.get('name', username),
@@ -2372,7 +2463,8 @@ def register():
                 'username': username,
                 'password_hash': password_hash,
                 'name': name,
-                'role': role
+                'role': role,
+                'auth_method': 'local'
             })
             session['message'] = 'Registration successful! Please login.'
             return redirect('/login')
