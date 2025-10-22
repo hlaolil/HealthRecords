@@ -10,6 +10,7 @@ from uuid import uuid4
 from collections import defaultdict
 from dotenv import load_dotenv 
 from werkzeug.security import generate_password_hash, check_password_hash
+import urllib.parse
 
 load_dotenv()  # Loads .env into os.environ
 
@@ -119,7 +120,7 @@ def get_nav_links():
     else:
         return """
         <p class="nav-links"><strong>Navigate:</strong>
-            <a href="/login">Login</a>
+            <a href="/login">Local Login</a> | <a href="/register">Register with GitHub</a>
         </p>
         """
 
@@ -2266,7 +2267,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 LOGIN_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Login</h1>
 <div class="login-form">
-    <h2>Login</h2>
+    <h2>Local Login</h2>
     {% if error %}
         <p class="message error">{{ error }}</p>
     {% endif %}
@@ -2277,6 +2278,36 @@ LOGIN_TEMPLATE = CSS_STYLE + """
         <input type="password" name="password" required><br>
         <input type="submit" value="Login">
     </form>
+    <p><a href="/register">Register with GitHub</a></p>
+</div>
+"""
+
+# Register Template (no longer used directly)
+REGISTER_TEMPLATE = CSS_STYLE + """
+<h1>Pharmacy App Registration</h1>
+<div class="register-form">
+    <h2>Register</h2>
+    {% if error %}
+        <p class="message error">{{ error }}</p>
+    {% endif %}
+    {% if message %}
+        <p class="message success">{{ message }}</p>
+    {% endif %}
+    <form method="POST">
+        <label>Username:</label>
+        <input type="text" name="username" required><br>
+        <label>Password:</label>
+        <input type="password" name="password" required><br>
+        <label>Full Name:</label>
+        <input type="text" name="name" required><br>
+        <label>Role:</label>
+        <select name="role" required>
+            <option value="employee">Employee</option>
+            <option value="admin">Admin</option>
+        </select><br>
+        <input type="submit" value="Register">
+    </form>
+    <p><a href="/login">Already have an account? Login here.</a></p>
 </div>
 """
 
@@ -2300,7 +2331,7 @@ def login():
             db = client['pharmacy_db']
             users = db['users']
             user_doc = users.find_one({'username': username})
-            if user_doc and check_password_hash(user_doc['password_hash'], password):
+            if user_doc and 'password_hash' in user_doc and check_password_hash(user_doc['password_hash'], password):
                 session['user'] = {
                     'login': username,
                     'name': user_doc.get('name', username),
@@ -2317,6 +2348,109 @@ def login():
     
     error = session.pop('error', None)
     return render_template_string(LOGIN_TEMPLATE, error=error)
+
+@app.route('/register', methods=['GET'])
+def register():
+    return redirect('/auth/github')
+
+@app.route('/auth/github')
+def github_login():
+    client_id = os.getenv('GITHUB_CLIENT_ID')
+    if not client_id:
+        session['error'] = 'GitHub Client ID not configured'
+        return redirect('/login')
+    redirect_uri = url_for('github_callback', _external=True)
+    params = {
+        'client_id': client_id,
+        'redirect_uri': redirect_uri,
+        'scope': 'user:email',
+        'state': str(uuid4())  # for CSRF protection
+    }
+    auth_url = 'https://github.com/login/oauth/authorize?' + urllib.parse.urlencode(params)
+    return redirect(auth_url)
+
+@app.route('/auth/callback')
+def github_callback():
+    code = request.args.get('code')
+    if not code:
+        session['error'] = 'Authorization failed'
+        return redirect('/login')
+    client_id = os.getenv('GITHUB_CLIENT_ID')
+    client_secret = os.getenv('GITHUB_CLIENT_SECRET')
+    if not client_id or not client_secret:
+        session['error'] = 'GitHub credentials not configured'
+        return redirect('/login')
+    redirect_uri = url_for('github_callback', _external=True)
+    token_url = 'https://github.com/login/oauth/access_token'
+    token_data = {
+        'client_id': client_id,
+        'client_secret': client_secret,
+        'code': code,
+        'redirect_uri': redirect_uri
+    }
+    token_response = requests.post(token_url, data=token_data, headers={'Accept': 'application/json'})
+    if token_response.status_code != 200:
+        session['error'] = 'Token exchange failed'
+        return redirect('/login')
+    token_json = token_response.json()
+    access_token = token_json.get('access_token')
+    if not access_token:
+        session['error'] = 'No access token received'
+        return redirect('/login')
+    # Get user info
+    user_url = 'https://api.github.com/user'
+    headers = {'Authorization': f'token {access_token}'}
+    user_response = requests.get(user_url, headers=headers)
+    if user_response.status_code != 200:
+        session['error'] = 'Failed to get user info from GitHub'
+        return redirect('/login')
+    user_data = user_response.json()
+    github_id = user_data['id']
+    github_login = user_data['login']
+    name = user_data.get('name', github_login)
+    email = user_data.get('email', '')
+    try:
+        client = get_mongo_client()
+        db = client['pharmacy_db']
+        users = db['users']
+        user_doc = users.find_one({'github_id': github_id})
+        if user_doc:
+            # Existing user
+            session['user'] = {
+                'login': user_doc['username'],
+                'name': user_doc.get('name', name),
+                'role': user_doc.get('role', 'employee'),
+                'github_id': github_id
+            }
+        else:
+            # New user, register
+            username = github_login
+            # Check if username exists
+            if users.find_one({'username': username}):
+                session['error'] = 'Username already taken. Please contact admin.'
+                return redirect('/login')
+            # Insert new user, no password
+            users.insert_one({
+                'username': username,
+                'name': name,
+                'role': 'employee',
+                'github_id': github_id,
+                'email': email
+            })
+            session['user'] = {
+                'login': username,
+                'name': name,
+                'role': 'employee',
+                'github_id': github_id
+            }
+            session['message'] = 'Registered successfully with GitHub! Welcome.'
+        return redirect('/dispense')
+    except ServerSelectionTimeoutError:
+        session['error'] = 'Database connection failed. Please try again later.'
+        return redirect('/login')
+    finally:
+        if 'client' in locals():
+            client.close()
 
 @app.route('/logout', methods=['GET'])
 def logout():
