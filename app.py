@@ -2778,6 +2778,8 @@ def reports():
         message = session.pop('message', None)
         search = None
         report_title = None
+        start_dt = None
+        end_dt = None
 
         def matches_search(tx, search_str):
             if not search_str:
@@ -2806,23 +2808,65 @@ def reports():
             search = request.form.get('search')
             if report_type:
                 try:
-                    if report_type in stock_report_types:
-                        # No dates needed
-                        pass
-                    else:
-                        if not start_date or not end_date:
-                            raise ValueError('Start and end dates are required for this report type.')
+                    # Parse dates if provided
+                    if start_date:
                         start_dt = datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                    if end_date:
                         end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc) + timedelta(days=1) - timedelta(seconds=1)
 
                     # now process the report
                     if report_type in stock_report_types:
+                        if not end_date:
+                            raise ValueError('End date is required for this report type.')
+                        report_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+                        threshold_date = report_date + timedelta(days=30)
+                        now_dt = datetime.now(timezone.utc)
                         med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
                         all_meds = list(medications.find(med_filter, {'_id': 0}).sort('name', 1))
-                        today = datetime.now(timezone.utc).date()
-                        threshold_date = today + timedelta(days=30)
                         stock_data = []
                         for med in all_meds:
+                            med_name = med['name']
+                            current_balance = med.get('balance', 0)
+                            try:
+                                # Period transactions after the report date (from end_dt+ to now)
+                                period_pipeline = [
+                                    {'$match': {
+                                        'med_name': med_name,
+                                        'timestamp': {'$gt': end_dt, '$lte': now_dt}
+                                    }},
+                                    {'$group': {
+                                        '_id': None,
+                                        'dispensed': {
+                                            '$sum': {
+                                                '$cond': [
+                                                    {'$eq': ['$type', 'dispense']},
+                                                    '$quantity',
+                                                    0
+                                                ]
+                                            }
+                                        },
+                                        'received': {
+                                            '$sum': {
+                                                '$cond': [
+                                                    {'$eq': ['$type', 'receive']},
+                                                    '$quantity',
+                                                    0
+                                                ]
+                                            }
+                                        }
+                                    }}
+                                ]
+                                period_result = list(transactions.aggregate(period_pipeline))
+                                dispensed_after = period_result[0].get('dispensed', 0) if period_result else 0
+                                received_after = period_result[0].get('received', 0) if period_result else 0
+
+                                balance_at_date = current_balance - received_after + dispensed_after
+                                balance_at_date = max(0, balance_at_date)
+                            except Exception as query_err:
+                                app.logger.error(f"Query failed for med {med_name}: {query_err}")
+                                # Fallback to current balance
+                                balance_at_date = current_balance
+
                             expiry_str = med.get('expiry_date')
                             expiry_dt = None
                             if expiry_str:
@@ -2843,34 +2887,37 @@ def reports():
                             if not batch_val:  # Covers None, empty string, or falsy
                                 med['batch'] = 'N/A'
 
-                            balance = med.get('balance', 0)
-                            if balance == 0:
+                            if balance_at_date == 0:
                                 status = 'out-of-stock'
                             else:
                                 if expiry_dt is None:
                                     status = 'normal'  # Include even without expiry
-                                elif expiry_dt < today:
+                                elif expiry_dt < report_date:
                                     status = 'expired'
                                 elif expiry_dt <= threshold_date:
                                     status = 'close-to-expire'
                                 else:
                                     status = 'normal'
                             med_copy = med.copy()
+                            med_copy['balance'] = balance_at_date
                             med_copy['status'] = status
                             stock_data.append(med_copy)
 
+                        date_str = end_date  # Use the input string for title
                         if report_type == 'stock_on_hand':
-                            report_title = 'Stock on Hand'
+                            report_title = f'Stock on Hand as of {date_str}'
                         elif report_type == 'expired_list':
                             stock_data = [m for m in stock_data if m['status'] == 'expired']
-                            report_title = 'Expired Drugs List'
+                            report_title = f'Expired Drugs List as of {date_str}'
                         elif report_type == 'near_expired_list':
                             stock_data = [m for m in stock_data if m['status'] == 'close-to-expire']
-                            report_title = 'Near Expired Drug List'
+                            report_title = f'Near Expired Drug List as of {date_str}'
                         elif report_type == 'out_of_stock_list':
                             stock_data = [m for m in stock_data if m['status'] == 'out-of-stock']
-                            report_title = 'Out of Stock List'
+                            report_title = f'Out of Stock List as of {date_str}'
                     elif report_type == 'inventory':
+                        if not start_date or not end_date:
+                            raise ValueError('Start and end dates are required for this report type.')
                         med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
                         meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1).limit(300))  # Temp limit for testing
                         start_date_obj = start_dt.date()
@@ -2957,6 +3004,8 @@ def reports():
                         # Add limit
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
                     elif report_type == 'controlled_drug_register':
+                        if not start_date or not end_date:
+                            raise ValueError('Start and end dates are required for this report type.')
                         controlled_meds_cursor = medications.find({'schedule': 'controlled'}, {'_id': 0, 'name': 1})
                         controlled_meds = [m['name'] for m in controlled_meds_cursor]
                         if controlled_meds:
