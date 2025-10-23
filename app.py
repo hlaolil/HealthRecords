@@ -2789,7 +2789,6 @@ def reports():
                 val_str = str(val).lower()
                 if search_lower in val_str:
                     return True
-            # Handle diagnoses
             diagnoses = tx.get('diagnoses', [])
             if isinstance(diagnoses, list):
                 diag_str = ' '.join(str(d).lower() for d in diagnoses)
@@ -2807,79 +2806,154 @@ def reports():
             if report_type:
                 try:
                     if report_type in stock_report_types:
-                        # No dates needed
-                        pass
+                        # For stock_on_hand, end_date is required to specify the date for balance
+                        if report_type == 'stock_on_hand' and not end_date:
+                            raise ValueError('End date is required for Stock on Hand report.')
                     else:
                         if not start_date or not end_date:
                             raise ValueError('Start and end dates are required for this report type.')
                         start_dt = datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
                         end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc) + timedelta(days=1) - timedelta(seconds=1)
 
-                    # now process the report
                     if report_type in stock_report_types:
-                        med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
-                        all_meds = list(medications.find(med_filter, {'_id': 0}).sort('name', 1))
-                        today = datetime.now(timezone.utc).date()
-                        threshold_date = today + timedelta(days=30)
-                        stock_data = []
-                        for med in all_meds:
-                            expiry_str = med.get('expiry_date')
-                            expiry_dt = None
-                            if expiry_str:
-                                try:
-                                    if 'T' in expiry_str:
-                                        # Full ISO datetime: Extract date part only
-                                        date_part = expiry_str.split('T')[0]
-                                        expiry_dt = datetime.strptime(date_part, '%Y-%m-%d').date()
-                                    else:
-                                        # Date-only string
-                                        expiry_dt = datetime.strptime(expiry_str, '%Y-%m-%d').date()
-                                except ValueError as e:
-                                    app.logger.warning(f"Invalid expiry_date '{expiry_str}' for med '{med.get('name', 'unknown')}': {e} - Treating as no expiry.")
-                                    expiry_dt = None
-
-                            # Handle missing or empty batch: set to 'N/A'
-                            batch_val = med.get('batch')
-                            if not batch_val:  # Covers None, empty string, or falsy
-                                med['batch'] = 'N/A'
-
-                            balance = med.get('balance', 0)
-                            if balance == 0:
-                                status = 'out-of-stock'
-                            else:
-                                if expiry_dt is None:
-                                    status = 'normal'  # Include even without expiry
-                                elif expiry_dt < today:
-                                    status = 'expired'
-                                elif expiry_dt <= threshold_date:
-                                    status = 'close-to-expire'
-                                else:
-                                    status = 'normal'
-                            med_copy = med.copy()
-                            med_copy['status'] = status
-                            stock_data.append(med_copy)
-
+                        # Modified logic for stock_on_hand
                         if report_type == 'stock_on_hand':
-                            report_title = 'Stock on Hand'
-                        elif report_type == 'expired_list':
-                            stock_data = [m for m in stock_data if m['status'] == 'expired']
-                            report_title = 'Expired Drugs List'
-                        elif report_type == 'near_expired_list':
-                            stock_data = [m for m in stock_data if m['status'] == 'close-to-expire']
-                            report_title = 'Near Expired Drug List'
-                        elif report_type == 'out_of_stock_list':
-                            stock_data = [m for m in stock_data if m['status'] == 'out-of-stock']
-                            report_title = 'Out of Stock List'
+                            end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc) + timedelta(days=1) - timedelta(seconds=1)
+                            # Fetch all medications with optional search filter
+                            med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
+                            all_meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'batch': 1, 'price': 1, 'expiry_date': 1}).sort('name', 1))
+                            today = datetime.now(timezone.utc).date()
+                            threshold_date = today + timedelta(days=30)
+                            stock_data = []
+                            for med in all_meds:
+                                med_name = med['name']
+                                # Calculate balance up to end_date
+                                pipeline = [
+                                    {'$match': {
+                                        'med_name': med_name,
+                                        'timestamp': {'$lte': end_dt},
+                                        'type': {'$in': ['receive', 'dispense']}
+                                    }},
+                                    {'$group': {
+                                        '_id': None,
+                                        'received': {
+                                            '$sum': {
+                                                '$cond': [{'$eq': ['$type', 'receive']}, '$quantity', 0]
+                                            }
+                                        },
+                                        'dispensed': {
+                                            '$sum': {
+                                                '$cond': [{'$eq': ['$type', 'dispense']}, '$quantity', 0]
+                                            }
+                                        }
+                                    }}
+                                ]
+                                result = list(transactions.aggregate(pipeline))
+                                received = result[0]['received'] if result else 0
+                                dispensed = result[0]['dispensed'] if result else 0
+                                balance = received - dispensed
+
+                                # Handle expiry date
+                                expiry_str = med.get('expiry_date')
+                                expiry_dt = None
+                                if expiry_str:
+                                    try:
+                                        if 'T' in expiry_str:
+                                            date_part = expiry_str.split('T')[0]
+                                            expiry_dt = datetime.strptime(date_part, '%Y-%m-%d').date()
+                                        else:
+                                            expiry_dt = datetime.strptime(expiry_str, '%Y-%m-%d').date()
+                                    except ValueError as e:
+                                        app.logger.warning(f"Invalid expiry_date '{expiry_str}' for med '{med_name}': {e} - Treating as no expiry.")
+                                        expiry_dt = None
+
+                                # Handle missing or empty batch
+                                batch_val = med.get('batch')
+                                if not batch_val:
+                                    batch_val = 'N/A'
+
+                                # Determine status
+                                if balance == 0:
+                                    status = 'out-of-stock'
+                                else:
+                                    if expiry_dt is None:
+                                        status = 'normal'
+                                    elif expiry_dt < today:
+                                        status = 'expired'
+                                    elif expiry_dt <= threshold_date:
+                                        status = 'close-to-expire'
+                                    else:
+                                        status = 'normal'
+
+                                stock_data.append({
+                                    'name': med_name,
+                                    'balance': balance,
+                                    'batch': batch_val,
+                                    'price': med.get('price', 0.0),
+                                    'expiry_date': expiry_str or 'N/A',
+                                    'status': status
+                                })
+
+                            report_title = f'Stock on Hand as of {end_date}'
+                        else:
+                            # Existing logic for other stock reports
+                            med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
+                            all_meds = list(medications.find(med_filter, {'_id': 0}).sort('name', 1))
+                            today = datetime.now(timezone.utc).date()
+                            threshold_date = today + timedelta(days=30)
+                            stock_data = []
+                            for med in all_meds:
+                                expiry_str = med.get('expiry_date')
+                                expiry_dt = None
+                                if expiry_str:
+                                    try:
+                                        if 'T' in expiry_str:
+                                            date_part = expiry_str.split('T')[0]
+                                            expiry_dt = datetime.strptime(date_part, '%Y-%m-%d').date()
+                                        else:
+                                            expiry_dt = datetime.strptime(expiry_str, '%Y-%m-%d').date()
+                                    except ValueError as e:
+                                        app.logger.warning(f"Invalid expiry_date '{expiry_str}' for med '{med.get('name', 'unknown')}': {e} - Treating as no expiry.")
+                                        expiry_dt = None
+
+                                batch_val = med.get('batch')
+                                if not batch_val:
+                                    med['batch'] = 'N/A'
+
+                                balance = med.get('balance', 0)
+                                if balance == 0:
+                                    status = 'out-of-stock'
+                                else:
+                                    if expiry_dt is None:
+                                        status = 'normal'
+                                    elif expiry_dt < today:
+                                        status = 'expired'
+                                    elif expiry_dt <= threshold_date:
+                                        status = 'close-to-expire'
+                                    else:
+                                        status = 'normal'
+                                med_copy = med.copy()
+                                med_copy['status'] = status
+                                stock_data.append(med_copy)
+
+                            if report_type == 'expired_list':
+                                stock_data = [m for m in stock_data if m['status'] == 'expired']
+                                report_title = 'Expired Drugs List'
+                            elif report_type == 'near_expired_list':
+                                stock_data = [m for m in stock_data if m['status'] == 'close-to-expire']
+                                report_title = 'Near Expired Drug List'
+                            elif report_type == 'out_of_stock_list':
+                                stock_data = [m for m in stock_data if m['status'] == 'out-of-stock']
+                                report_title = 'Out of Stock List'
                     elif report_type == 'inventory':
                         med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
-                        meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1).limit(300))  # Temp limit for testing
+                        meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1).limit(300))
                         start_date_obj = start_dt.date()
                         end_date_obj = end_dt.date()
                         days_in_period = max(1, (end_date_obj - start_date_obj).days + 1)
                         for med in meds:
                             med_name = med['name']
                             try:
-                                # Period transactions (simple $cond per type)
                                 period_pipeline = [
                                     {'$match': {
                                         'med_name': med_name,
@@ -2929,7 +3003,6 @@ def reports():
                                 })
                             except Exception as query_err:
                                 app.logger.error(f"Query failed for med {med_name}: {query_err}")
-                                # Fallback to 0s to avoid crashing the whole report
                                 current_balance = med.get('balance', 0)
                                 report_data.append({
                                     'med_name': med_name,
@@ -2954,13 +3027,11 @@ def reports():
                                 {'expiry_date': {'$regex': search, '$options': 'i'}},
                             ]
                             base_query['$or'] = or_query
-                        # Add limit
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
                     elif report_type == 'controlled_drug_register':
                         controlled_meds_cursor = medications.find({'schedule': 'controlled'}, {'_id': 0, 'name': 1})
                         controlled_meds = [m['name'] for m in controlled_meds_cursor]
                         if controlled_meds:
-                            # Fetch all relevant transactions in period with limit
                             period_query = {
                                 'med_name': {'$in': controlled_meds},
                                 'type': {'$in': ['receive', 'dispense']},
@@ -2982,7 +3053,6 @@ def reports():
                                     beginning_balance = current_balance - received_in_period + dispensed_in_period
                                     beginning_balance = max(0, beginning_balance)
                                     ending_balance = current_balance
-                                    # Compute running balances
                                     running_current_balance = beginning_balance
                                     running_entries = []
                                     for tx in med_txs:
@@ -2994,7 +3064,6 @@ def reports():
                                         tx_copy = tx.copy()
                                         tx_copy['balance_after'] = running_current_balance
                                         running_entries.append(tx_copy)
-                                    # Filter transactions
                                     filtered_entries = [e for e in running_entries if matches_search(e, search)]
                                     controlled_register.append({
                                         'med_name': med_name,
@@ -3006,7 +3075,6 @@ def reports():
                                     })
                                 except Exception as query_err:
                                     app.logger.error(f"Query failed for controlled med {med_name}: {query_err}")
-                                    # Skip this med to avoid crashing
                                     continue
                 except ValueError as e:
                     message = f'Invalid input: {str(e)}'
