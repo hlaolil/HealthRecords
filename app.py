@@ -410,6 +410,7 @@ CSS_STYLE = """
 
 DISPENSE_TEMPLATE = CSS_STYLE + """
 <h1>Dispensing</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
 
 {% if message %}
@@ -1153,7 +1154,9 @@ document.addEventListener('DOMContentLoaded', function() {
 """
 
 RECEIVE_TEMPLATE = CSS_STYLE + """
-<h1>Receiving</h1>{{ nav_links|safe }}
+<h1>Receiving</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
+{{ nav_links|safe }}
 
 {% if message %}
 <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
@@ -1559,6 +1562,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 ADD_MED_TEMPLATE = CSS_STYLE + """
 <h1>Add New Medication</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
 
 {% if message %}
@@ -1903,6 +1907,7 @@ document.addEventListener('DOMContentLoaded', function() {
 # Edit Medication Template
 EDIT_MED_TEMPLATE = CSS_STYLE + """
 <h1>Edit Medication</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
 
 {% if message %}
@@ -2200,6 +2205,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 # Login Template
 LOGIN_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Login</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
 <div class="login-form">
     <h2>Login</h2>
     {% if error %}
@@ -2219,6 +2225,7 @@ LOGIN_TEMPLATE = CSS_STYLE + """
 # Register Password Template
 REGISTER_PASSWORD_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Registration</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
 <div class="register-form">
     <h2>Admin Access Required</h2>
     {% if error %}
@@ -2236,6 +2243,7 @@ REGISTER_PASSWORD_TEMPLATE = CSS_STYLE + """
 # Register Template
 REGISTER_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Registration</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
 <div class="register-form">
     <h2>Register</h2>
     {% if error %}
