@@ -1956,6 +1956,7 @@ EDIT_MED_TEMPLATE = CSS_STYLE + """
 # Reports Template (updated with nav and user column in tables, and edit button in stock table)
 REPORTS_TEMPLATE = CSS_STYLE + """
 <h1>Inventory Reports</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
 
 {% if message %}
