@@ -599,6 +599,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 <table>
     <thead>
         <tr>
+            <th>#</th>
             <th>Date</th>
             <th>Patient</th>
             <th>Company</th>
@@ -617,26 +618,40 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         </tr>
     </thead>
     <tbody>
+        {% set tx_number = namespace(value=1) %}
         {% for t in tx_list %}
-        <tr>
-            <td>{{ t.date }}</td>
-            <td>{{ t.patient }}</td>
-            <td>{{ t.company }}</td>
-             <td>{{ t.position }}</td>
-             <td>{{ t.gender }}</td>
-             <td>{{ t.age_group }}</td>
-            <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-            <td>{{ t.user }}</td>
-            <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
-            <td>{{ t.prescriber }}</td>
-            <td>{{ t.dispenser }}</td>
-            <td>{{ t.sick_leave_days }}</td>
-            <td>{{ t.med_name }}</td>
-            <td>{{ t.quantity }}</td>
-            <td><a href="{{ url_for('dispense', edit=t.transaction_id, start_date=start_date, end_date=end_date, search=search) }}">Edit</a></td>
-        </tr>
+            {% if loop.first or t.transaction_id != tx_list[loop.index0 - 1].transaction_id %}
+                <tr style="border-top: 3px double #0056b3;">
+                    <td rowspan="{{ tx_list|selectattr('transaction_id', 'equalto', t.transaction_id)|list|length }}" 
+                        style="vertical-align: middle; font-weight: bold; font-size: 1.1em; color: #0056b3;">
+                        {{ tx_number.value }}.
+                    </td>
+                    {% set tx_number.value = tx_number.value + 1 %}
+            {% else %}
+                <tr>
+            {% endif %}
+                    <td>{{ t.date }}</td>
+                    <td>{{ t.patient }}</td>
+                    <td>{{ t.company }}</td>
+                    <td>{{ t.position }}</td>
+                    <td>{{ t.gender }}</td>
+                    <td>{{ t.age_group }}</td>
+                    <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                    <td>{{ t.user }}</td>
+                    <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
+                    <td>{{ t.prescriber }}</td>
+                    <td>{{ t.dispenser }}</td>
+                    <td>{{ t.sick_leave_days }}</td>
+                    <td>{{ t.med_name }}</td>
+                    <td>{{ t.quantity }}</td>
+                    <td>
+                        <a href="{{ url_for('dispense', edit=t.transaction_id, start_date=start_date, end_date=end_date, search=search) }}">
+                            Edit
+                        </a>
+                    </td>
+                </tr>
         {% else %}
-        <tr><td colspan="15">No dispense transactions.</td></tr>
+        <tr><td colspan="16">No dispense transactions.</td></tr>
         {% endfor %}
     </tbody>
 </table>
