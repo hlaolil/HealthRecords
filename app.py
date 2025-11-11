@@ -316,6 +316,22 @@ CSS_STYLE = """
     .action-buttons .view-btn:hover {
         background-color: #218838;
     }
+    /* === Override Delete Button inside forms === */
+    form button.delete-btn {
+        background-color: #dc3545 !important;
+        color: #fff !important;
+        padding: 8px 16px !important; /* smaller size */
+        font-size: 14px !important;
+        border-radius: 4px !important;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
+        transition: all 0.2s ease !important;
+    }
+
+    form button.delete-btn:hover {
+        background-color: #c82333 !important;
+        transform: translateY(-2px) !important;
+        box-shadow: 0 3px 6px rgba(0,0,0,0.2) !important;
+    }
 
     table {
         width: 100%;
@@ -695,7 +711,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                         {% if session['user']['role'] == 'admin' %}
                         <form method="POST"
                               action="{{ url_for('delete_dispense') }}"
-                              style="display:inline;"
+                              style="display:inline-block;"
                               onsubmit="return confirm('Permanently delete this dispense transaction?\nStock will be restored.');">
                             <input type="hidden" name="transaction_id" value="{{ t.transaction_id }}">
                             <input type="hidden" name="start_date" value="{{ start_date or '' }}">
