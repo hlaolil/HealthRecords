@@ -320,7 +320,7 @@ CSS_STYLE = """
     form button.delete-btn {
         background-color: #dc3545 !important;
         color: #fff !important;
-        padding: 6px 10px !important; /* smaller size */
+        padding: 0 !important; /* smaller size */
         font-size: 13px !important;
         border-radius: 2px !important;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
