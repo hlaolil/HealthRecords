@@ -622,7 +622,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                                             start_date=start_date,
                                             end_date=end_date,
                                             search=search) }}">
-                            Edit
+                            <button type="button" class="edit-btn">Edit</button>
                         </a>
                         {% if session['user']['role'] == 'admin' %}
                         <form method="POST"
