@@ -648,8 +648,8 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                         <a href="{{ url_for('dispense', edit=t.transaction_id, start_date=start_date, end_date=end_date, search=search) }}">
                             Edit
                         </a>
-                        {% if session.user.role == 'admin' %}
-                        |
+                        {% if is_admin %}
+|
                         <form method="POST" action="{{ url_for('delete_dispense') }}"
                               style="display:inline;"
                               onsubmit="return confirm('Delete this dispense transaction ({{ t.transaction_id }})? Stock will be restored.');">
@@ -659,11 +659,6 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                             </button>
                         </form>
                         {% endif %}
-                    </td>
-                </tr>
-        {% else %}
-        <tr><td colspan="16">No dispense transactions.</td></tr>
-        {% endfor %}
     </tbody>
 </table>
 
