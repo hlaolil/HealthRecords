@@ -335,7 +335,7 @@ CSS_STYLE = """
     .button-div {
         display: flex;
         align-items: end;
-        gap: 10px;
+        gap: 5px;
     }
     .login-form, .register-form {
         max-width: 400px;
@@ -350,7 +350,7 @@ CSS_STYLE = """
         background-color: #28a745;
         color: white;
         border: none;
-        padding: 5px 10px;
+        padding: 5px 5px;
         border-radius: 4px;
         cursor: pointer;
         font-size: 12px;
