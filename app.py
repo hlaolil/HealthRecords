@@ -3038,6 +3038,55 @@ def reports():
         ), 500
     finally:
         client.close()
+# 2. NEW ROUTE – delete a dispense transaction
+# -------------------------------------------------
+@app.route('/delete-dispense', methods=['POST'])
+@login_required
+def delete_dispense():
+    if session['user'].get('role') != 'admin':
+        flash('Only admins can delete dispense transactions.', 'error')
+        return redirect(url_for('dispense'))
+
+    tx_id = request.form.get('transaction_id')
+    if not tx_id:
+        flash('No transaction selected.', 'error')
+        return redirect(url_for('dispense'))
+
+    try:
+        client = get_mongo_client()
+        db = client['pharmacy_db']
+        transactions = db['transactions']
+        medications = db['medications']
+
+        # 1. Get every medication line for this transaction
+        tx_rows = list(transactions.find({'transaction_id': tx_id, 'type': 'dispense'}))
+        if not tx_rows:
+            flash('Transaction not found.', 'error')
+            return redirect(url_for('dispense'))
+
+        # 2. Return stock
+        for row in tx_rows:
+            med_name = row['med_name']
+            qty = row['quantity']
+            medications.update_one(
+                {'name': med_name},
+                {'$inc': {'balance': qty}}
+            )
+
+        # 3. Delete all rows belonging to the transaction
+        transactions.delete_many({'transaction_id': tx_id})
+
+        flash('Dispense transaction deleted – stock restored.', 'success')
+    except Exception as e:
+        flash(f'Delete failed: {str(e)}', 'error')
+    finally:
+        client.close()
+
+    # Preserve any filters the user had
+    return redirect(url_for('dispense',
+                            start_date=request.form.get('start_date'),
+                            end_date=request.form.get('end_date'),
+                            search=request.form.get('search')))
 @app.route('/api/diagnoses', methods=['GET'])
 @login_required
 def get_diagnosis_suggestions():
