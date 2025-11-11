@@ -116,7 +116,7 @@ def get_nav_links():
             <a href="/login">Login</a> | <a href="/register">Register</a>
         </p>
         """
-# CSS for all templates (enhanced version)
+# CSS for all templates (same colors, improved button design)
 CSS_STYLE = """
 <style>
     body {
@@ -162,6 +162,7 @@ CSS_STYLE = """
         text-decoration: underline;
         color: #003d80;
     }
+
     form {
         background-color: #fff;
         padding: 20px;
@@ -170,26 +171,31 @@ CSS_STYLE = """
         max-width: 900px;
         margin: 0 auto 20px;
     }
+
     .dispense-form,
     .receive-form,
     .add-medication-form,
     .edit-medication-form {
         display: block;
     }
+
     .common-section {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
         gap: 15px;
         margin-bottom: 20px;
     }
+
     .med-section, .diag-section {
         margin-bottom: 20px;
     }
+
     #medications, #diagnoses {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
         gap: 15px;
     }
+
     .med-row, .diag-row {
         display: grid;
         grid-template-columns: 1fr 1fr auto;
@@ -200,14 +206,17 @@ CSS_STYLE = """
         border-radius: 4px;
         align-items: end;
     }
+
     .diag-row > div:first-of-type {
         grid-column: span 2;
     }
+
     .med-row label, .diag-row label {
         display: block;
         margin: 0 0 5px;
         font-weight: bold;
     }
+
     .med-row input, .diag-row input {
         width: 100%;
         padding: 8px;
@@ -215,11 +224,13 @@ CSS_STYLE = """
         border-radius: 4px;
         box-sizing: border-box;
     }
+
     form label {
         display: block;
         margin: 10px 0 5px;
         font-weight: bold;
     }
+
     form input, form select, form datalist {
         width: 100%;
         padding: 8px;
@@ -228,73 +239,80 @@ CSS_STYLE = """
         border-radius: 4px;
         box-sizing: border-box;
     }
+
     .form-buttons {
         text-align: center;
     }
 
-    /* --- Improved Buttons --- */
+    /* === Improved Buttons (keeping original colors) === */
     form input[type="submit"], 
     form button {
-        background: linear-gradient(135deg, #0056b3, #003d80);
+        background-color: #0056b3;
         color: #fff;
         border: none;
-        padding: 10px 24px;
+        padding: 12px 26px;
         border-radius: 6px;
         cursor: pointer;
         margin: 10px 8px;
         display: inline-block;
-        font-weight: 600;
+        font-weight: bold;
         font-size: 15px;
-        letter-spacing: 0.3px;
-        transition: all 0.25s ease;
+        transition: all 0.25s ease-in-out;
         box-shadow: 0 3px 6px rgba(0,0,0,0.15);
     }
+
     form input[type="submit"]:hover, 
     form button:hover {
-        background: linear-gradient(135deg, #003d80, #002b5c);
+        background-color: #003d80;
         transform: translateY(-2px);
-        box-shadow: 0 4px 10px rgba(0,0,0,0.2);
-    }
-    form button:active, 
-    .action-buttons button:active {
-        transform: scale(0.97);
-        box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        box-shadow: 0 5px 10px rgba(0,0,0,0.2);
     }
 
-    /* Action Buttons (Edit/Delete/View) */
-    .action-buttons {
-        padding: 6px 12px;
+    form input[type="submit"]:active, 
+    form button:active {
+        transform: scale(0.97);
+        box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+    }
+
+    /* === Action Buttons (Edit / Delete / View) === */
+    .action-buttons button {
+        padding: 6px 10px;
         border-radius: 4px;
-        font-size: 14px;
-        font-weight: 500;
+        font-size: 13px;
+        font-weight: 600;
         border: none;
         cursor: pointer;
-        transition: all 0.2s ease-in-out;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        transition: all 0.2s ease;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    .action-buttons .view-btn {
-        background-color: #28a745;
-        color: #fff;
-    }
-    .action-buttons .view-btn:hover {
-        background-color: #218838;
+
+    .action-buttons button:hover {
         transform: translateY(-2px);
+        box-shadow: 0 3px 6px rgba(0,0,0,0.2);
     }
-    .action-buttons .edit-btn {
-        background-color: #ffc107;
-        color: #212529;
-    }
-    .action-buttons .edit-btn:hover {
-        background-color: #e0a800;
-        transform: translateY(-2px);
-    }
+
     .action-buttons .delete-btn {
         background-color: #dc3545;
         color: #fff;
     }
     .action-buttons .delete-btn:hover {
         background-color: #c82333;
-        transform: translateY(-2px);
+    }
+
+    .action-buttons .edit-btn {
+        background-color: #ffc107;
+        color: #212529;
+    }
+    .action-buttons .edit-btn:hover {
+        background-color: #e0a800;
+    }
+
+    .action-buttons .view-btn {
+        background-color: #28a745;
+        color: white;
+    }
+    .action-buttons .view-btn:hover {
+        background-color: #218838;
     }
 
     table {
@@ -304,38 +322,47 @@ CSS_STYLE = """
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         margin-top: 20px;
     }
+
     table th, table td {
         padding: 12px;
         text-align: left;
         border: 1px solid #dee2e6;
     }
+
     table th {
         background-color: #0056b3;
         color: #fff;
         font-weight: bold;
     }
+
     table tr:nth-child(even) {
         background-color: #f8f9fa;
     }
+
     table tr:hover {
         background-color: #e0e7f5;
     }
+
     .expired {
         background-color: #f8d7da !important;
         color: #721c24 !important;
     }
+
     .out-of-stock {
         background-color: #e3f2fd !important;
         color: #1976d2 !important;
     }
+
     .close-to-expire {
         background-color: #fff3cd !important;
         color: #856404 !important;
     }
+
     .normal {
         background-color: inherit !important;
         color: inherit !important;
     }
+
     .message {
         padding: 10px;
         margin-bottom: 20px;
@@ -343,14 +370,17 @@ CSS_STYLE = """
         text-align: center;
         font-weight: bold;
     }
+
     .message.success {
         background-color: #d4edda;
         color: #155724;
     }
+
     .message.error {
         background-color: #f8d7da;
         color: #721c24;
     }
+
     .filter-form {
         background-color: #fff;
         padding: 15px;
@@ -358,17 +388,20 @@ CSS_STYLE = """
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         margin-bottom: 20px;
     }
+
     .filter-section {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
         gap: 15px;
         align-items: end;
     }
+
     .filter-section label {
         display: block;
         font-weight: bold;
         margin-bottom: 5px;
     }
+
     .filter-section input {
         width: 100%;
         padding: 8px;
@@ -376,19 +409,23 @@ CSS_STYLE = """
         border-radius: 4px;
         box-sizing: border-box;
     }
+
     .filter-section a {
         color: #0056b3;
         text-decoration: none;
         margin-left: 10px;
     }
+
     .filter-section a:hover {
         text-decoration: underline;
     }
+
     .button-div {
         display: flex;
         align-items: end;
         gap: 5px;
     }
+
     .login-form, .register-form {
         max-width: 400px;
         margin: 100px auto;
@@ -398,6 +435,7 @@ CSS_STYLE = """
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         text-align: center;
     }
+
     @media (max-width: 600px) {
         body {
             padding: 10px;
@@ -424,6 +462,7 @@ CSS_STYLE = """
     }
 </style>
 """
+
 
 DISPENSE_TEMPLATE = CSS_STYLE + """
 <h1>Dispensing</h1>
