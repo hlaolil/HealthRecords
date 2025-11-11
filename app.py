@@ -297,6 +297,10 @@ CSS_STYLE = """
     }
     .action-buttons .delete-btn:hover {
         background-color: #c82333;
+        color: #fff;
+        font-size: 13px;          /* Slightly smaller text */
+        padding: 4px 10px;        /* Reduced padding */
+        border-radius: 3px;       /* Slightly sharper corners */
     }
 
     .action-buttons .edit-btn {
@@ -699,7 +703,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                             <input type="hidden" name="start_date" value="{{ start_date or '' }}">
                             <input type="hidden" name="end_date" value="{{ end_date or '' }}">
                             <input type="hidden" name="search" value="{{ search or '' }}">
-                            <button type="button" class="delete-btn">Delete</button>
+                            <button type="submit" class="delete-btn">Delete</button>
                         </form>
                         {% endif %}
                     </td>
