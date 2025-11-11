@@ -616,10 +616,26 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                     <td>{{ t.sick_leave_days }}</td>
                     <td>{{ t.med_name }}</td>
                     <td>{{ t.quantity }}</td>
-                    <td>
-                        <a href="{{ url_for('dispense', edit=t.transaction_id, start_date=start_date, end_date=end_date, search=search) }}">
+                    <td class="action-buttons">
+                        <a href="{{ url_for('dispense',
+                                            edit=t.transaction_id,
+                                            start_date=start_date,
+                                            end_date=end_date,
+                                            search=search) }}">
                             Edit
                         </a>
+                        {% if session['user']['role'] == 'admin' %}
+                        <form method="POST"
+                              action="{{ url_for('delete_dispense') }}"
+                              style="display:inline;"
+                              onsubmit="return confirm('Permanently delete this dispense transaction?\nStock will be restored.');">
+                            <input type="hidden" name="transaction_id" value="{{ t.transaction_id }}">
+                            <input type="hidden" name="start_date" value="{{ start_date or '' }}">
+                            <input type="hidden" name="end_date" value="{{ end_date or '' }}">
+                            <input type="hidden" name="search" value="{{ search or '' }}">
+                            <button type="submit" class="delete-btn">Delete</button>
+                        </form>
+                        {% endif %}
                     </td>
                 </tr>
         {% else %}
@@ -1001,7 +1017,6 @@ function addInputListener(input, type) {
                 break;
             case 'diagnosis':
                 datalist = document.getElementById('diag_suggestions');
-                // For diagnoses, keep API if needed; here assuming client-side or API
                 fetch(`/api/diagnoses?query=${encodeURIComponent(query)}`)
                     .then(response => response.json())
                     .then(suggestions => {
@@ -1121,7 +1136,6 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 // Clear form after successful dispense
 {% if message and ('successfully' in message|lower or 'updated' in message|lower) %}
-    // Do not clear if editing, but since message after post, and redirect not, but for now, clear only if new
     {% if not tx_data %}
         clearForm();
     {% endif %}
