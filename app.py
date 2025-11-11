@@ -660,7 +660,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                             <input type="hidden" name="start_date" value="{{ start_date or '' }}">
                             <input type="hidden" name="end_date" value="{{ end_date or '' }}">
                             <input type="hidden" name="search" value="{{ search or '' }}">
-                            <button type="submit" class="delete-btn">Delete</button>
+                            <button type="button" class="delete-btn">Delete</button>
                         </form>
                         {% endif %}
                     </td>
