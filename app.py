@@ -325,6 +325,7 @@ CSS_STYLE = """
         border-radius: 2px !important;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
         transition: all 0.2s ease !important;
+        margin: 1px 1px; !important;
     }
 
     form button.delete-btn:hover {
