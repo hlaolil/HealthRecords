@@ -3158,6 +3158,50 @@ def reports():
     finally:
         client.close()
 
+@app.route('/delete-dispense', methods=['POST'])
+@login_required
+def delete_dispense():
+    """Admin-only: delete a whole dispense transaction and restore stock."""
+    if session['user'].get('role') != 'admin':
+        flash('Only admins can delete dispense transactions.')
+        return redirect(request.referrer or '/dispense')
+
+    tx_id = request.form.get('transaction_id')
+    if not tx_id:
+        flash('No transaction selected.')
+        return redirect(request.referrer or '/dispense')
+
+    client = get_mongo_client()
+    try:
+        db = client['pharmacy_db']
+        txs = db['transactions']
+        meds = db['medications']
+
+        # 1. Grab every line of the transaction
+        lines = list(txs.find({'transaction_id': tx_id, 'type': 'dispense'}))
+
+        if not lines:
+            flash('Transaction not found.')
+            return redirect(request.referrer or '/dispense')
+
+        # 2. Restore stock
+        for line in lines:
+            med_name = line['med_name']
+            qty      = line['quantity']
+            meds.update_one({'name': med_name}, {'$inc': {'balance': qty}})
+
+        # 3. Remove all lines
+        txs.delete_many({'transaction_id': tx_id})
+
+        flash('Dispense transaction deleted – stock restored.')
+    except Exception as e:
+        app.logger.error(f"Delete dispense error: {e}")
+        flash('Error deleting transaction.')
+    finally:
+        client.close()
+
+    return redirect(request.referrer or '/dispense')
+
 @app.route('/api/diagnoses', methods=['GET'])
 @login_required
 def get_diagnosis_suggestions():
