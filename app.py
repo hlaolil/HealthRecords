@@ -648,6 +648,17 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                         <a href="{{ url_for('dispense', edit=t.transaction_id, start_date=start_date, end_date=end_date, search=search) }}">
                             Edit
                         </a>
+                        {% if session.user.role == 'admin' %}
+                        |
+                        <form method="POST" action="{{ url_for('delete_dispense') }}"
+                              style="display:inline;"
+                              onsubmit="return confirm('Delete this dispense transaction ({{ t.transaction_id }})? Stock will be restored.');">
+                            <input type="hidden" name="transaction_id" value="{{ t.transaction_id }}">
+                            <button type="submit" style="background:none;border:none;color:#c82333;padding:0;cursor:pointer;">
+                                Delete
+                            </button>
+                        </form>
+                        {% endif %}
                     </td>
                 </tr>
         {% else %}
@@ -903,8 +914,8 @@ const medicationOptions = [
     "Lisinopril, 020, mg",
     "Loperamide Tabs, 002 mg",
     "Loratadine, 010 mg",
-    "Lorsatan, 050 mg",
-    "Lorsatan, 100 mg",
+    "Losartan, 050 mg",
+    "Losartan, 100 mg",
     "Lubrucating Gel, 050 g",
     "Magasil Suspension, 100 ml",
     "Magnesium Suphate injection, 010 mg",
@@ -1166,6 +1177,7 @@ document.addEventListener('DOMContentLoaded', function() {
         clearForm();
     {% endif %}
 {% endif %}
+
 </script>
 """
 
@@ -1447,8 +1459,8 @@ const medicationOptions = [
     "Lisinopril, 020, mg",
     "Loperamide Tabs, 002 mg",
     "Loratadine, 010 mg",
-    "Lorsatan, 050 mg",
-    "Lorsatan, 100 mg",
+    "Losartan, 050 mg",
+    "Losartan, 100 mg",
     "Lubrucating Gel, 050 g",
     "Magasil Suspension, 100 ml",
     "Magnesium Suphate injection, 010 mg",
@@ -1794,8 +1806,8 @@ const medicationOptions = [
     "Lisinopril, 020, mg",
     "Loperamide Tabs, 002 mg",
     "Loratadine, 010 mg",
-    "Lorsatan, 050 mg",
-    "Lorsatan, 100 mg",
+    "Losartan, 050 mg",
+    "Losartan, 100 mg",
     "Lubrucating Gel, 050 g",
     "Magasil Suspension, 100 ml",
     "Magnesium Suphate injection, 010 mg",
