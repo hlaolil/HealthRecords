@@ -250,7 +250,7 @@ CSS_STYLE = """
         background-color: #0056b3;
         color: #fff;
         border: none;
-        padding: 12px 26px;
+        padding: 5px 10px;
         border-radius: 6px;
         cursor: pointer;
         margin: 10px 8px;
@@ -298,9 +298,7 @@ CSS_STYLE = """
     .action-buttons .delete-btn:hover {
         background-color: #c82333;
         color: #fff;
-        font-size: 10px;          /* Slightly smaller text */
-        padding: 1px 1px;        /* Reduced padding */
-        border-radius: 3px;       /* Slightly sharper corners */
+
     }
 
     .action-buttons .edit-btn {
