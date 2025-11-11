@@ -350,11 +350,11 @@ CSS_STYLE = """
         background-color: #28a745;
         color: white;
         border: none;
-        padding: 5px 5px;
-        border-radius: 4px;
+        padding: 1px 1px;
+        border-radius: 1px;
         cursor: pointer;
-        font-size: 12px;
-        margin-right: 5px;
+        font-size: 5px;
+        margin-right: 1px;
     }
     .action-buttons button:hover {
         background-color: #218838;
