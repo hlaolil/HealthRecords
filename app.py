@@ -250,7 +250,7 @@ CSS_STYLE = """
         background-color: #0056b3;
         color: #fff;
         border: none;
-        padding: 5px 10px;
+        padding: 12px 26px;
         border-radius: 6px;
         cursor: pointer;
         margin: 10px 8px;
@@ -275,7 +275,7 @@ CSS_STYLE = """
     }
 
     /* === Action Buttons (Edit / Delete / View) === */
-    .action-buttons button {
+    .action-buttons {
         padding: 6px 10px;
         border-radius: 4px;
         font-size: 13px;
