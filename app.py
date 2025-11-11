@@ -2411,11 +2411,11 @@ def dispense():
         medications = db['medications']
         transactions = db['transactions']
         message = None
-
         start_date = request.values.get('start_date')
         end_date = request.values.get('end_date')
         search = request.values.get('search')
         current_user = session['user']['name']
+        is_admin = session['user'].get('role') == 'admin'  # ← Added for delete button
 
         # Build query for tx_list
         base_query = {'type': 'dispense'}
@@ -2441,8 +2441,8 @@ def dispense():
                 {'diagnoses.0': {'$regex': search, '$options': 'i'}},
             ]
             base_query['$or'] = or_query
-        tx_list = list(transactions.find(base_query).sort('timestamp', -1))
 
+        tx_list = list(transactions.find(base_query).sort('timestamp', -1))
         tx_data = None
         edit_id = request.args.get('edit')
         if edit_id:
@@ -2459,7 +2459,7 @@ def dispense():
         if request.method == 'POST':
             transaction_id = request.form.get('transaction_id')
             if transaction_id:
-                # Edit mode
+                # Edit mode: restore old stock first
                 old_meds = list(transactions.find({'transaction_id': transaction_id}))
                 for old_tx in old_meds:
                     med_name = old_tx['med_name']
@@ -2469,7 +2469,7 @@ def dispense():
                 tx_id = transaction_id
                 message_prefix = 'Updated'
             else:
-                # New
+                # New transaction
                 tx_id = str(uuid4())
                 message_prefix = 'Dispensed'
 
@@ -2483,8 +2483,8 @@ def dispense():
                 date_str = request.form['date']
                 gender = request.form['gender']
                 sick_leave_days = int(request.form['sick_leave_days'])
-
                 diagnoses = [d.strip() for d in request.form.getlist('diagnoses') if d.strip()]
+
                 if not diagnoses:
                     message = 'Please provide at least one diagnosis.'
                 else:
@@ -2541,13 +2541,33 @@ def dispense():
                             message = f'{message_prefix} successfully: {", ".join(dispensed_meds)}'
                         else:
                             message = '; '.join(error_msgs) if error_msgs else f'No medications {message_prefix.lower()}.'
-
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
 
-        return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search, tx_data=tx_data)
+        return render_template_string(
+            DISPENSE_TEMPLATE,
+            tx_list=tx_list,
+            nav_links=get_nav_links(),
+            message=message,
+            start_date=start_date,
+            end_date=end_date,
+            search=search,
+            tx_data=tx_data,
+            is_admin=is_admin  # ← Pass is_admin to template
+        )
+
     except ServerSelectionTimeoutError:
-        return render_template_string(DISPENSE_TEMPLATE, tx_list=[], nav_links=get_nav_links(), message="Database connection failed. Please try again later.", start_date='', end_date='', search='', tx_data=None), 500
+        return render_template_string(
+            DISPENSE_TEMPLATE,
+            tx_list=[],
+            nav_links=get_nav_links(),
+            message="Database connection failed. Please try again later.",
+            start_date='',
+            end_date='',
+            search='',
+            tx_data=None,
+            is_admin=is_admin
+        ), 500
     finally:
         client.close()
 
