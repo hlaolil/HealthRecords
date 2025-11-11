@@ -116,7 +116,7 @@ def get_nav_links():
             <a href="/login">Login</a> | <a href="/register">Register</a>
         </p>
         """
-# CSS for all templates (unchanged)
+# CSS for all templates (enhanced version)
 CSS_STYLE = """
 <style>
     body {
@@ -128,7 +128,7 @@ CSS_STYLE = """
         color: #333;
     }
     h1 {
-        color: #0056b3; /* darker blue */
+        color: #0056b3;
         text-align: center;
         margin-bottom: 20px;
     }
@@ -153,14 +153,14 @@ CSS_STYLE = """
         border-bottom: 1px solid #dee2e6;
     }
     .nav-links a {
-        color: #0056b3; /* darker blue links */
+        color: #0056b3;
         text-decoration: none;
         margin: 0 10px;
         font-weight: bold;
     }
     .nav-links a:hover {
         text-decoration: underline;
-        color: #003d80; /* darker on hover */
+        color: #003d80;
     }
     form {
         background-color: #fff;
@@ -231,20 +231,72 @@ CSS_STYLE = """
     .form-buttons {
         text-align: center;
     }
-    form input[type="submit"], form button {
-        background-color: #0056b3; /* darker blue button */
+
+    /* --- Improved Buttons --- */
+    form input[type="submit"], 
+    form button {
+        background: linear-gradient(135deg, #0056b3, #003d80);
         color: #fff;
         border: none;
-        padding: 10px 20px;
-        border-radius: 4px;
+        padding: 10px 24px;
+        border-radius: 6px;
         cursor: pointer;
-        margin: 10px 5px;
+        margin: 10px 8px;
         display: inline-block;
-        font-weight: bold;
+        font-weight: 600;
+        font-size: 15px;
+        letter-spacing: 0.3px;
+        transition: all 0.25s ease;
+        box-shadow: 0 3px 6px rgba(0,0,0,0.15);
     }
-    form input[type="submit"]:hover, form button:hover {
-        background-color: #003d80; /* even darker on hover */
+    form input[type="submit"]:hover, 
+    form button:hover {
+        background: linear-gradient(135deg, #003d80, #002b5c);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 10px rgba(0,0,0,0.2);
     }
+    form button:active, 
+    .action-buttons button:active {
+        transform: scale(0.97);
+        box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+
+    /* Action Buttons (Edit/Delete/View) */
+    .action-buttons button {
+        padding: 6px 12px;
+        border-radius: 4px;
+        font-size: 14px;
+        font-weight: 500;
+        border: none;
+        cursor: pointer;
+        transition: all 0.2s ease-in-out;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    .action-buttons .view-btn {
+        background-color: #28a745;
+        color: #fff;
+    }
+    .action-buttons .view-btn:hover {
+        background-color: #218838;
+        transform: translateY(-2px);
+    }
+    .action-buttons .edit-btn {
+        background-color: #ffc107;
+        color: #212529;
+    }
+    .action-buttons .edit-btn:hover {
+        background-color: #e0a800;
+        transform: translateY(-2px);
+    }
+    .action-buttons .delete-btn {
+        background-color: #dc3545;
+        color: #fff;
+    }
+    .action-buttons .delete-btn:hover {
+        background-color: #c82333;
+        transform: translateY(-2px);
+    }
+
     table {
         width: 100%;
         border-collapse: collapse;
@@ -258,7 +310,7 @@ CSS_STYLE = """
         border: 1px solid #dee2e6;
     }
     table th {
-        background-color: #0056b3; /* darker table header */
+        background-color: #0056b3;
         color: #fff;
         font-weight: bold;
     }
@@ -266,7 +318,7 @@ CSS_STYLE = """
         background-color: #f8f9fa;
     }
     table tr:hover {
-        background-color: #e0e7f5; /* subtle blue hover */
+        background-color: #e0e7f5;
     }
     .expired {
         background-color: #f8d7da !important;
@@ -346,32 +398,6 @@ CSS_STYLE = """
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         text-align: center;
     }
-    .action-buttons button {
-        background-color: #28a745;
-        color: white;
-        border: none;
-        padding: 1px 1px;
-        border-radius: 1px;
-        cursor: pointer;
-        font-size: 5px;
-        margin-right: 1px;
-    }
-    .action-buttons button:hover {
-        background-color: #218838;
-    }
-    .action-buttons .delete-btn {
-        background-color: #dc3545;
-    }
-    .action-buttons .delete-btn:hover {
-        background-color: #c82333;
-    }
-    .edit-btn {
-        background-color: #ffc107;
-        color: #212529;
-    }
-    .edit-btn:hover {
-        background-color: #e0a800;
-    }
     @media (max-width: 600px) {
         body {
             padding: 10px;
@@ -380,7 +406,7 @@ CSS_STYLE = """
             max-width: 100%;
         }
         .common-section {
-            grid-template-columns: 1fr; /* Single column on mobile */
+            grid-template-columns: 1fr;
         }
         #medications, #diagnoses {
             grid-template-columns: 1fr;
@@ -398,6 +424,7 @@ CSS_STYLE = """
     }
 </style>
 """
+
 DISPENSE_TEMPLATE = CSS_STYLE + """
 <h1>Dispensing</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
