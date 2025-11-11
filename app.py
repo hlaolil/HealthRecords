@@ -262,7 +262,7 @@ CSS_STYLE = """
     }
 
     /* Action Buttons (Edit/Delete/View) */
-    .action-buttons button {
+    .action-buttons {
         padding: 6px 12px;
         border-radius: 4px;
         font-size: 14px;
