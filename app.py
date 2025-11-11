@@ -294,6 +294,8 @@ CSS_STYLE = """
     .action-buttons .delete-btn {
         background-color: #dc3545;
         color: #fff;
+        margin: 0;
+        padding: 0;
     }
     .action-buttons .delete-btn:hover {
         background-color: #c82333;
