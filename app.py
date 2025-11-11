@@ -1,4 +1,3 @@
-import os
 import re
 import requests
 from flask import Flask, request, render_template_string, jsonify, redirect, url_for, session, flash
@@ -8,72 +7,68 @@ from pymongo.errors import ServerSelectionTimeoutError
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from collections import defaultdict
-from dotenv import load_dotenv 
+from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
-
-load_dotenv()  # Loads .env into os.environ
-
+load_dotenv() # Loads .env into os.environ
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
-
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
-
 # Diagnosis options
 DIAGNOSES_OPTIONS = [
-    'ARDS', 'Abscess', 'Acne (Moderate to severe)', 'Acute Bronchitis', 'Acute Gastroenteritis (AGE)', 
-    'Acute appendicitis', 'Acute otitis media', 'Acute sinusitis', 'Acute stress disorder', 
-    'Acute tonsilitis /pharyngitis', 'Alcohol intoxication', 'Allergic conjunctivitis', 
-    'Allergic rhinitis', 'Allergic skin reaction (unspecified)', 'Allergies', 'Anaemia', 
-    'Anal fissure', 'Angina', 'Antiphspholipid syndrome', 'Anxiety disorder/ panic disorder', 
-    'Aphthous ulcers/oral lessions', 'Aquagenic pruritus', 'Arthralgia', 'Asthma', 
-    'Awating PCR results', 'Bacterial conjunctivitis', 'Bipolar disorder', 'Boutoner deformity', 
-    'Bowel obstruction', 'Brachial plexus compression', 'Breast lump', 'Bulous skin lessions', 
-    'Burns', 'Bursitis', 'CCF', 'CNS_PNS', 'COPD', 'COVID_19', 'CVS_Immunological', 
-    'Calcaneous spur', 'Candidiasis(oral/esophageal)', 'Cardiac dysrythmia', 'Cardiomegally', 
-    'Cataract', 'Cellulitis', 'Chelazion', 'Chemical conjunctivitis', 'Chemical pneumonitis', 
-    'Chronic Suppurative Otits media (CSOM)', 'Chronic fatique syndrome', 'Chronic sinusitis', 
-    'Circumcission', 'Common Cold', 'Constipation', 'Costochondritis', 'Crush syndrome', 
-    'DVT', 'Dental', 'Dental abscess', 'Dental caries', 'Dental decay', 'Depressive disorder', 
-    'Dermatitis/Eczema', 'Dermatological', 'Diarrhoea', 'Disc Hernia', 'Dislocation', 
-    'Dog bite', 'Dry Eyes', 'Dysentery', 'ENT', 'Ear wax impaction', 'Emphysema', 
-    'Endocrinological', 'Epidermoid cyst', 'Epilepsy / Seizure disorder', 'Epistaxis', 
-    'Eyelid infection', 'Feet corns/calluses', 'Foreign body', 'Foreign body (in soft tissue)', 
-    'Foreign body ear', 'Fractures', 'Fungal infections/Tineas/ Dermatophyte', 
-    'GERD / Esophageal sphincter dysfunction', 'GIT', 'GUT_Urological_Gynae', 
-    'Ganglion cyst', 'Gingivitis', "Golfer's elbow", 'Gout', 'Grief/bereavement', 
-    'HIV', 'HIV -Associated vasculitis', 'HTN', 'HTN/DM', 'Hairy leucoplakia', 
-    'Hallus valgus deformity', 'Head injury (TBI) (mild , moderate, Severe)', 
-    'Headaches (tension, migrane, cluster etc)', 'Hepatitis (alcohol induced, viral etc)', 
-    'Herpes labialis (cold sore)', 'Herpes zoster', 'Hiccups', 'High altitude syndrome', 
-    'Hypercholesterolaemia', 'Hypertriglyceridaemia', 'Hypotension', 'I & D', 
-    'Illio-tibial band syndrome', 'Indigestion', 'Inflamatory bowel disease / IBS', 
-    'Influenza', 'Ingrown', 'Injury', 'Insect bite', 'Insomnia', 
-    'Insufficient sleep syndrome', 'Internal/external haemorrhoids', 'Kaposis Sarcoma', 
-    'LRTI (unspecified)', 'Laryngitis', 'Lightening injury', 'Ligmament (unspecified) sprain', 
-    'Lipoma', 'Loose teeth (unspecified cause)', 'Lower GI bleed (unspecified)', 
-    'Lymphadenitis', 'Mechanical low back pain', 'Medication induced cough(ACE-I etc)', 
-    'Medication side effects', 'Mucus hypersecretion', 'Muscle (unspecified) strain', 
-    'Musculoskeletal', 'Myalgia/muscle tension/ spasm', 'Myocardiac infaction/ ACS', 
-    'Nasal lession/infection', 'Nasal polyp', 'Nausea and Vomiting', 'Negative on AgRDT', 
-    'Neuralgia / neuritis', 'Non specific spinal pain (cervicalgia, thoracalgia, lumbalgia)', 
-    'Obstructive sleep apnea', 'Opthalmological', 'Oral lession(s)', 'Osteoarthritis', 
-    'Otitis externa', 'PICA', 'PJP', 'PUD/gastritis', 'Pancreatitis', 'Papule, pastules', 
-    'Parasthesia', 'Peri-orbital lession (undefined)', 'Perianal abscess', 'Periodontitis', 
-    'Peripheral neuropathy', 'Peripheral vascular disease', 'Pinguecula', 'Planta fascitis', 
-    'Pleural effusion', 'Pleuritic chest pain/pleuritis', 'Pneumonia', 'Polyarthralgia', 
-    'Poor vision', 'Positive on AgRDT', 'Post covid hyperactive airway DX', 
-    'Preseptal cellulitis', 'Psychiatric', 'Psychosomatic Disorder', 'Pterygium', 
-    'Radiculopathy (cervical, thoracic, lumber)', 'Respiratory', 'Rheumatoid arthritis', 
-    'Rheumatological_Ortho', 'Rynaulds phenomenon', 'Scabies', 'Sceptic nasal piercing', 
-    'Sciatica', 'Smoke inhilation injury', 'Spinal abnormality (scoliosis, kyphosis etc)', 
-    'Spondylolisthesis', 'Spondylosis', 'Spondylosis/spondylolisthesis', 'Stye /', 
-    'Surgical', 'Surgical site infection (post ganglion cyst removal)', 'Swan neck deformity', 
-    'Syncope', 'TB (lungs, pleura, meningeal, spine etc)', 'TB Meningitis', 'TIA / CVA', 
-    'Temporal arteritis', 'Tendon injury', 'Tendonitis', 'Tennis elbow', 'Thoracic back pain', 
-    'Tinnitus', 'Toothache (no obvious decay/caries)', 'Torticolis', 'Traumatic conjunctivitis', 
-    'Tumour (mass) undefined', 'Typhoid', 'URTI (Unspecified)', 'Ulcer', 
-    'Upper GI bleed', 'Urticaria', 'Venous insufficiency', 'Viral conjunctivitis', 
-    'Viral rhinitis/ common cold', 'Warts', 'Worm infestation', 'faecal incontinence', 
+    'ARDS', 'Abscess', 'Acne (Moderate to severe)', 'Acute Bronchitis', 'Acute Gastroenteritis (AGE)',
+    'Acute appendicitis', 'Acute otitis media', 'Acute sinusitis', 'Acute stress disorder',
+    'Acute tonsilitis /pharyngitis', 'Alcohol intoxication', 'Allergic conjunctivitis',
+    'Allergic rhinitis', 'Allergic skin reaction (unspecified)', 'Allergies', 'Anaemia',
+    'Anal fissure', 'Angina', 'Antiphspholipid syndrome', 'Anxiety disorder/ panic disorder',
+    'Aphthous ulcers/oral lessions', 'Aquagenic pruritus', 'Arthralgia', 'Asthma',
+    'Awating PCR results', 'Bacterial conjunctivitis', 'Bipolar disorder', 'Boutoner deformity',
+    'Bowel obstruction', 'Brachial plexus compression', 'Breast lump', 'Bulous skin lessions',
+    'Burns', 'Bursitis', 'CCF', 'CNS_PNS', 'COPD', 'COVID_19', 'CVS_Immunological',
+    'Calcaneous spur', 'Candidiasis(oral/esophageal)', 'Cardiac dysrythmia', 'Cardiomegally',
+    'Cataract', 'Cellulitis', 'Chelazion', 'Chemical conjunctivitis', 'Chemical pneumonitis',
+    'Chronic Suppurative Otits media (CSOM)', 'Chronic fatique syndrome', 'Chronic sinusitis',
+    'Circumcission', 'Common Cold', 'Constipation', 'Costochondritis', 'Crush syndrome',
+    'DVT', 'Dental', 'Dental abscess', 'Dental caries', 'Dental decay', 'Depressive disorder',
+    'Dermatitis/Eczema', 'Dermatological', 'Diarrhoea', 'Disc Hernia', 'Dislocation',
+    'Dog bite', 'Dry Eyes', 'Dysentery', 'ENT', 'Ear wax impaction', 'Emphysema',
+    'Endocrinological', 'Epidermoid cyst', 'Epilepsy / Seizure disorder', 'Epistaxis',
+    'Eyelid infection', 'Feet corns/calluses', 'Foreign body', 'Foreign body (in soft tissue)',
+    'Foreign body ear', 'Fractures', 'Fungal infections/Tineas/ Dermatophyte',
+    'GERD / Esophageal sphincter dysfunction', 'GIT', 'GUT_Urological_Gynae',
+    'Ganglion cyst', 'Gingivitis', "Golfer's elbow", 'Gout', 'Grief/bereavement',
+    'HIV', 'HIV -Associated vasculitis', 'HTN', 'HTN/DM', 'Hairy leucoplakia',
+    'Hallus valgus deformity', 'Head injury (TBI) (mild , moderate, Severe)',
+    'Headaches (tension, migrane, cluster etc)', 'Hepatitis (alcohol induced, viral etc)',
+    'Herpes labialis (cold sore)', 'Herpes zoster', 'Hiccups', 'High altitude syndrome',
+    'Hypercholesterolaemia', 'Hypertriglyceridaemia', 'Hypotension', 'I & D',
+    'Illio-tibial band syndrome', 'Indigestion', 'Inflamatory bowel disease / IBS',
+    'Influenza', 'Ingrown', 'Injury', 'Insect bite', 'Insomnia',
+    'Insufficient sleep syndrome', 'Internal/external haemorrhoids', 'Kaposis Sarcoma',
+    'LRTI (unspecified)', 'Laryngitis', 'Lightening injury', 'Ligmament (unspecified) sprain',
+    'Lipoma', 'Loose teeth (unspecified cause)', 'Lower GI bleed (unspecified)',
+    'Lymphadenitis', 'Mechanical low back pain', 'Medication induced cough(ACE-I etc)',
+    'Medication side effects', 'Mucus hypersecretion', 'Muscle (unspecified) strain',
+    'Musculoskeletal', 'Myalgia/muscle tension/ spasm', 'Myocardiac infaction/ ACS',
+    'Nasal lession/infection', 'Nasal polyp', 'Nausea and Vomiting', 'Negative on AgRDT',
+    'Neuralgia / neuritis', 'Non specific spinal pain (cervicalgia, thoracalgia, lumbalgia)',
+    'Obstructive sleep apnea', 'Opthalmological', 'Oral lession(s)', 'Osteoarthritis',
+    'Otitis externa', 'PICA', 'PJP', 'PUD/gastritis', 'Pancreatitis', 'Papule, pastules',
+    'Parasthesia', 'Peri-orbital lession (undefined)', 'Perianal abscess', 'Periodontitis',
+    'Peripheral neuropathy', 'Peripheral vascular disease', 'Pinguecula', 'Planta fascitis',
+    'Pleural effusion', 'Pleuritic chest pain/pleuritis', 'Pneumonia', 'Polyarthralgia',
+    'Poor vision', 'Positive on AgRDT', 'Post covid hyperactive airway DX',
+    'Preseptal cellulitis', 'Psychiatric', 'Psychosomatic Disorder', 'Pterygium',
+    'Radiculopathy (cervical, thoracic, lumber)', 'Respiratory', 'Rheumatoid arthritis',
+    'Rheumatological_Ortho', 'Rynaulds phenomenon', 'Scabies', 'Sceptic nasal piercing',
+    'Sciatica', 'Smoke inhilation injury', 'Spinal abnormality (scoliosis, kyphosis etc)',
+    'Spondylolisthesis', 'Spondylosis', 'Spondylosis/spondylolisthesis', 'Stye /',
+    'Surgical', 'Surgical site infection (post ganglion cyst removal)', 'Swan neck deformity',
+    'Syncope', 'TB (lungs, pleura, meningeal, spine etc)', 'TB Meningitis', 'TIA / CVA',
+    'Temporal arteritis', 'Tendon injury', 'Tendonitis', 'Tennis elbow', 'Thoracic back pain',
+    'Tinnitus', 'Toothache (no obvious decay/caries)', 'Torticolis', 'Traumatic conjunctivitis',
+    'Tumour (mass) undefined', 'Typhoid', 'URTI (Unspecified)', 'Ulcer',
+    'Upper GI bleed', 'Urticaria', 'Venous insufficiency', 'Viral conjunctivitis',
+    'Viral rhinitis/ common cold', 'Warts', 'Worm infestation', 'faecal incontinence',
     'hordeolum', 'injuries', 'injuries on duty', 'injury (RTA)', 'nail',
     'STI (MUS, VDS, Herpes genitalia, syphilis etc)', 'Post HIV exposure', 'Post operative adhessions',
     'Vaginal candidiasis', 'Cervixitis', 'UTI', 'Pelvic hypertension', 'Dysmenorrhoea', 'PID',
@@ -87,12 +82,10 @@ DIAGNOSES_OPTIONS = [
     'Drug induced kidney injury', 'Urethral stricture/Urinary outlet obstruction', 'Kidney stone',
     'Bladder stone', 'Warts', 'DM', 'Hyperglycaemia', 'Hypoglycaemia', 'DKA', 'HHS'
 ]
-
 # MongoDB connection function (lazy initialization for fork-safety)
 def get_mongo_client():
     monguri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
     return MongoClient(monguri, serverSelectionTimeoutMS=120000)
-
 # Login required decorator
 def login_required(f):
     @wraps(f)
@@ -101,7 +94,6 @@ def login_required(f):
             return redirect('/login')
         return f(*args, **kwargs)
     return decorated_function
-
 # Navigation links (updated to include user info and logout)
 def get_nav_links():
     if 'user' in session:
@@ -124,7 +116,6 @@ def get_nav_links():
             <a href="/login">Login</a> | <a href="/register">Register</a>
         </p>
         """
-
 # CSS for all templates (unchanged)
 CSS_STYLE = """
 <style>
@@ -407,18 +398,14 @@ CSS_STYLE = """
     }
 </style>
 """
-
 DISPENSE_TEMPLATE = CSS_STYLE + """
 <h1>Dispensing</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
-
 {% if message %}
     <p class="message {% if 'successfully' in message|lower or 'updated' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
-
 <h2>{% if tx_data %}Edit Dispense{% else %}Dispense Medication{% endif %}</h2>
-
 <form method="POST" action="{{ url_for('dispense') }}" class="dispense-form">
     <input type="hidden" name="transaction_id" value="{{ tx_data.transaction_id if tx_data else '' }}">
     <div class="common-section">
@@ -426,17 +413,14 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
             <label>Patient:</label>
             <input name="patient" type="text" value="{{ tx_data.patient if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
         </div>
-
         <div>
             <label for="company">Company:</label>
             <input id="company" name="company" list="company_suggestions" type="text" value="{{ tx_data.company if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
         </div>
-
         <div>
             <label for="position">Position:</label>
             <input id="position" name="position" list="position_suggestions" type="text" value="{{ tx_data.position if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
         </div>
-
         <div>
             <label>Age Group:</label>
             <select name="age_group" {% if not tx_data %}required{% endif %}>
@@ -447,7 +431,6 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                 {% endfor %}
             </select>
         </div>
-
         <div>
             <label>Gender:</label>
             <select name="gender" {% if not tx_data %}required{% endif %}>
@@ -456,12 +439,10 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                 <option value="Female" {% if tx_data and tx_data.gender == 'Female' %}selected{% endif %}>Female</option>
             </select>
         </div>
-
         <div>
             <label>Number of Sick Leave Days:</label>
             <input name="sick_leave_days" type="number" min="0" value="{{ tx_data.sick_leave_days if tx_data else '' }}" required>
         </div>
-
         <div>
             <label>Prescriber (Doctor):</label>
             {% set prescribers = ['Dr. T. Khothatso', 'Locum', 'Malesoetsa Leohla', 'Mamosa Seetsa', 'Mamosaase Nqosa', 'Mapalo Mapesela', 'Mathuto Kutoane', 'Thapelo Mphole'] %}
@@ -472,7 +453,6 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                 {% endfor %}
             </select>
         </div>
-
         <div>
             <label>Dispenser (Issuer):</label>
             {% set dispensers = ['Letlotlo Hlaoli', 'Locum', 'Malesoetsa Leohla', 'Mamosa Seetsa', 'Mamosaase Nqosa', 'Mapalo Mapesela', 'Mathuto Kutoane', 'Thapelo Mphole'] %}
@@ -483,13 +463,11 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                 {% endfor %}
             </select>
         </div>
-
         <div>
             <label>Date:</label>
             <input name="date" type="date" value="{{ tx_data.date if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
         </div>
     </div>
-
     <div class="diag-section">
         <h3>Diagnoses (up to 3)</h3>
         <datalist id="diag_suggestions"></datalist>
@@ -520,7 +498,6 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         </div>
         <button type="button" onclick="addDiagRow()">Add Diagnosis</button>
     </div>
-
     <div class="med-section">
         <h3>Medications (up to 12)</h3>
         <datalist id="med_suggestions"></datalist>
@@ -559,22 +536,17 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         </div>
         <button type="button" onclick="addRow()">Add Medication</button>
     </div>
-
     <div class="form-buttons">
         <input type="submit" value="{% if tx_data %}Update{% else %}Dispense{% endif %}">
         <button type="button" onclick="clearForm()">Clear Form</button>
     </div>
-
     <input type="hidden" name="start_date" value="{{ start_date or '' }}">
     <input type="hidden" name="end_date" value="{{ end_date or '' }}">
     <input type="hidden" name="search" value="{{ search or '' }}">
-
     <datalist id="company_suggestions"></datalist>
     <datalist id="position_suggestions"></datalist>
 </form>
-
 <hr>
-
 <h3>Dispense Transactions</h3>
 <form method="GET" action="{{ url_for('dispense') }}" class="filter-form">
     <div class="filter-section">
@@ -618,57 +590,46 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         </tr>
     </thead>
     <tbody>
-    {% set tx_number = namespace(value=1) %}
-    {% for t in tx_list %}
-        {% if loop.first or t.transaction_id != tx_list[loop.index0 - 1].transaction_id %}
-            <tr style="border-top: 3px double #0056b3;">
-                <td rowspan="{{ tx_list|selectattr('transaction_id', 'equalto', t.transaction_id)|list|length }}" 
-                    style="vertical-align: middle; font-weight: bold; font-size: 1.1em; color: #0056b3;">
-                    {{ tx_number.value }}.
-                </td>
-                {% set tx_number.value = tx_number.value + 1 %}
+        {% set tx_number = namespace(value=1) %}
+        {% for t in tx_list %}
+            {% if loop.first or t.transaction_id != tx_list[loop.index0 - 1].transaction_id %}
+                <tr style="border-top: 3px double #0056b3;">
+                    <td rowspan="{{ tx_list|selectattr('transaction_id', 'equalto', t.transaction_id)|list|length }}"
+                        style="vertical-align: middle; font-weight: bold; font-size: 1.1em; color: #0056b3;">
+                        {{ tx_number.value }}.
+                    </td>
+                    {% set tx_number.value = tx_number.value + 1 %}
+            {% else %}
+                <tr>
+            {% endif %}
+                    <td>{{ t.date }}</td>
+                    <td>{{ t.patient }}</td>
+                    <td>{{ t.company }}</td>
+                    <td>{{ t.position }}</td>
+                    <td>{{ t.gender }}</td>
+                    <td>{{ t.age_group }}</td>
+                    <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                    <td>{{ t.user }}</td>
+                    <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
+                    <td>{{ t.prescriber }}</td>
+                    <td>{{ t.dispenser }}</td>
+                    <td>{{ t.sick_leave_days }}</td>
+                    <td>{{ t.med_name }}</td>
+                    <td>{{ t.quantity }}</td>
+                    <td>
+                        <a href="{{ url_for('dispense', edit=t.transaction_id, start_date=start_date, end_date=end_date, search=search) }}">
+                            Edit
+                        </a>
+                    </td>
+                </tr>
         {% else %}
-            <tr>
-        {% endif %}
-                <td>{{ t.date }}</td>
-                <td>{{ t.patient }}</td>
-                <td>{{ t.company }}</td>
-                <td>{{ t.position }}</td>
-                <td>{{ t.gender }}</td>
-                <td>{{ t.age_group }}</td>
-                <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-                <td>{{ t.user }}</td>
-                <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
-                <td>{{ t.prescriber }}</td>
-                <td>{{ t.dispenser }}</td>
-                <td>{{ t.sick_leave_days }}</td>
-                <td>{{ t.med_name }}</td>
-                <td>{{ t.quantity }}</td>
-                <td>
-                    <a href="{{ url_for('dispense', edit=t.transaction_id, start_date=start_date, end_date=end_date, search=search) }}">
-                        Edit
-                    </a>
-                    {% if is_admin %}
-                    |
-                    <form method="POST" action="{{ url_for('delete_dispense') }}"
-                          style="display:inline;"
-                          onsubmit="return confirm('Delete this dispense transaction ({{ t.transaction_id }})? Stock will be restored.');">
-                        <input type="hidden" name="transaction_id" value="{{ t.transaction_id }}">
-                        <button type="submit" style="background:none;border:none;color:#c82333;padding:0;cursor:pointer;">
-                            Delete
-                        </button>
-                    </form>
-                    {% endif %}
-                </td>
-            </tr>
+        <tr><td colspan="16">No dispense transactions.</td></tr>
         {% endfor %}
     </tbody>
 </table>
-
 <script>
 let medRowCount = {{ (tx_data.meds|length if tx_data else 1) }};
 let diagRowCount = {{ (tx_data.diags|length if tx_data else 1) }};
-
 // Company options array for autocomplete
 const companyOptions = [
     "BLW",
@@ -695,7 +656,6 @@ const companyOptions = [
     "UL4",
     "UNITRANS"
 ];
-
 // Position options array for autocomplete
 const positionOptions = [
     "Administration",
@@ -760,7 +720,6 @@ const positionOptions = [
     "Workshop Cleaners",
     "X-Ray Technologist"
 ];
-
 // Medication options array for autocomplete
 const medicationOptions = [
     "Acetylsalisylic Acid, 100 mg",
@@ -787,9 +746,9 @@ const medicationOptions = [
     "Amoxycillin Cap, 250 mg",
     "Amoxyclav Injection, 1200 mg",
     "Amoxyclav, 625 mg",
-    "Ampicillin  Caps, 250 mg",
+    "Ampicillin Caps, 250 mg",
     "Ampiclox Caps, 500 mg",
-    "Ampjicillin  Injection, 500 mg",
+    "Ampjicillin Injection, 500 mg",
     "Anti Haemorrhoidal Suppositories, 100 mg",
     "Anti Snake Bite Serum, 010 ml",
     "Antirubbies, 2.5 IU",
@@ -912,8 +871,8 @@ const medicationOptions = [
     "Lisinopril, 020, mg",
     "Loperamide Tabs, 002 mg",
     "Loratadine, 010 mg",
-    "Losartan, 050 mg",
-    "Losartan, 100 mg",
+    "Lorsatan, 050 mg",
+    "Lorsatan, 100 mg",
     "Lubrucating Gel, 050 g",
     "Magasil Suspension, 100 ml",
     "Magnesium Suphate injection, 010 mg",
@@ -997,7 +956,7 @@ const medicationOptions = [
     "Suppositories Indocid (Arthrexin), 100 mg",
     "Suxamethonium injection, 010 mg",
     "Tetanus Toxoid Vaccine, 010 mg",
-    "Tetracycline Ointment, 003 %  25G",
+    "Tetracycline Ointment, 003 % 25G",
     "Tetracycline Opthal Ointment, 020 g",
     "Throat Lozenges, 250 mg",
     "Thymol Glycerine, 100 ml",
@@ -1023,7 +982,6 @@ const medicationOptions = [
     "Labetolol, 5mg",
     "Morpine tabs , 10mg"
 ];
-
 function addInputListener(input, type) {
     input.addEventListener('input', function() {
         const query = this.value.toLowerCase();
@@ -1073,7 +1031,6 @@ function addInputListener(input, type) {
         });
     });
 }
-
 function addRow() {
     if (medRowCount >= 12) {
         alert('Maximum 12 medications allowed.');
@@ -1100,12 +1057,10 @@ function addRow() {
     const newInput = newRow.querySelector('.med-input');
     addInputListener(newInput, 'medication');
 }
-
 function removeRow(btn) {
     btn.closest('.med-row').remove();
     medRowCount--;
 }
-
 function addDiagRow() {
     if (diagRowCount >= 3) {
         alert('Maximum 3 diagnoses allowed.');
@@ -1128,12 +1083,10 @@ function addDiagRow() {
     const newInput = newRow.querySelector('.diag-input');
     addInputListener(newInput, 'diagnosis');
 }
-
 function removeDiagRow(btn) {
     btn.closest('.diag-row').remove();
     diagRowCount--;
 }
-
 function clearForm() {
     document.querySelector('.common-section').querySelectorAll('input, select').forEach(el => el.value = '');
     const diagContainer = document.getElementById('diagnoses');
@@ -1155,7 +1108,6 @@ function clearForm() {
     document.getElementById('company_suggestions').innerHTML = '';
     document.getElementById('position_suggestions').innerHTML = '';
 }
-
 // Initialize listeners for existing inputs
 document.addEventListener('DOMContentLoaded', function() {
     const companyInput = document.getElementById('company');
@@ -1167,7 +1119,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const existingDiagInputs = document.querySelectorAll('.diag-input');
     existingDiagInputs.forEach(input => addInputListener(input, 'diagnosis'));
 });
-
 // Clear form after successful dispense
 {% if message and ('successfully' in message|lower or 'updated' in message|lower) %}
     // Do not clear if editing, but since message after post, and redirect not, but for now, clear only if new
@@ -1175,19 +1126,15 @@ document.addEventListener('DOMContentLoaded', function() {
         clearForm();
     {% endif %}
 {% endif %}
-
 </script>
 """
-
 RECEIVE_TEMPLATE = CSS_STYLE + """
 <h1>Receiving</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
-
 {% if message %}
 <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
-
 <h2>Receive Medication</h2>
 <form method="POST" action="/receive" class="receive-form">
     <div class="common-section">
@@ -1241,12 +1188,10 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
         <input type="submit" value="Receive">
         <button type="button" onclick="document.querySelector('form').reset(); document.getElementById('med_suggestions').innerHTML = ''; ">Clear Form</button>
     </div>
-
     <input type="hidden" name="start_date" value="{{ start_date or '' }}">
     <input type="hidden" name="end_date" value="{{ end_date or '' }}">
     <input type="hidden" name="search" value="{{ search or '' }}">
 </form>
-
 <h2>Receive Transactions</h2>
 <form method="GET" action="{{ url_for('receive') }}" class="filter-form">
     <div class="filter-section">
@@ -1304,7 +1249,6 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
         {% endfor %}
     </tbody>
 </table>
-
 <script>
 // Medication options array for autocomplete
 const medicationOptions = [
@@ -1332,9 +1276,9 @@ const medicationOptions = [
     "Amoxycillin Cap, 250 mg",
     "Amoxyclav Injection, 1200 mg",
     "Amoxyclav, 625 mg",
-    "Ampicillin  Caps, 250 mg",
+    "Ampicillin Caps, 250 mg",
     "Ampiclox Caps, 500 mg",
-    "Ampjicillin  Injection, 500 mg",
+    "Ampjicillin Injection, 500 mg",
     "Anti Haemorrhoidal Suppositories, 100 mg",
     "Anti Snake Bite Serum, 010 ml",
     "Antirubbies, 2.5 IU",
@@ -1457,8 +1401,8 @@ const medicationOptions = [
     "Lisinopril, 020, mg",
     "Loperamide Tabs, 002 mg",
     "Loratadine, 010 mg",
-    "Losartan, 050 mg",
-    "Losartan, 100 mg",
+    "Lorsatan, 050 mg",
+    "Lorsatan, 100 mg",
     "Lubrucating Gel, 050 g",
     "Magasil Suspension, 100 ml",
     "Magnesium Suphate injection, 010 mg",
@@ -1542,7 +1486,7 @@ const medicationOptions = [
     "Suppositories Indocid (Arthrexin), 100 mg",
     "Suxamethonium injection, 010 mg",
     "Tetanus Toxoid Vaccine, 010 mg",
-    "Tetracycline Ointment, 003 %  25G",
+    "Tetracycline Ointment, 003 % 25G",
     "Tetracycline Opthal Ointment, 020 g",
     "Throat Lozenges, 250 mg",
     "Thymol Glycerine, 100 ml",
@@ -1575,7 +1519,6 @@ document.addEventListener('DOMContentLoaded', function() {
         const datalist = document.getElementById('med_suggestions');
         datalist.innerHTML = '';
         if (query.length < 1) return;
-
         const filtered = medicationOptions.filter(option => option.toLowerCase().includes(query));
         filtered.forEach(med => {
             const option = document.createElement('option');
@@ -1586,16 +1529,13 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 """
-
 ADD_MED_TEMPLATE = CSS_STYLE + """
 <h1>Add New Medication</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
-
 {% if message %}
     <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
-
 <h2>Add Medication</h2>
 <form method="POST" action="/add-medication" class="add-medication-form">
     <div class="common-section">
@@ -1650,9 +1590,7 @@ ADD_MED_TEMPLATE = CSS_STYLE + """
         <button type="button" onclick="document.querySelector('form').reset(); document.getElementById('med_suggestions').innerHTML = ''; ">Clear Form</button>
     </div>
 </form>
-
 <script>
-
 // Medication options array for autocomplete
 const medicationOptions = [
     "Acetylsalisylic Acid, 100 mg",
@@ -1679,9 +1617,9 @@ const medicationOptions = [
     "Amoxycillin Cap, 250 mg",
     "Amoxyclav Injection, 1200 mg",
     "Amoxyclav, 625 mg",
-    "Ampicillin  Caps, 250 mg",
+    "Ampicillin Caps, 250 mg",
     "Ampiclox Caps, 500 mg",
-    "Ampjicillin  Injection, 500 mg",
+    "Ampjicillin Injection, 500 mg",
     "Anti Haemorrhoidal Suppositories, 100 mg",
     "Anti Snake Bite Serum, 010 ml",
     "Antirubbies, 2.5 IU",
@@ -1804,8 +1742,8 @@ const medicationOptions = [
     "Lisinopril, 020, mg",
     "Loperamide Tabs, 002 mg",
     "Loratadine, 010 mg",
-    "Losartan, 050 mg",
-    "Losartan, 100 mg",
+    "Lorsatan, 050 mg",
+    "Lorsatan, 100 mg",
     "Lubrucating Gel, 050 g",
     "Magasil Suspension, 100 ml",
     "Magnesium Suphate injection, 010 mg",
@@ -1889,7 +1827,7 @@ const medicationOptions = [
     "Suppositories Indocid (Arthrexin), 100 mg",
     "Suxamethonium injection, 010 mg",
     "Tetanus Toxoid Vaccine, 010 mg",
-    "Tetracycline Ointment, 003 %  25G",
+    "Tetracycline Ointment, 003 % 25G",
     "Tetracycline Opthal Ointment, 020 g",
     "Throat Lozenges, 250 mg",
     "Thymol Glycerine, 100 ml",
@@ -1922,7 +1860,6 @@ document.addEventListener('DOMContentLoaded', function() {
         const datalist = document.getElementById('med_suggestions');
         datalist.innerHTML = '';
         if (query.length < 1) return;
-
         const filtered = medicationOptions.filter(option => option.toLowerCase().includes(query));
         filtered.forEach(med => {
             const option = document.createElement('option');
@@ -1938,11 +1875,9 @@ EDIT_MED_TEMPLATE = CSS_STYLE + """
 <h1>Edit Medication</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
-
 {% if message %}
     <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
-
 <h2>Edit {{ med_data.name if med_data else '' }}</h2>
 <form method="POST" action="{{ url_for('edit_medication', med_name=med_name) }}" class="edit-medication-form">
     <div class="common-section">
@@ -1981,17 +1916,14 @@ EDIT_MED_TEMPLATE = CSS_STYLE + """
     </div>
 </form>
 """
-
 # Reports Template (updated with nav and user column in tables, and edit button in stock table)
 REPORTS_TEMPLATE = CSS_STYLE + """
 <h1>Inventory Reports</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
-
 {% if message %}
     <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
-
 <h2>Generate Report</h2>
 <form method="POST" action="{{ url_for('reports') }}">
     <label>Report Type:</label>
@@ -2009,7 +1941,6 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     <label>Search (optional):</label><input name="search" type="text" placeholder="Filter results by relevant fields"><br>
     <input type="submit" value="Generate Report">
 </form>
-
 {% if report_type in ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list'] and stock_data %}
 <form method="POST" action="{{ url_for('reports') }}" class="filter-form">
     <input type="hidden" name="report_type" value="{{ report_type }}">
@@ -2231,7 +2162,6 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 <p>No controlled drugs found or no data for this period.</p>
 {% endif %}
 """
-
 # Login Template
 LOGIN_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Login</h1>
@@ -2251,7 +2181,6 @@ LOGIN_TEMPLATE = CSS_STYLE + """
     <p><a href="/register">Don't have an account? Register here.</a></p>
 </div>
 """
-
 # Register Password Template
 REGISTER_PASSWORD_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Registration</h1>
@@ -2269,7 +2198,6 @@ REGISTER_PASSWORD_TEMPLATE = CSS_STYLE + """
     <p><a href="/login">Back to Login</a></p>
 </div>
 """
-
 # Register Template
 REGISTER_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Registration</h1>
@@ -2299,13 +2227,11 @@ REGISTER_TEMPLATE = CSS_STYLE + """
     <p><a href="/login">Already have an account? Login here.</a></p>
 </div>
 """
-
 # Routes
 @app.route('/', methods=['GET'])
 @login_required
 def home():
     return redirect('/reports')
-
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -2314,7 +2240,7 @@ def login():
         if not username or not password:
             session['error'] = 'Username and password are required.'
             return redirect('/login')
-        
+       
         try:
             client = get_mongo_client()
             db = client['pharmacy_db']
@@ -2334,10 +2260,9 @@ def login():
         finally:
             client.close()
         return redirect('/login')
-    
+   
     error = session.pop('error', None)
     return render_template_string(LOGIN_TEMPLATE, error=error)
-
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
@@ -2362,7 +2287,7 @@ def register():
             if not username or not password or not name or not role:
                 session['error'] = 'All fields are required.'
                 return redirect('/register')
-            
+           
             try:
                 client = get_mongo_client()
                 db = client['pharmacy_db']
@@ -2370,7 +2295,7 @@ def register():
                 if users.find_one({'username': username}):
                     session['error'] = 'Username already exists.'
                     return redirect('/register')
-                
+               
                 password_hash = generate_password_hash(password)
                 users.insert_one({
                     'username': username,
@@ -2386,20 +2311,18 @@ def register():
             finally:
                 client.close()
             return redirect('/register')
-    
+   
     error = session.pop('error', None)
     message = session.pop('message', None)
     if 'admin_access' not in session:
         return render_template_string(REGISTER_PASSWORD_TEMPLATE, error=error)
     else:
         return render_template_string(REGISTER_TEMPLATE, error=error, message=message)
-
 @app.route('/logout', methods=['GET'])
 def logout():
     session.pop('user', None)
     session.pop('admin_access', None)
     return redirect('/login')
-
 @app.route('/dispense', methods=['GET', 'POST'])
 @login_required
 def dispense():
@@ -2413,8 +2336,6 @@ def dispense():
         end_date = request.values.get('end_date')
         search = request.values.get('search')
         current_user = session['user']['name']
-        is_admin = session['user'].get('role') == 'admin'  # ← Added for delete button
-
         # Build query for tx_list
         base_query = {'type': 'dispense'}
         date_query = {}
@@ -2439,7 +2360,6 @@ def dispense():
                 {'diagnoses.0': {'$regex': search, '$options': 'i'}},
             ]
             base_query['$or'] = or_query
-
         tx_list = list(transactions.find(base_query).sort('timestamp', -1))
         tx_data = None
         edit_id = request.args.get('edit')
@@ -2453,11 +2373,10 @@ def dispense():
                 common['diags'] = common.get('diagnoses', [])
                 common['transaction_id'] = edit_id
                 tx_data = common
-
         if request.method == 'POST':
             transaction_id = request.form.get('transaction_id')
             if transaction_id:
-                # Edit mode: restore old stock first
+                # Edit mode
                 old_meds = list(transactions.find({'transaction_id': transaction_id}))
                 for old_tx in old_meds:
                     med_name = old_tx['med_name']
@@ -2467,10 +2386,9 @@ def dispense():
                 tx_id = transaction_id
                 message_prefix = 'Updated'
             else:
-                # New transaction
+                # New
                 tx_id = str(uuid4())
                 message_prefix = 'Dispensed'
-
             try:
                 patient = request.form['patient']
                 company = request.form['company']
@@ -2482,7 +2400,6 @@ def dispense():
                 gender = request.form['gender']
                 sick_leave_days = int(request.form['sick_leave_days'])
                 diagnoses = [d.strip() for d in request.form.getlist('diagnoses') if d.strip()]
-
                 if not diagnoses:
                     message = 'Please provide at least one diagnosis.'
                 else:
@@ -2496,7 +2413,6 @@ def dispense():
                                 quantities.append(qty)
                         except ValueError:
                             pass
-
                     if len(med_names) != len(quantities) or not med_names:
                         message = 'Please provide at least one valid medication and quantity.'
                     else:
@@ -2534,41 +2450,17 @@ def dispense():
                                     'timestamp': datetime.utcnow()
                                 })
                                 dispensed_meds.append(med_name)
-
                         if success and dispensed_meds:
                             message = f'{message_prefix} successfully: {", ".join(dispensed_meds)}'
                         else:
                             message = '; '.join(error_msgs) if error_msgs else f'No medications {message_prefix.lower()}.'
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-
-        return render_template_string(
-            DISPENSE_TEMPLATE,
-            tx_list=tx_list,
-            nav_links=get_nav_links(),
-            message=message,
-            start_date=start_date,
-            end_date=end_date,
-            search=search,
-            tx_data=tx_data,
-            is_admin=is_admin  # ← Pass is_admin to template
-        )
-
+        return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search, tx_data=tx_data)
     except ServerSelectionTimeoutError:
-        return render_template_string(
-            DISPENSE_TEMPLATE,
-            tx_list=[],
-            nav_links=get_nav_links(),
-            message="Database connection failed. Please try again later.",
-            start_date='',
-            end_date='',
-            search='',
-            tx_data=None,
-            is_admin=is_admin
-        ), 500
+        return render_template_string(DISPENSE_TEMPLATE, tx_list=[], nav_links=get_nav_links(), message="Database connection failed. Please try again later.", start_date='', end_date='', search='', tx_data=None), 500
     finally:
         client.close()
-
 @app.route('/receive', methods=['GET', 'POST'])
 @login_required
 def receive():
@@ -2578,12 +2470,10 @@ def receive():
         medications = db['medications']
         transactions = db['transactions']
         message = None
-
         start_date = request.values.get('start_date')
         end_date = request.values.get('end_date')
         search = request.values.get('search')
         current_user = session['user']['name']
-
         # Build query for tx_list
         base_query = {'type': 'receive'}
         date_query = {}
@@ -2606,7 +2496,6 @@ def receive():
             ]
             base_query['$or'] = or_query
         tx_list = list(transactions.find(base_query).sort('timestamp', -1))
-
         if request.method == 'POST':
             try:
                 med_name = request.form['med_name']
@@ -2619,7 +2508,6 @@ def receive():
                 order_number = request.form['order_number']
                 supplier = request.form['supplier']
                 invoice_number = request.form['invoice_number']
-
                 medications.update_one(
                     {'name': med_name},
                     {'$inc': {'balance': quantity},
@@ -2660,7 +2548,6 @@ def receive():
         return render_template_string(RECEIVE_TEMPLATE, tx_list=[], nav_links=get_nav_links(), message="Database connection failed. Please try again later.", start_date='', end_date='', search=''), 500
     finally:
         client.close()
-
 @app.route('/add-medication', methods=['GET', 'POST'])
 @login_required
 def add_medication():
@@ -2674,7 +2561,6 @@ def add_medication():
         transactions = db['transactions']
         message = None
         current_user = session['user']['name']
-
         if request.method == 'POST':
             try:
                 med_name = request.form['med_name']
@@ -2687,11 +2573,9 @@ def add_medication():
                 order_number = request.form['order_number']
                 supplier = request.form['supplier']
                 invoice_number = request.form['invoice_number']
-
                 if medications.find_one({'name': med_name}):
                     message = f'Medication "{med_name}" already exists. Use Receiving to add stock.'
                     return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
-
                 medications.insert_one({
                     'name': med_name,
                     'balance': initial_balance,
@@ -2729,7 +2613,6 @@ def add_medication():
         return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message="Database connection failed. Please try again later."), 500
     finally:
         client.close()
-
 @app.route('/edit-medication/<med_name>', methods=['GET', 'POST'])
 @login_required
 def edit_medication(med_name):
@@ -2742,17 +2625,13 @@ def edit_medication(med_name):
         medications = db['medications']
         message = None
         med_data = None
-
         # URL decode med_name if necessary
         med_name = requests.utils.unquote(med_name)
-
         med = medications.find_one({'name': med_name})
         if not med:
             message = f'Medication "{med_name}" not found.'
             return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=None, med_name=med_name)
-
         med_data = med
-
         if request.method == 'POST':
             try:
                 balance = int(request.form['balance'])
@@ -2760,7 +2639,6 @@ def edit_medication(med_name):
                 price = float(request.form['price'])
                 expiry_date = request.form['expiry_date']
                 schedule = request.form['schedule']
-
                 # Update the medication
                 medications.update_one(
                     {'name': med_name},
@@ -2779,14 +2657,12 @@ def edit_medication(med_name):
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
                 return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=med_data, med_name=med_name)
-
         return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=med_data, med_name=med_name)
     except ServerSelectionTimeoutError:
         message = "Database connection failed. Please try again later."
         return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=None, med_name=med_name), 500
     finally:
         client.close()
-
 @app.route('/delete-medication', methods=['POST'])
 @login_required
 def delete_medication():
@@ -2815,7 +2691,6 @@ def delete_medication():
     finally:
         client.close()
     return redirect('/reports')
-
 @app.route('/reports', methods=['GET', 'POST'])
 @login_required
 def reports():
@@ -2838,7 +2713,6 @@ def reports():
         report_title = None
         start_dt = None
         end_dt = None
-
         def matches_search(tx, search_str):
             if not search_str:
                 return True
@@ -2856,9 +2730,7 @@ def reports():
                 if search_lower in diag_str:
                     return True
             return False
-
         stock_report_types = ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list']
-
         if request.method == 'POST':
             report_type = request.form.get('report_type')
             start_date = request.form.get('start_date')
@@ -2871,7 +2743,6 @@ def reports():
                         start_dt = datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
                     if end_date:
                         end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc) + timedelta(days=1) - timedelta(seconds=1)
-
                     # now process the report
                     if report_type in stock_report_types:
                         if not end_date:
@@ -2917,14 +2788,12 @@ def reports():
                                 period_result = list(transactions.aggregate(period_pipeline))
                                 dispensed_after = period_result[0].get('dispensed', 0) if period_result else 0
                                 received_after = period_result[0].get('received', 0) if period_result else 0
-
                                 balance_at_date = current_balance - received_after + dispensed_after
                                 balance_at_date = max(0, balance_at_date)
                             except Exception as query_err:
                                 app.logger.error(f"Query failed for med {med_name}: {query_err}")
                                 # Fallback to current balance
                                 balance_at_date = current_balance
-
                             expiry_str = med.get('expiry_date')
                             expiry_dt = None
                             if expiry_str:
@@ -2939,17 +2808,15 @@ def reports():
                                 except ValueError as e:
                                     app.logger.warning(f"Invalid expiry_date '{expiry_str}' for med '{med.get('name', 'unknown')}': {e} - Treating as no expiry.")
                                     expiry_dt = None
-
                             # Handle missing or empty batch: set to 'N/A'
                             batch_val = med.get('batch')
-                            if not batch_val:  # Covers None, empty string, or falsy
+                            if not batch_val: # Covers None, empty string, or falsy
                                 med['batch'] = 'N/A'
-
                             if balance_at_date == 0:
                                 status = 'out-of-stock'
                             else:
                                 if expiry_dt is None:
-                                    status = 'normal'  # Include even without expiry
+                                    status = 'normal' # Include even without expiry
                                 elif expiry_dt < report_date:
                                     status = 'expired'
                                 elif expiry_dt <= threshold_date:
@@ -2960,8 +2827,7 @@ def reports():
                             med_copy['balance'] = balance_at_date
                             med_copy['status'] = status
                             stock_data.append(med_copy)
-
-                        date_str = end_date  # Use the input string for title
+                        date_str = end_date # Use the input string for title
                         if report_type == 'stock_on_hand':
                             report_title = f'Stock on Hand as of {date_str}'
                         elif report_type == 'expired_list':
@@ -2977,7 +2843,7 @@ def reports():
                         if not start_date or not end_date:
                             raise ValueError('Start and end dates are required for this report type.')
                         med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
-                        meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1).limit(300))  # Temp limit for testing
+                        meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1).limit(300)) # Temp limit for testing
                         start_date_obj = start_dt.date()
                         end_date_obj = end_dt.date()
                         days_in_period = max(1, (end_date_obj - start_date_obj).days + 1)
@@ -3015,11 +2881,9 @@ def reports():
                                 period_result = list(transactions.aggregate(period_pipeline))
                                 dispensed = period_result[0].get('dispensed', 0) if period_result else 0
                                 received = period_result[0].get('received', 0) if period_result else 0
-
                                 current_balance = med.get('balance', 0)
                                 beginning_balance = current_balance - received + dispensed
                                 beginning_balance = max(0, beginning_balance)
-
                                 average_daily = dispensed / days_in_period
                                 average_monthly = average_daily * 30
                                 lead_time_stock = average_daily * 14
@@ -3139,7 +3003,6 @@ def reports():
                 controlled_register = []
                 total_transactions = 0
                 report_title = None
-
         return render_template_string(
             REPORTS_TEMPLATE,
             report_type=report_type,
@@ -3175,57 +3038,11 @@ def reports():
         ), 500
     finally:
         client.close()
-
-@app.route('/delete-dispense', methods=['POST'])
-@login_required
-def delete_dispense():
-    """Admin-only: delete a whole dispense transaction and restore stock."""
-    if session['user'].get('role') != 'admin':
-        flash('Only admins can delete dispense transactions.')
-        return redirect(request.referrer or '/dispense')
-
-    tx_id = request.form.get('transaction_id')
-    if not tx_id:
-        flash('No transaction selected.')
-        return redirect(request.referrer or '/dispense')
-
-    client = get_mongo_client()
-    try:
-        db = client['pharmacy_db']
-        txs = db['transactions']
-        meds = db['medications']
-
-        # 1. Grab every line of the transaction
-        lines = list(txs.find({'transaction_id': tx_id, 'type': 'dispense'}))
-
-        if not lines:
-            flash('Transaction not found.')
-            return redirect(request.referrer or '/dispense')
-
-        # 2. Restore stock
-        for line in lines:
-            med_name = line['med_name']
-            qty      = line['quantity']
-            meds.update_one({'name': med_name}, {'$inc': {'balance': qty}})
-
-        # 3. Remove all lines
-        txs.delete_many({'transaction_id': tx_id})
-
-        flash('Dispense transaction deleted – stock restored.')
-    except Exception as e:
-        app.logger.error(f"Delete dispense error: {e}")
-        flash('Error deleting transaction.')
-    finally:
-        client.close()
-
-    return redirect(request.referrer or '/dispense')
-
 @app.route('/api/diagnoses', methods=['GET'])
 @login_required
 def get_diagnosis_suggestions():
     query = request.args.get('query', '').lower()
     matching = [d for d in DIAGNOSES_OPTIONS if query in d.lower()][:10]
     return jsonify(matching)
-
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
