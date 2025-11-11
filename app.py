@@ -710,7 +710,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                             <button type="button" class="edit-btn">Edit</button>
                         </a>
                         {% if session['user']['role'] == 'admin' %}
-                        <form method="POST"
+                        <form class="delete-btn" method="POST"
                               action="{{ url_for('delete_dispense') }}"
                               style="display:inline-block;"
                               onsubmit="return confirm('Permanently delete this dispense transaction?\nStock will be restored.');">
