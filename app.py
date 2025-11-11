@@ -298,8 +298,8 @@ CSS_STYLE = """
     .action-buttons .delete-btn:hover {
         background-color: #c82333;
         color: #fff;
-        font-size: 13px;          /* Slightly smaller text */
-        padding: 4px 10px;        /* Reduced padding */
+        font-size: 10px;          /* Slightly smaller text */
+        padding: 1px 1px;        /* Reduced padding */
         border-radius: 3px;       /* Slightly sharper corners */
     }
 
