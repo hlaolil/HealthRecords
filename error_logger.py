@@ -31,7 +31,7 @@ ERROR_COLLECTION = "error_logs"
 def _get_mongo_client(app):
     """Lazy MongoDB client – re-uses the same connection logic as the main app."""
     uri = MONGO_URI or app.config.get("MONGODB_URI") or "mongodb://localhost:27017/"
-    return MongoClient(uri, serverSelectionTimeoutMS=5000)
+    return MongoClient(uri, serverSelectionTimeoutMS=36000)
 
 def _log_to_file(logger, exc_info):
     """Write a nicely formatted traceback to the rotating log file."""
