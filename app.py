@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from collections import defaultdict
 from dotenv import load_dotenv
+from error_logger import init_error_logging
+init_error_logging(app)          # <-- this activates everything
 from werkzeug.security import generate_password_hash, check_password_hash
 load_dotenv() # Loads .env into os.environ
 app = Flask(__name__)
