@@ -3199,12 +3199,11 @@ def get_diagnosis_suggestions():
     return jsonify(matching)
 
 if __name__ == '__main__':
-# -------------------------------------------------
-# AFTER the app is fully defined
-# -------------------------------------------------
-try:
-    from audit_logger import init_audit
-    init_audit(app)
-except Exception as e:
-    app.logger.error(f"Failed to load audit logger: {e}")
+    try:
+        from audit_logger import init_audit
+        init_audit(app)
+    except Exception as e:
+        app.logger.error(f"Failed to load audit logger: {e}")
+
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+
