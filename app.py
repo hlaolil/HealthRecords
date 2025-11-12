@@ -1233,134 +1233,135 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 """
 RECEIVE_TEMPLATE = CSS_STYLE + """
+
+{{ CSS_STYLE|safe }}
+
 <h1>Receiving</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
+
 {% if message %}
-<p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+<p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">
+    {{ message }}
+</p>
 {% endif %}
 
-{% if rx_data %}
-<h2>Edit Receive Transaction</h2>
-<form method="POST" action="{{ url_for('edit_receive', receive_id=rx_data.receive_id) }}" class="receive-form">
-    <input type="hidden" name="receive_id" value="{{ rx_data.receive_id }}">
+{# ------------------------------------------------- #}
+{#  EDIT or NEW RECEIVE FORM                         #}
+{# ------------------------------------------------- #}
+<h2>{% if rx_data %}Edit Receive Transaction{% else %}Receive Medication{% endif %}</h2>
+
+<form method="POST"
+      action="{% if rx_data %}{{ url_for('edit_receive', receive_id=rx_data.receive_id) }}{% else %}/receive{% endif %}"
+      class="receive-form">
+
+    {# hidden id only for edit #}
+    {% if rx_data %}
+        <input type="hidden" name="receive_id" value="{{ rx_data.receive_id }}">
+    {% endif %}
+
     <div class="common-section">
         <div>
             <label>Medication:</label>
-            <input name="med_name" id="med_name" list="med_suggestions" value="{{ rx_data.med_name }}" required>
+            <input name="med_name" id="med_name" list="med_suggestions"
+                   value="{{ rx_data.med_name if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Quantity:</label>
-            <input name="quantity" type="number" min="1" value="{{ rx_data.quantity }}" required>
+            <input name="quantity" type="number" min="1"
+                   value="{{ rx_data.quantity if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Batch:</label>
-            <input name="batch" value="{{ rx_data.batch }}" required>
+            <input name="batch"
+                   value="{{ rx_data.batch if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Price per Unit:</label>
-            <input name="price" type="number" step="0.01" min="0" value="{{ rx_data.price }}" required>
+            <input name="price" type="number" step="0.01" min="0"
+                   value="{{ rx_data.price if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Expiry Date (YYYY-MM-DD):</label>
-            <input name="expiry_date" type="date" value="{{ rx_data.expiry_date }}" required>
+            <input name="expiry_date" type="date"
+                   value="{{ rx_data.expiry_date if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Schedule:</label>
             <select name="schedule" required>
                 <option value="">-- Select Schedule --</option>
-                <option value="controlled" {% if rx_data.schedule == 'controlled' %}selected{% endif %}>Controlled</option>
-                <option value="not controlled" {% if rx_data.schedule == 'not controlled' %}selected{% endif %}>Not Controlled</option>
+                {% for opt in ['controlled', 'not controlled'] %}
+                    <option value="{{ opt }}"
+                            {% if rx_data and rx_data.schedule == opt %}selected{% endif %}>
+                        {{ opt|title }}
+                    </option>
+                {% endfor %}
             </select>
         </div>
+
         <div>
             <label>Stock Receiver:</label>
-            <input name="stock_receiver" value="{{ rx_data.stock_receiver }}" required>
+            <input name="stock_receiver"
+                   value="{{ rx_data.stock_receiver if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Order Number:</label>
-            <input name="order_number" value="{{ rx_data.order_number }}" required>
+            <input name="order_number"
+                   value="{{ rx_data.order_number if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Supplier:</label>
-            <input name="supplier" value="{{ rx_data.supplier }}" required>
+            <input name="supplier"
+                   value="{{ rx_data.supplier if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Invoice Number:</label>
-            <input name="invoice_number" value="{{ rx_data.invoice_number }}" required>
+            <input name="invoice_number"
+                   value="{{ rx_data.invoice_number if rx_data else '' }}" required>
         </div>
     </div>
+
     <datalist id="med_suggestions"></datalist>
+
     <div class="form-buttons">
-        <input type="submit" value="Update Receive">
-        <a href="{{ url_for('receive', start_date=start_date, end_date=end_date, search=search) }}"><button type="button">Cancel</button></a>
+        <input type="submit" value="{% if rx_data %}Update Receive{% else %}Receive{% endif %}">
+        {% if rx_data %}
+            <a href="{{ url_for('receive',
+                                start_date=start_date,
+                                end_date=end_date,
+                                search=search) }}">
+                <button type="button">Cancel</button>
+            </a>
+        {% else %}
+            <button type="button"
+                    onclick="document.querySelector('form.receive-form').reset();
+                             document.getElementById('med_suggestions').innerHTML='';">
+                Clear Form
+            </button>
+        {% endif %}
     </div>
+
+    {# keep filter values for Cancel / pagination #}
     <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
-    <input type="hidden" name="search" value="{{ search or '' }}">
+    <input type="hidden" name="end_date"   value="{{ end_date   or '' }}">
+    <input type="hidden" name="search"     value="{{ search     or '' }}">
 </form>
+
 <hr>
-{% else %}
-<h2>Receive Medication</h2>
-<form method="POST" action="/receive" class="receive-form">
-    <div class="common-section">
-        <div>
-            <label>Medication:</label>
-            <input name="med_name" id="med_name" list="med_suggestions" required>
-        </div>
-        <div>
-            <label>Quantity:</label>
-            <input name="quantity" type="number" min="1" required>
-        </div>
-        <div>
-            <label>Batch:</label>
-            <input name="batch" required>
-        </div>
-        <div>
-            <label>Price per Unit:</label>
-            <input name="price" type="number" step="0.01" min="0" required>
-        </div>
-        <div>
-            <label>Expiry Date (YYYY-MM-DD):</label>
-            <input name="expiry_date" type="date" required>
-        </div>
-        <div>
-            <label>Schedule:</label>
-            <select name="schedule" required>
-                <option value="">-- Select Schedule --</option>
-                <option value="controlled">Controlled</option>
-                <option value="not controlled">Not Controlled</option>
-            </select>
-        </div>
-        <div>
-            <label>Stock Receiver:</label>
-            <input name="stock_receiver" required>
-        </div>
-        <div>
-            <label>Order Number:</label>
-            <input name="order_number" required>
-        </div>
-        <div>
-            <label>Supplier:</label>
-            <input name="supplier" required>
-        </div>
-        <div>
-            <label>Invoice Number:</label>
-            <input name="invoice_number" required>
-        </div>
-    </div>
-    <datalist id="med_suggestions"></datalist>
-    <div class="form-buttons">
-        <input type="submit" value="Receive">
-        <button type="button" onclick="document.querySelector('form').reset(); document.getElementById('med_suggestions').innerHTML = ''; ">Clear Form</button>
-    </div>
-    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
-    <input type="hidden" name="search" value="{{ search or '' }}">
-</form>
-{% endif %}
 
+{# ------------------------------------------------- #}
+{#  FILTER FORM                                      #}
+{# ------------------------------------------------- #}
 <h2>Receive Transactions</h2>
+
 <form method="GET" action="{{ url_for('receive') }}" class="filter-form">
     <div class="filter-section">
         <div>
@@ -1373,7 +1374,8 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
         </div>
         <div>
             <label>Search:</label>
-            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search medication, batch, supplier...">
+            <input name="search" type="text" value="{{ search or '' }}"
+                   placeholder="Search medication, batch, supplier...">
         </div>
         <div class="button-div">
             <input type="submit" value="Filter">
@@ -1381,21 +1383,17 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
         </div>
     </div>
 </form>
+
+{# ------------------------------------------------- #}
+{#  TRANSACTIONS TABLE                               #}
+{# ------------------------------------------------- #}
 <table>
     <thead>
         <tr>
-            <th>Medication</th>
-            <th>Quantity</th>
-            <th>Batch</th>
-            <th>Price</th>
-            <th>Expiry Date</th>
-            <th>Stock Receiver</th>
-            <th>Order Number</th>
-            <th>Supplier</th>
-            <th>Invoice Number</th>
-            <th>User</th>
-            <th>Timestamp</th>
-            <th>Actions</th>
+            <th>Medication</th><th>Quantity</th><th>Batch</th><th>Price</th>
+            <th>Expiry Date</th><th>Stock Receiver</th><th>Order Number</th>
+            <th>Supplier</th><th>Invoice Number</th><th>User</th>
+            <th>Timestamp</th><th>Actions</th>
         </tr>
     </thead>
     <tbody>
@@ -1420,13 +1418,15 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
                                     search=search) }}">
                     <button type="button" class="edit-btn">Edit</button>
                 </a>
+
                 {% if session['user']['role'] == 'admin' %}
-                <form method="POST" action="{{ url_for('delete_receive') }}" style="display:inline-block;"
+                <form method="POST" action="{{ url_for('delete_receive') }}"
+                      style="display:inline-block;"
                       onsubmit="return confirm('Permanently delete this receive entry?\nStock will be reduced.');">
                     <input type="hidden" name="receive_id" value="{{ t._id }}">
                     <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-                    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
-                    <input type="hidden" name="search" value="{{ search or '' }}">
+                    <input type="hidden" name="end_date"   value="{{ end_date   or '' }}">
+                    <input type="hidden" name="search"     value="{{ search     or '' }}">
                     <button type="submit" class="delete-btn">Delete</button>
                 </form>
                 {% endif %}
@@ -1437,10 +1437,13 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
         {% endfor %}
     </tbody>
 </table>
+
+{# ------------------------------------------------- #}
+{#  AUTOCOMPLETE SCRIPT (once)                       #}
+{# ------------------------------------------------- #}
 <script>
-// Same medication autocomplete as before
-// Medication options array for autocomplete
-const medicationOptions = [
+
+ const medicationOptions = [
     "Acetylsalisylic Acid, 100 mg",
     "Acetylsalisylic Acid, 300 mg",
     "Activated Charcoal, 050 g",
@@ -1701,25 +1704,30 @@ const medicationOptions = [
     "Labetolol, 5mg",
     "Morpine tabs , 10mg"
 ];
-document.addEventListener('DOMContentLoaded', function() {
-    const medInput = document.getElementById('med_name');
-    if (medInput) {
-        medInput.addEventListener('input', function() {
-            const query = this.value.toLowerCase();
-            const datalist = document.getElementById('med_suggestions');
-            datalist.innerHTML = '';
-            if (query.length < 1) return;
-            const filtered = medicationOptions.filter(option => option.toLowerCase().includes(query));
-            filtered.forEach(med => {
-                const option = document.createElement('option');
-                option.value = med;
-                datalist.appendChild(option);
-            });
+
+document.addEventListener('DOMContentLoaded', () => {
+    const input   = document.getElementById('med_name');
+    const datalist = document.getElementById('med_suggestions');
+
+    if (!input) return;
+
+    // Populate datalist once (faster than re-creating on every keystroke)
+    medicationOptions.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        datalist.appendChild(opt);
+    });
+
+    // Optional: filter visually while typing (nice UX)
+    input.addEventListener('input', () => {
+        const q = input.value.toLowerCase();
+        Array.from(datalist.options).forEach(opt => {
+            opt.style.display = opt.value.toLowerCase().includes(q) ? '' : 'none';
         });
-    }
+    });
 });
 </script>
-"""
+
 ADD_MED_TEMPLATE = CSS_STYLE + """
 <h1>Add New Medication</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
