@@ -1362,8 +1362,8 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
             <td>{{ t.user }}</td>
             <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
             <td class="action-buttons">
-                <a href="{{ url_for('receive',
-                                    edit=t._id,
+                <a href="{{ url_for('edit_receive',
+                                    receive_id=t._id,
                                     start_date=start_date,
                                     end_date=end_date,
                                     search=search) }}">
