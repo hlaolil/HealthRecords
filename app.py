@@ -1233,9 +1233,6 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 """
 RECEIVE_TEMPLATE = CSS_STYLE + """
-
-{{ CSS_STYLE|safe }}
-
 <h1>Receiving</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
