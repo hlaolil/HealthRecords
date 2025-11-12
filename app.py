@@ -977,8 +977,8 @@ const medicationOptions = [
     "Lisinopril, 020, mg",
     "Loperamide Tabs, 002 mg",
     "Loratadine, 010 mg",
-    "Losartan, 050 mg",
-    "Losartan, 100 mg",
+    "Lorsatan, 050 mg",
+    "Lorsatan, 100 mg",
     "Lubrucating Gel, 050 g",
     "Magasil Suspension, 100 ml",
     "Magnesium Suphate injection, 010 mg",
@@ -1236,129 +1236,67 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
 <h1>Receiving</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
-
 {% if message %}
-<p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">
-    {{ message }}
-</p>
+<p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
-
-{# ------------------------------------------------- #}
-{#  EDIT or NEW RECEIVE FORM                         #}
-{# ------------------------------------------------- #}
-<h2>{% if rx_data %}Edit Receive Transaction{% else %}Receive Medication{% endif %}</h2>
-
-<form method="POST"
-      action="{% if rx_data %}{{ url_for('edit_receive', receive_id=rx_data.receive_id) }}{% else %}/receive{% endif %}"
-      class="receive-form">
-
-    {# hidden id only for edit #}
-    {% if rx_data %}
-        <input type="hidden" name="receive_id" value="{{ rx_data.receive_id }}">
-    {% endif %}
-
+<h2>Receive Medication</h2>
+<form method="POST" action="/receive" class="receive-form">
     <div class="common-section">
         <div>
             <label>Medication:</label>
-            <input name="med_name" id="med_name" list="med_suggestions"
-                   value="{{ rx_data.med_name if rx_data else '' }}" required>
+            <input name="med_name" id="med_name" list="med_suggestions" required>
         </div>
-
         <div>
             <label>Quantity:</label>
-            <input name="quantity" type="number" min="1"
-                   value="{{ rx_data.quantity if rx_data else '' }}" required>
+            <input name="quantity" type="number" min="1" required>
         </div>
-
         <div>
             <label>Batch:</label>
-            <input name="batch"
-                   value="{{ rx_data.batch if rx_data else '' }}" required>
+            <input name="batch" required>
         </div>
-
         <div>
             <label>Price per Unit:</label>
-            <input name="price" type="number" step="0.01" min="0"
-                   value="{{ rx_data.price if rx_data else '' }}" required>
+            <input name="price" type="number" step="0.01" min="0" required>
         </div>
-
         <div>
             <label>Expiry Date (YYYY-MM-DD):</label>
-            <input name="expiry_date" type="date"
-                   value="{{ rx_data.expiry_date if rx_data else '' }}" required>
+            <input name="expiry_date" type="date" required>
         </div>
-
         <div>
             <label>Schedule:</label>
             <select name="schedule" required>
                 <option value="">-- Select Schedule --</option>
-                {% for opt in ['controlled', 'not controlled'] %}
-                    <option value="{{ opt }}"
-                            {% if rx_data and rx_data.schedule == opt %}selected{% endif %}>
-                        {{ opt|title }}
-                    </option>
-                {% endfor %}
+                <option value="controlled">Controlled</option>
+                <option value="not controlled">Not Controlled</option>
             </select>
         </div>
-
         <div>
             <label>Stock Receiver:</label>
-            <input name="stock_receiver"
-                   value="{{ rx_data.stock_receiver if rx_data else '' }}" required>
+            <input name="stock_receiver" required>
         </div>
-
         <div>
             <label>Order Number:</label>
-            <input name="order_number"
-                   value="{{ rx_data.order_number if rx_data else '' }}" required>
+            <input name="order_number" required>
         </div>
-
         <div>
             <label>Supplier:</label>
-            <input name="supplier"
-                   value="{{ rx_data.supplier if rx_data else '' }}" required>
+            <input name="supplier" required>
         </div>
-
         <div>
             <label>Invoice Number:</label>
-            <input name="invoice_number"
-                   value="{{ rx_data.invoice_number if rx_data else '' }}" required>
+            <input name="invoice_number" required>
         </div>
     </div>
-
     <datalist id="med_suggestions"></datalist>
-
     <div class="form-buttons">
-        <input type="submit" value="{% if rx_data %}Update Receive{% else %}Receive{% endif %}">
-        {% if rx_data %}
-            <a href="{{ url_for('receive',
-                                start_date=start_date,
-                                end_date=end_date,
-                                search=search) }}">
-                <button type="button">Cancel</button>
-            </a>
-        {% else %}
-            <button type="button"
-                    onclick="document.querySelector('form.receive-form').reset();
-                             document.getElementById('med_suggestions').innerHTML='';">
-                Clear Form
-            </button>
-        {% endif %}
+        <input type="submit" value="Receive">
+        <button type="button" onclick="document.querySelector('form').reset(); document.getElementById('med_suggestions').innerHTML = ''; ">Clear Form</button>
     </div>
-
-    {# keep filter values for Cancel / pagination #}
     <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-    <input type="hidden" name="end_date"   value="{{ end_date   or '' }}">
-    <input type="hidden" name="search"     value="{{ search     or '' }}">
+    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
+    <input type="hidden" name="search" value="{{ search or '' }}">
 </form>
-
-<hr>
-
-{# ------------------------------------------------- #}
-{#  FILTER FORM                                      #}
-{# ------------------------------------------------- #}
 <h2>Receive Transactions</h2>
-
 <form method="GET" action="{{ url_for('receive') }}" class="filter-form">
     <div class="filter-section">
         <div>
@@ -1371,8 +1309,7 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
         </div>
         <div>
             <label>Search:</label>
-            <input name="search" type="text" value="{{ search or '' }}"
-                   placeholder="Search medication, batch, supplier...">
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search medication, batch, supplier...">
         </div>
         <div class="button-div">
             <input type="submit" value="Filter">
@@ -1380,17 +1317,20 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
         </div>
     </div>
 </form>
-
-{# ------------------------------------------------- #}
-{#  TRANSACTIONS TABLE                               #}
-{# ------------------------------------------------- #}
 <table>
     <thead>
         <tr>
-            <th>Medication</th><th>Quantity</th><th>Batch</th><th>Price</th>
-            <th>Expiry Date</th><th>Stock Receiver</th><th>Order Number</th>
-            <th>Supplier</th><th>Invoice Number</th><th>User</th>
-            <th>Timestamp</th><th>Actions</th>
+            <th>Medication</th>
+            <th>Quantity</th>
+            <th>Batch</th>
+            <th>Price</th>
+            <th>Expiry Date</th>
+            <th>Stock Receiver</th>
+            <th>Order Number</th>
+            <th>Supplier</th>
+            <th>Invoice Number</th>
+            <th>User</th>
+            <th>Timestamp</th>
         </tr>
     </thead>
     <tbody>
@@ -1407,40 +1347,15 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
             <td>{{ t.invoice_number }}</td>
             <td>{{ t.user }}</td>
             <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-            <td class="action-buttons">
-                <a href="{{ url_for('receive',
-                                    edit=t._id,
-                                    start_date=start_date,
-                                    end_date=end_date,
-                                    search=search) }}">
-                    <button type="button" class="edit-btn">Edit</button>
-                </a>
-
-                {% if session['user']['role'] == 'admin' %}
-                <form method="POST" action="{{ url_for('delete_receive') }}"
-                      style="display:inline-block;"
-                      onsubmit="return confirm('Permanently delete this receive entry?\nStock will be reduced.');">
-                    <input type="hidden" name="receive_id" value="{{ t._id }}">
-                    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-                    <input type="hidden" name="end_date"   value="{{ end_date   or '' }}">
-                    <input type="hidden" name="search"     value="{{ search     or '' }}">
-                    <button type="submit" class="delete-btn">Delete</button>
-                </form>
-                {% endif %}
-            </td>
         </tr>
         {% else %}
-        <tr><td colspan="12">No receive transactions.</td></tr>
+        <tr><td colspan="11">No receive transactions.</td></tr>
         {% endfor %}
     </tbody>
 </table>
-
-{# ------------------------------------------------- #}
-{#  AUTOCOMPLETE SCRIPT (once)                       #}
-{# ------------------------------------------------- #}
 <script>
-
- const medicationOptions = [
+// Medication options array for autocomplete
+const medicationOptions = [
     "Acetylsalisylic Acid, 100 mg",
     "Acetylsalisylic Acid, 300 mg",
     "Activated Charcoal, 050 g",
@@ -1590,8 +1505,8 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
     "Lisinopril, 020, mg",
     "Loperamide Tabs, 002 mg",
     "Loratadine, 010 mg",
-    "Losartan, 050 mg",
-    "Losartan, 100 mg",
+    "Lorsatan, 050 mg",
+    "Lorsatan, 100 mg",
     "Lubrucating Gel, 050 g",
     "Magasil Suspension, 100 ml",
     "Magnesium Suphate injection, 010 mg",
@@ -1701,30 +1616,23 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
     "Labetolol, 5mg",
     "Morpine tabs , 10mg"
 ];
-
-document.addEventListener('DOMContentLoaded', () => {
-    const input   = document.getElementById('med_name');
-    const datalist = document.getElementById('med_suggestions');
-
-    if (!input) return;
-
-    // Populate datalist once (faster than re-creating on every keystroke)
-    medicationOptions.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m;
-        datalist.appendChild(opt);
-    });
-
-    // Optional: filter visually while typing (nice UX)
-    input.addEventListener('input', () => {
-        const q = input.value.toLowerCase();
-        Array.from(datalist.options).forEach(opt => {
-            opt.style.display = opt.value.toLowerCase().includes(q) ? '' : 'none';
+document.addEventListener('DOMContentLoaded', function() {
+    const medInput = document.getElementById('med_name');
+    medInput.addEventListener('input', function() {
+        const query = this.value.toLowerCase();
+        const datalist = document.getElementById('med_suggestions');
+        datalist.innerHTML = '';
+        if (query.length < 1) return;
+        const filtered = medicationOptions.filter(option => option.toLowerCase().includes(query));
+        filtered.forEach(med => {
+            const option = document.createElement('option');
+            option.value = med;
+            datalist.appendChild(option);
         });
     });
 });
 </script>
-
+"""
 ADD_MED_TEMPLATE = CSS_STYLE + """
 <h1>Add New Medication</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
@@ -1938,8 +1846,8 @@ const medicationOptions = [
     "Lisinopril, 020, mg",
     "Loperamide Tabs, 002 mg",
     "Loratadine, 010 mg",
-    "Losartan, 050 mg",
-    "Losartan, 100 mg",
+    "Lorsatan, 050 mg",
+    "Lorsatan, 100 mg",
     "Lubrucating Gel, 050 g",
     "Magasil Suspension, 100 ml",
     "Magnesium Suphate injection, 010 mg",
@@ -2657,7 +2565,6 @@ def dispense():
         return render_template_string(DISPENSE_TEMPLATE, tx_list=[], nav_links=get_nav_links(), message="Database connection failed. Please try again later.", start_date='', end_date='', search='', tx_data=None), 500
     finally:
         client.close()
-
 @app.route('/receive', methods=['GET', 'POST'])
 @login_required
 def receive():
@@ -2671,7 +2578,6 @@ def receive():
         end_date = request.values.get('end_date')
         search = request.values.get('search')
         current_user = session['user']['name']
-
         # Build query for tx_list
         base_query = {'type': 'receive'}
         date_query = {}
@@ -2694,16 +2600,7 @@ def receive():
             ]
             base_query['$or'] = or_query
         tx_list = list(transactions.find(base_query).sort('timestamp', -1))
-
-        rx_data = None
-        edit_id = request.args.get('edit')
-        if edit_id and edit_id != 'new':
-            rx = transactions.find_one({'_id': edit_id, 'type': 'receive'})
-            if rx:
-                rx_data = rx
-                rx_data['receive_id'] = str(rx['_id'])
-
-        if request.method == 'POST' and not rx_data:
+        if request.method == 'POST':
             try:
                 med_name = request.form['med_name']
                 quantity = int(request.form['quantity'])
@@ -2715,7 +2612,6 @@ def receive():
                 order_number = request.form['order_number']
                 supplier = request.form['supplier']
                 invoice_number = request.form['invoice_number']
-
                 medications.update_one(
                     {'name': med_name},
                     {'$inc': {'balance': quantity},
@@ -2747,24 +2643,15 @@ def receive():
                     'timestamp': datetime.utcnow()
                 })
                 message = 'Received successfully!'
+                return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-
-        return render_template_string(
-            RECEIVE_TEMPLATE,
-            tx_list=tx_list,
-            nav_links=get_nav_links(),
-            message=message,
-            start_date=start_date,
-            end_date=end_date,
-            search=search,
-            rx_data=rx_data
-        )
+                return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search)
+        return render_template_string(RECEIVE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search)
     except ServerSelectionTimeoutError:
-        return render_template_string(RECEIVE_TEMPLATE, tx_list=[], nav_links=get_nav_links(), message="Database connection failed.", start_date='', end_date='', search=''), 500
+        return render_template_string(RECEIVE_TEMPLATE, tx_list=[], nav_links=get_nav_links(), message="Database connection failed. Please try again later.", start_date='', end_date='', search=''), 500
     finally:
         client.close()
-
 @app.route('/add-medication', methods=['GET', 'POST'])
 @login_required
 def add_medication():
@@ -3304,173 +3191,6 @@ def delete_dispense():
                             start_date=request.form.get('start_date'),
                             end_date=request.form.get('end_date'),
                             search=request.form.get('search')))
-
-@app.route('/edit-receive/<receive_id>', methods=['GET', 'POST'])
-@login_required
-def edit_receive(receive_id):
-    try:
-        client = get_mongo_client()
-        db = client['pharmacy_db']
-        transactions = db['transactions']
-        medications = db['medications']
-
-        start_date = request.values.get('start_date')
-        end_date = request.values.get('end_date')
-        search = request.values.get('search')
-        current_user = session['user']['name']
-
-        # Build tx_list for table
-        base_query = {'type': 'receive'}
-        date_query = {}
-        if start_date:
-            date_query['$gte'] = datetime.strptime(start_date, '%Y-%m-%d')
-        if end_date:
-            end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
-            date_query['$lte'] = end_dt
-        if date_query:
-            base_query['timestamp'] = date_query
-        if search:
-            or_query = [
-                {'med_name': {'$regex': search, '$options': 'i'}},
-                {'batch': {'$regex': search, '$options': 'i'}},
-                {'supplier': {'$regex': search, '$options': 'i'}},
-                {'stock_receiver': {'$regex': search, '$options': 'i'}},
-                {'order_number': {'$regex': search, '$options': 'i'}},
-                {'invoice_number': {'$regex': search, '$options': 'i'}},
-                {'expiry_date': {'$regex': search, '$options': 'i'}},
-            ]
-            base_query['$or'] = or_query
-        tx_list = list(transactions.find(base_query).sort('timestamp', -1))
-
-        rx_data = None
-        if receive_id != 'new':
-            rx = transactions.find_one({'_id': receive_id, 'type': 'receive'})
-            if rx:
-                rx_data = rx
-                rx_data['receive_id'] = str(rx['_id'])
-
-        message = None
-        if request.method == 'POST':
-            try:
-                old_rx = transactions.find_one({'_id': receive_id})
-                if not old_rx:
-                    message = "Transaction not found."
-                else:
-                    # Rollback old quantity
-                    medications.update_one(
-                        {'name': old_rx['med_name']},
-                        {'$inc': {'balance': -old_rx['quantity']}}
-                    )
-
-                    # Parse new values
-                    med_name = request.form['med_name']
-                    quantity = int(request.form['quantity'])
-                    batch = request.form['batch']
-                    price = float(request.form['price'])
-                    expiry_date = request.form['expiry_date']
-                    schedule = request.form['schedule']
-                    stock_receiver = request.form['stock_receiver']
-                    order_number = request.form['order_number']
-                    supplier = request.form['supplier']
-                    invoice_number = request.form['invoice_number']
-
-                    # Update medication stock
-                    medications.update_one(
-                        {'name': med_name},
-                        {'$inc': {'balance': quantity},
-                         '$set': {
-                             'batch': batch,
-                             'price': price,
-                             'expiry_date': expiry_date,
-                             'schedule': schedule,
-                             'stock_receiver': stock_receiver,
-                             'order_number': order_number,
-                             'supplier': supplier,
-                             'invoice_number': invoice_number
-                         }},
-                        upsert=True
-                    )
-
-                    # Update transaction
-                    transactions.update_one(
-                        {'_id': receive_id},
-                        {'$set': {
-                            'med_name': med_name,
-                            'quantity': quantity,
-                            'batch': batch,
-                            'price': price,
-                            'expiry_date': expiry_date,
-                            'schedule': schedule,
-                            'stock_receiver': stock_receiver,
-                            'order_number': order_number,
-                            'supplier': supplier,
-                            'invoice_number': invoice_number,
-                            'user': current_user,
-                            'timestamp': datetime.utcnow()
-                        }}
-                    )
-                    message = "Receive transaction updated successfully!"
-            except Exception as e:
-                message = f"Update failed: {str(e)}"
-
-        return render_template_string(
-            RECEIVE_TEMPLATE,
-            tx_list=tx_list,
-            nav_links=get_nav_links(),
-            message=message,
-            start_date=start_date,
-            end_date=end_date,
-            search=search,
-            rx_data=rx_data
-        )
-    except ServerSelectionTimeoutError:
-        return "Database connection failed.", 500
-    finally:
-        client.close()
-
-
-@app.route('/delete-receive', methods=['POST'])
-@login_required
-def delete_receive():
-    if session['user'].get('role') != 'admin':
-        flash('Only admins can delete receive transactions.', 'error')
-        return redirect(url_for('receive'))
-
-    receive_id = request.form.get('receive_id')
-    if not receive_id:
-        flash('No transaction selected.', 'error')
-        return redirect(url_for('receive'))
-
-    try:
-        client = get_mongo_client()
-        db = client['pharmacy_db']
-        transactions = db['transactions']
-        medications = db['medications']
-
-        rx = transactions.find_one({'_id': receive_id, 'type': 'receive'})
-        if not rx:
-            flash('Transaction not found.', 'error')
-            return redirect(url_for('receive'))
-
-        # Reduce stock
-        medications.update_one(
-            {'name': rx['med_name']},
-            {'$inc': {'balance': -rx['quantity']}}
-        )
-
-        # Delete transaction
-        transactions.delete_one({'_id': receive_id})
-        flash('Receive transaction deleted – stock reduced.', 'success')
-    except Exception as e:
-        flash(f'Delete failed: {str(e)}', 'error')
-    finally:
-        client.close()
-
-    return redirect(url_for('receive',
-                            start_date=request.form.get('start_date'),
-                            end_date=request.form.get('end_date'),
-                            search=request.form.get('search')))
-
 @app.route('/api/diagnoses', methods=['GET'])
 @login_required
 def get_diagnosis_suggestions():
@@ -3486,4 +3206,3 @@ if __name__ == '__main__':
         app.logger.error(f"Failed to load audit logger: {e}")
 
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
-
