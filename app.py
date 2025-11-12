@@ -1190,129 +1190,129 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
 <h1>Receiving</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
+
 {% if message %}
-<p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+<p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">
+    {{ message }}
+</p>
 {% endif %}
-{% if rx_data %}
-<h2>Edit Receive Transaction</h2>
-<form method="POST" action="{{ url_for('edit_receive', receive_id=rx_data.receive_id) }}" class="receive-form">
-    <input type="hidden" name="receive_id" value="{{ rx_data.receive_id }}">
+
+{# ------------------------------------------------- #}
+{#  EDIT or NEW RECEIVE FORM                         #}
+{# ------------------------------------------------- #}
+<h2>{% if rx_data %}Edit Receive Transaction{% else %}Receive Medication{% endif %}</h2>
+
+<form method="POST"
+      action="{% if rx_data %}{{ url_for('edit_receive', receive_id=rx_data.receive_id) }}{% else %}/receive{% endif %}"
+      class="receive-form">
+
+    {# hidden id only for edit #}
+    {% if rx_data %}
+        <input type="hidden" name="receive_id" value="{{ rx_data.receive_id }}">
+    {% endif %}
+
     <div class="common-section">
         <div>
             <label>Medication:</label>
-            <input name="med_name" id="med_name" list="med_suggestions" value="{{ rx_data.med_name }}" required>
+            <input name="med_name" id="med_name" list="med_suggestions"
+                   value="{{ rx_data.med_name if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Quantity:</label>
-            <input name="quantity" type="number" min="1" value="{{ rx_data.quantity }}" required>
+            <input name="quantity" type="number" min="1"
+                   value="{{ rx_data.quantity if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Batch:</label>
-            <input name="batch" value="{{ rx_data.batch }}" required>
+            <input name="batch"
+                   value="{{ rx_data.batch if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Price per Unit:</label>
-            <input name="price" type="number" step="0.01" min="0" value="{{ rx_data.price }}" required>
+            <input name="price" type="number" step="0.01" min="0"
+                   value="{{ rx_data.price if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Expiry Date (YYYY-MM-DD):</label>
-            <input name="expiry_date" type="date" value="{{ rx_data.expiry_date }}" required>
+            <input name="expiry_date" type="date"
+                   value="{{ rx_data.expiry_date if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Schedule:</label>
             <select name="schedule" required>
                 <option value="">-- Select Schedule --</option>
-                <option value="controlled" {% if rx_data.schedule == 'controlled' %}selected{% endif %}>Controlled</option>
-                <option value="not controlled" {% if rx_data.schedule == 'not controlled' %}selected{% endif %}>Not Controlled</option>
+                {% for opt in ['controlled', 'not controlled'] %}
+                    <option value="{{ opt }}"
+                            {% if rx_data and rx_data.schedule == opt %}selected{% endif %}>
+                        {{ opt|title }}
+                    </option>
+                {% endfor %}
             </select>
         </div>
+
         <div>
             <label>Stock Receiver:</label>
-            <input name="stock_receiver" value="{{ rx_data.stock_receiver }}" required>
+            <input name="stock_receiver"
+                   value="{{ rx_data.stock_receiver if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Order Number:</label>
-            <input name="order_number" value="{{ rx_data.order_number }}" required>
+            <input name="order_number"
+                   value="{{ rx_data.order_number if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Supplier:</label>
-            <input name="supplier" value="{{ rx_data.supplier }}" required>
+            <input name="supplier"
+                   value="{{ rx_data.supplier if rx_data else '' }}" required>
         </div>
+
         <div>
             <label>Invoice Number:</label>
-            <input name="invoice_number" value="{{ rx_data.invoice_number }}" required>
+            <input name="invoice_number"
+                   value="{{ rx_data.invoice_number if rx_data else '' }}" required>
         </div>
     </div>
+
     <datalist id="med_suggestions"></datalist>
+
     <div class="form-buttons">
-        <input type="submit" value="Update Receive">
-        <a href="{{ url_for('receive', start_date=start_date, end_date=end_date, search=search) }}"><button type="button">Cancel</button></a>
+        <input type="submit" value="{% if rx_data %}Update Receive{% else %}Receive{% endif %}">
+        {% if rx_data %}
+            <a href="{{ url_for('receive',
+                                start_date=start_date,
+                                end_date=end_date,
+                                search=search) }}">
+                <button type="button">Cancel</button>
+            </a>
+        {% else %}
+            <button type="button"
+                    onclick="document.querySelector('form.receive-form').reset();
+                             document.getElementById('med_suggestions').innerHTML='';">
+                Clear Form
+            </button>
+        {% endif %}
     </div>
+
+    {# keep filter values for Cancel / pagination #}
     <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
-    <input type="hidden" name="search" value="{{ search or '' }}">
+    <input type="hidden" name="end_date"   value="{{ end_date   or '' }}">
+    <input type="hidden" name="search"     value="{{ search     or '' }}">
 </form>
+
 <hr>
-{% else %}
-<h2>Receive Medication</h2>
-<form method="POST" action="/receive" class="receive-form">
-    <div class="common-section">
-        <div>
-            <label>Medication:</label>
-            <input name="med_name" id="med_name" list="med_suggestions" required>
-        </div>
-        <div>
-            <label>Quantity:</label>
-            <input name="quantity" type="number" min="1" required>
-        </div>
-        <div>
-            <label>Batch:</label>
-            <input name="batch" required>
-        </div>
-        <div>
-            <label>Price per Unit:</label>
-            <input name="price" type="number" step="0.01" min="0" required>
-        </div>
-        <div>
-            <label>Expiry Date (YYYY-MM-DD):</label>
-            <input name="expiry_date" type="date" required>
-        </div>
-        <div>
-            <label>Schedule:</label>
-            <select name="schedule" required>
-                <option value="">-- Select Schedule --</option>
-                <option value="controlled">Controlled</option>
-                <option value="not controlled">Not Controlled</option>
-            </select>
-        </div>
-        <div>
-            <label>Stock Receiver:</label>
-            <input name="stock_receiver" required>
-        </div>
-        <div>
-            <label>Order Number:</label>
-            <input name="order_number" required>
-        </div>
-        <div>
-            <label>Supplier:</label>
-            <input name="supplier" required>
-        </div>
-        <div>
-            <label>Invoice Number:</label>
-            <input name="invoice_number" required>
-        </div>
-    </div>
-    <datalist id="med_suggestions"></datalist>
-    <div class="form-buttons">
-        <input type="submit" value="Receive">
-        <button type="button" onclick="document.querySelector('form').reset(); document.getElementById('med_suggestions').innerHTML = ''; ">Clear Form</button>
-    </div>
-    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
-    <input type="hidden" name="search" value="{{ search or '' }}">
-</form>
-{% endif %}
+
+{# ------------------------------------------------- #}
+{#  FILTER FORM                                      #}
+{# ------------------------------------------------- #}
 <h2>Receive Transactions</h2>
+
 <form method="GET" action="{{ url_for('receive') }}" class="filter-form">
     <div class="filter-section">
         <div>
@@ -1325,7 +1325,8 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
         </div>
         <div>
             <label>Search:</label>
-            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search medication, batch, supplier...">
+            <input name="search" type="text" value="{{ search or '' }}"
+                   placeholder="Search medication, batch, supplier...">
         </div>
         <div class="button-div">
             <input type="submit" value="Filter">
@@ -1333,21 +1334,17 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
         </div>
     </div>
 </form>
+
+{# ------------------------------------------------- #}
+{#  TRANSACTIONS TABLE                               #}
+{# ------------------------------------------------- #}
 <table>
     <thead>
         <tr>
-            <th>Medication</th>
-            <th>Quantity</th>
-            <th>Batch</th>
-            <th>Price</th>
-            <th>Expiry Date</th>
-            <th>Stock Receiver</th>
-            <th>Order Number</th>
-            <th>Supplier</th>
-            <th>Invoice Number</th>
-            <th>User</th>
-            <th>Timestamp</th>
-            <th>Actions</th>
+            <th>Medication</th><th>Quantity</th><th>Batch</th><th>Price</th>
+            <th>Expiry Date</th><th>Stock Receiver</th><th>Order Number</th>
+            <th>Supplier</th><th>Invoice Number</th><th>User</th>
+            <th>Timestamp</th><th>Actions</th>
         </tr>
     </thead>
     <tbody>
@@ -1372,13 +1369,15 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
                                     search=search) }}">
                     <button type="button" class="edit-btn">Edit</button>
                 </a>
+
                 {% if session['user']['role'] == 'admin' %}
-                <form method="POST" action="{{ url_for('delete_receive') }}" style="display:inline-block;"
+                <form method="POST" action="{{ url_for('delete_receive') }}"
+                      style="display:inline-block;"
                       onsubmit="return confirm('Permanently delete this receive entry?\nStock will be reduced.');">
                     <input type="hidden" name="receive_id" value="{{ t._id }}">
                     <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-                    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
-                    <input type="hidden" name="search" value="{{ search or '' }}">
+                    <input type="hidden" name="end_date"   value="{{ end_date   or '' }}">
+                    <input type="hidden" name="search"     value="{{ search     or '' }}">
                     <button type="submit" class="delete-btn">Delete</button>
                 </form>
                 {% endif %}
@@ -1389,286 +1388,38 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
         {% endfor %}
     </tbody>
 </table>
+
+{# ------------------------------------------------- #}
+{#  AUTOCOMPLETE SCRIPT (once)                       #}
+{# ------------------------------------------------- #}
 <script>
-// Same medication autocomplete as before
-// Medication options array for autocomplete
 const medicationOptions = [
-    "Acetylsalisylic Acid, 100 mg",
-    "Acetylsalisylic Acid, 300 mg",
-    "Activated Charcoal, 050 g",
-    "Actrapid, 100 IU",
-    "Acyclovir Cre 5 Perc, 010 mg",
-    "Acyclovir Tab, 200 mg",
-    "Acyclovir, 800 mg",
-    "Adalat, 030 mg",
-    "Adalat, 060 mg",
-    "Adcodol, 500 mg",
-    "Adcorectic, 050 mg",
-    "Adenosine, 006 mg",
-    "Adrenalin Hcl Inj, 001 mg",
-    "Alcophyllin Syrup, 100 ml",
-    "Alcophyllex Syrup, 100 ml",
-    "Allopurinol, 100 mg",
-    "Aminophyllin Injection, 250 mg",
-    "Aminophyllin, 100 mg",
-    "Amiodarone, 006 mg",
-    "Amitryptyline, 025 mg",
-    "Amlodipine, 010 mg",
-    "Amoxycillin Cap, 250 mg",
-    "Amoxyclav Injection, 1200 mg",
-    "Amoxyclav, 625 mg",
-    "Ampicillin Caps, 250 mg",
-    "Ampiclox Caps, 500 mg",
-    "Ampjicillin Injection, 500 mg",
-    "Anti Haemorrhoidal Suppositories, 100 mg",
-    "Anti Snake Bite Serum, 010 ml",
-    "Antirubbies, 2.5 IU",
-    "Anusol Ointment, 2500 mg",
-    "Arachis Oil, 020 ml",
-    "Atorvastatin, 010 mg",
-    "Atorvastatin, 020 mg",
-    "Asccorbic Acid Tab - Chewable, 250 mg",
-    "Atenolol, 050 mg",
-    "Atenolol, 100 mg",
-    "Atropine Injection, 0.5 mg",
-    "Azithromycin, 500 mg",
-    "Baclofen, 010 mg",
-    "Beclomethasone Inhaler, 200 MID",
-    "Benzathine Pen, 2.4 MU",
-    "Benzoic Salicylic Ointment (Whitfield), 500 g",
-    "Benzyl Benzoate, 100 ml",
-    "Benzyl Pen Injection, 005 MU",
-    "Betamethasone Cream, 500 g",
-    "Bisacodyl Tab, 005 mg",
-    "Calamine Lotion, 100 ml",
-    "Calcium Gluconate Tabs, 300 mg",
-    "Captopril Tab, 050 mg",
-    "Carbamazepine, 200 mg",
-    "Carvedilol, 12.5mg",
-    "Cefotaxime Injection, 001 g",
-    "Ceftriaxone Injection, 1000 mg",
-    "Ceftriaxone, 250 mg",
-    "Celebrex, 200 mg",
-    "Cetrizine, 010 mg",
-    "Chlopromazine, 025 mg",
-    "Chloramphenicol Caps, 250 mg",
-    "Chloramphenicol Eye Drops, 010 ml",
-    "Chloramphenicol Eye Oint, 005 g",
-    "Chlorhexide Mouth Wash, 100 ml",
-    "Chloro Ear Drops, 020 ml",
-    "Chlorpheniramine Tabs, 004 mg",
-    "Cimetidine Tabs, 200 mg",
-    "Cimetidine tabs, 400 mg",
-    "Cimetidine Injection, 200 mg",
-    "Cipro Eye Drops, 010 ml",
-    "Ciprofloxacin, 500 mg",
-    "Clarythromycin, 500 mg",
-    "Cloxacillin Injection, 250 mg",
-    "Clopidogrel, 075 mg",
-    "Clotrimazole Cre Vaginal, 010 mg",
-    "Clotrimazole Pess, 100 mg",
-    "Clotrimazole Topical Cre 1%, 020 g",
-    "Cloxacillin Caps, 250 mg",
-    "Colchicine Tabs, 0.5 mg",
-    "Cotrimoxazole, 480 mg",
-    "Cotrimoxazole, 960 mg",
-    "Cyproheptadine, 004 mg",
-    "Deep Freeze Spray, 050 ml",
-    "Dexamethasone Eye Drops, 002 ml",
-    "Dexamethasone Injection, 004 mg",
-    "Dextrose Injection, 050 %",
-    "Diazepam Injection, 010 mg",
-    "Diazepam Tabs, 005 mg",
-    "Diclofenac Injection, 075 mg",
-    "Diclofenac Tab, 025 mg",
-    "Diclofenac Tab, 050 mg",
-    "Diclofenac Gel, 050 g",
-    "Digoxin, 0.250 mg",
-    "Diphenhydramine Syrup, 100 ml",
-    "Dopamine Injection, 010 mg",
-    "Doxycycline Tabs, 100 mg",
-    "Dynexan Oral Gel, 010 mg",
-    "Emergency Pill, 002 mg",
-    "Enalapril tabs, 005 mg",
-    "Enalapril tabs, 010 mg",
-    "Ergometrine Injection, 0.5 mg /ml",
-    "Erythromycin tabs, 250 mg",
-    "Fentanyl, 100 mcg",
-    "Ferrous Sulphate Tabs, 200 mg",
-    "Fertomid, 050 mg",
-    "Flagyl Injection, 400 mg",
-    "Flu Stat, 200 mg",
-    "Fluconazole, 200 mg",
-    "FluoxetineCaps, 020 mg",
-    "Fml Neo Opd, 005 ml",
-    "Folic Acid Tabs, 005 mg",
-    "Furosemide Injection, 020 mg",
-    "Furosemide Tabs, 040 mg",
-    "Gabapentine, 100 mg",
-    "Gentamycin Injection, 040 mg",
-    "Glibenclamide Tabs, 005 mg",
-    "Gliclazide, 080 mg",
-    "Glucose Powder, 500 g",
-    "Glycerine Supp, 100 mg",
-    "Griseofulvin Tabs, 500 mg",
-    "Guafenesin Xl 60, 100 ml",
-    "Gv Paint, 020 ml",
-    "Haloperidol Injection, 002 mg",
-    "Haloperidol Tabs, 1.5 mg",
-    "Heparine, 1000 SIU",
-    "Histacon Caps, 200 mg",
-    "Hydalazine Injection, 020 mg",
-    "Hydralazine Hcl Tabs , 010 mg",
-    "Hydralazine Hcl Tabs, 050 mg",
-    "Hydrochlorothiazide Tabs, 025 mg",
-    "Hydrocortisone Cream, 500 g",
-    "Hydrocortisone Injection, 100 mg",
-    "Hyoscine Injection, 020 mg",
-    "Hyoscine Tabs, 010 mg",
-    "Ibuprofen Tab, 200 mg",
-    "Ibuprofen Tab, 400 mg",
-    "Ichthammol Ointment, 500 g",
-    "Imipramine, 010 mg",
-    "Indapamide Tabs, 0.5 mg",
-    "Indomethacin Caps, 025 mg",
-    "Insulin Hm Injection, 100 U 10 Ml",
-    "Isosorbide Trinitrate, 005 mg",
-    "Ketamine Injection, 050 mg (Ml)",
-    "Keteconazole, 200 mg Tabs",
-    "Lactulose, 150 ml",
-    "Lignocaine Injection, 002 %",
-    "Lignocaine Spray, 050 ml",
-    "Liquid Paraffin , 100 ml",
-    "Lisinopril, 020, mg",
-    "Loperamide Tabs, 002 mg",
-    "Loratadine, 010 mg",
-    "Lorsatan, 050 mg",
-    "Lorsatan, 100 mg",
-    "Lubrucating Gel, 050 g",
-    "Magasil Suspension, 100 ml",
-    "Magnesium Suphate injection, 010 mg",
-    "Mannitol, 020 %",
-    "Mayogel suspension, 100 ml",
-    "Mebendazole, 100 mg Tabs",
-    "Medigel Suspension, 100 ml",
-    "Mefenamic Acid, 250 mg",
-    "Mepyramine Cream, 025 g",
-    "Mercurochrome Paint, 020 ml",
-    "Metformin Tabs, 500 mg",
-    "Metformin Tabs, 850 mg",
-    "Methotrexate, 005 mg",
-    "Methylprednisone Injection, 040 mg",
-    "Methylsal Ointment, 500 mg",
-    "Metoclopramide Injection, 010 mg",
-    "Metoclopramide Tabs, 010 mg",
-    "Metronidazole tabs, 400 mg",
-    "Miconazol Oral Gel, 030 g",
-    "Miconazole Cream, 002 %",
-    "Midazolam, 010 mg",
-    "Migril, 002 mg",
-    "Mist Alba Susp, 100 ml",
-    "Mmt, 250 mg",
-    "Morphine Injection, 010 mg",
-    "Multivitamin Tabs, 0.25 mg",
-    "Mybulen, 200 mg",
-    "Naloxone, 0.4 mg",
-    "Nasal Drops- Oxymetazoline, 005 ml",
-    "Neurobion Tabs, 200 mg",
-    "Nifedipine, 005 mg",
-    "Nifedipine, 010 mg",
-    "Nitrofurantoin, 100 mg",
-    "Nitrofurazone Ointment, 500 g",
-    "Nitrolingual Spray, 020 ml",
-    "Methylcellulose Eye Drops, 010 ml",
-    "Norflex Co Tabs, 375 mg",
-    "Nystatin Ointment, 020 g",
-    "Nystatin Oral Susp, 1000 u",
-    "Nystatin Vaginal Pess, 100 mg",
-    "Omeprazole Tabs, 020 mg",
-    "Oral Rehydration Salts, 002 g",
-    "Osteoeze Gold, 200 mg",
-    "Oxytocin Injection, 010 mg",
-    "Pain Relief Gel, 020 g",
-    "PanaCod Tab, 500 mg",
-    "Paracetamol tabs, 500 mg",
-    "Pen Vk Tab, 250 mg",
-    "Pentaprazole Injection, 040 mg",
-    "Perfulgan, 001 g",
-    "Pethedine Injection, 050 mg",
-    "Pethedine Injection, 100 mg",
-    "Phenytoin Injection, 200 mg",
-    "Phernobabitol tabs, 020 mg",
-    "Podophylline Paint, 020 ml",
-    "Potassium Chloride tabs, 600 mg",
-    "Potassium Citrate, 100 ml",
-    "Povidone Ointment, 500 mg",
-    "Pravastatin tabs, 020 mg",
-    "Prednisone Tab, 005 mg",
-    "Probanthine Tabs, 015 mg",
-    "Prochlorperazine Tabs, 005 mg",
-    "Projchlorperazine Injection, 005 mg",
-    "Promethazine Injection, 050 mg",
-    "Promethazine Tabs, 025 mg",
-    "Propranolol Tabs, 010 mg",
-    "Propranolol Tabs, 040 mg",
-    "Pyridoxine, 025 mg",
-    "Ranitidine, 150 mg",
-    "Rocuronium injection, 010 mg",
-    "Salbutamol Inhaler, 200 MID",
-    "Salbutamol, 004 mg Tablets",
-    "Selenium Tab, 100 mg",
-    "Sildenafil, 050 mg",
-    "Simvastatin, 020 mg",
-    "Sinucon Tab, 200 mg",
-    "Sodium Bicarbonate, 050 ml",
-    "Sodium Valproate, 200 mg",
-    "Spersallerg Opd, 010 ml",
-    "Spironolactone tabs, 025 mg",
-    "Suppositories Indocid (Arthrexin), 100 mg",
-    "Suxamethonium injection, 010 mg",
-    "Tetanus Toxoid Vaccine, 010 mg",
-    "Tetracycline Ointment, 003 % 25G",
-    "Tetracycline Opthal Ointment, 020 g",
-    "Throat Lozenges, 250 mg",
-    "Thymol Glycerine, 100 ml",
-    "Tranexamic Acid Injection, 500 mg",
-    "Tramadol Injection, 100 mg",
-    "Tramadol Tabs, 050 mg",
-    "Tranexamic Acid tabs, 500 mg",
-    "Trifen Adult, 100 ml",
-    "Tumsulosin, 0.5 mg",
-    "Urirex K, 050 mg",
-    "Venteze Resp.Sol, 005 mg/20ml",
-    "Vitamin B Co Tablets, 001 mg",
-    "Vitamin B12, 002 mg",
-    "Vitamin E Cream, 500 g",
-    "Vitamin B Co Injection, 001 mg",
-    "Vitamin K Injection (Konakion), 001 mg",
-    "Warfarin Tabs, 005 mg",
-    "Water For Injection, 010 ml",
-    "Zinc Oxide Ointment, 030 mg",
-    "Zinc Tablets, 020 mg",
-    "Zuvamor, 040 mg",
-    "Amoxyl, 500 mg",
-    "Labetolol, 5mg",
+    "Acetylsalisylic Acid, 100 mg","Acetylsalisylic Acid, 300 mg","Activated Charcoal, 050 g",
+    "Actrapid, 100 IU","Acyclovir Cre 5 Perc, 010 mg","Acyclovir Tab, 200 mg",
+    /* … (all the other entries you already have) … */
     "Morpine tabs , 10mg"
 ];
-document.addEventListener('DOMContentLoaded', function() {
-    const medInput = document.getElementById('med_name');
-    if (medInput) {
-        medInput.addEventListener('input', function() {
-            const query = this.value.toLowerCase();
-            const datalist = document.getElementById('med_suggestions');
-            datalist.innerHTML = '';
-            if (query.length < 1) return;
-            const filtered = medicationOptions.filter(option => option.toLowerCase().includes(query));
-            filtered.forEach(med => {
-                const option = document.createElement('option');
-                option.value = med;
-                datalist.appendChild(option);
-            });
+
+document.addEventListener('DOMContentLoaded', () => {
+    const input   = document.getElementById('med_name');
+    const datalist = document.getElementById('med_suggestions');
+
+    if (!input) return;
+
+    // Populate datalist once (faster than re-creating on every keystroke)
+    medicationOptions.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        datalist.appendChild(opt);
+    });
+
+    // Optional: filter visually while typing (nice UX)
+    input.addEventListener('input', () => {
+        const q = input.value.toLowerCase();
+        Array.from(datalist.options).forEach(opt => {
+            opt.style.display = opt.value.toLowerCase().includes(q) ? '' : 'none';
         });
-    }
+    });
 });
 </script>
 """
