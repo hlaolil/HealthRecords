@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
 load_dotenv() # Loads .env into os.environ
 from error_logger import init_error_logging
+from bson import ObjectId
+from bson.errors import InvalidId
 app = Flask(__name__)
 init_error_logging(app) # <-- this activates everything
 app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -2996,14 +2998,14 @@ def edit_receive(receive_id):
         db = client['pharmacy_db']
         transactions = db['transactions']
         medications = db['medications']
-        
+       
         # Get filter params (from query on GET, form on POST)
         start_date = request.values.get('start_date') if request.method == 'GET' else request.form.get('start_date')
         end_date = request.values.get('end_date') if request.method == 'GET' else request.form.get('end_date')
         search = request.values.get('search') if request.method == 'GET' else request.form.get('search')
-        
+       
         current_user = session['user']['name']
-        
+       
         # Build tx_list for table (same logic as receive route)
         base_query = {'type': 'receive'}
         date_query = {}
@@ -3026,7 +3028,7 @@ def edit_receive(receive_id):
             ]
             base_query['$or'] = or_query
         tx_list = list(transactions.find(base_query).sort('timestamp', -1))
-        
+       
         # Fetch existing rx_data (only for valid receive_id)
         rx_data = None
         message = None
@@ -3048,8 +3050,8 @@ def edit_receive(receive_id):
                                     start_date=start_date or '',
                                     end_date=end_date or '',
                                     search=search or ''))
-        
-        if request.method == 'POST':
+       
+        if request.method == 'POST' and rx_data:  # Only process if rx_data exists
             try:
                 oid = ObjectId(receive_id)
                 old_rx = transactions.find_one({'_id': oid})
@@ -3062,7 +3064,7 @@ def edit_receive(receive_id):
                         {'$inc': {'balance': -old_rx['quantity']}}
                     )
                     
-                    # Parse new values
+                    # Parse new values (unchanged)
                     med_name = request.form['med_name']
                     quantity = int(request.form['quantity'])
                     batch = request.form['batch']
@@ -3074,7 +3076,7 @@ def edit_receive(receive_id):
                     supplier = request.form['supplier']
                     invoice_number = request.form['invoice_number']
                     
-                    # Update/add new med stock (note: '$set' overwrites batch/expiry/etc—consider if this is intended)
+                    # Update/add new med stock (unchanged, but note: transaction fields on med doc?)
                     medications.update_one(
                         {'name': med_name},
                         {'$inc': {'balance': quantity},
@@ -3083,7 +3085,6 @@ def edit_receive(receive_id):
                              'price': price,
                              'expiry_date': expiry_date,
                              'schedule': schedule,
-                             # Questionable: these are transaction-specific, not med-level
                              'stock_receiver': stock_receiver,
                              'order_number': order_number,
                              'supplier': supplier,
