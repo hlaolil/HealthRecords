@@ -3197,6 +3197,8 @@ def get_diagnosis_suggestions():
     query = request.args.get('query', '').lower()
     matching = [d for d in DIAGNOSES_OPTIONS if query in d.lower()][:10]
     return jsonify(matching)
+
+if __name__ == '__main__':
 # -------------------------------------------------
 # AFTER the app is fully defined
 # -------------------------------------------------
@@ -3204,6 +3206,4 @@ try:
     from audit_logger import init_audit
     init_audit(app)
 except Exception as e:
-    app.logger.error(f"Failed to load audit logger: {e}")
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.logger.error(f"Failed to load audit logger: {e}")app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
