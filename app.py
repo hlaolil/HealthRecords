@@ -11,9 +11,9 @@ from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
 load_dotenv() # Loads .env into os.environ
 from error_logger import init_error_logging
+app = Flask(__name__)
 init_error_logging(app)          # <-- this activates everything
 
-app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
 # Diagnosis options
