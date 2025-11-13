@@ -487,7 +487,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         </div>
         <div>
             <label>Number of Sick Leave Days:</label>
-            <input name="sick_leave_days" type="number" min="0" value="{{ tx_data.sick_leave_days if tx_data else '' }}" required>
+            <input name="sick_leave_days" type="number" min="0" autocomplete="on" value="{{ tx_data.sick_leave_days if tx_data else '' }}" required>
         </div>
         <div>
             <label>Prescriber (Doctor):</label>
