@@ -673,7 +673,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                         {% if session['user']['role'] == 'admin' %}
                         <form class="delete-btn" method="POST"
                               action="{{ url_for('delete_dispense') }}"
-                              style="display:inline-block;"
+                              style="display:inline;"
                               onsubmit="return confirm('Permanently delete this dispense transaction?\nStock will be restored.');">
                             <input type="hidden" name="transaction_id" value="{{ t.transaction_id }}">
                             <input type="hidden" name="start_date" value="{{ start_date or '' }}">
@@ -1029,7 +1029,7 @@ const medicationOptions = [
     "Trifen Adult, 100 ml",
     "Tumsulosin, 0.5 mg",
     "Urirex K, 050 mg",
-    "Venteze Resp.Sol, 005 mg/20ml",
+    "Venteze Resp.Sol, 005 mg 20ml",
     "Vitamin B Co Tablets, 001 mg",
     "Vitamin B12, 002 mg",
     "Vitamin E Cream, 500 g",
@@ -1374,7 +1374,7 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
 
                 {% if session['user']['role'] == 'admin' %}
                 <form class="delete-btn "method="POST" action="{{ url_for('delete_receive') }}"
-                      style="display:inline-block;"
+                      style="display:inline;"
                       onsubmit="return confirm('Permanently delete this receive entry?\nStock will be reduced.');">
                     <input type="hidden" name="receive_id" value="{{ t._id }}">
                     <input type="hidden" name="start_date" value="{{ start_date or '' }}">
@@ -1641,7 +1641,7 @@ const medicationOptions = [
     "Trifen Adult, 100 ml",
     "Tumsulosin, 0.5 mg",
     "Urirex K, 050 mg",
-    "Venteze Resp.Sol, 005 mg/20ml",
+    "Venteze Resp.Sol, 005 mg 20ml",
     "Vitamin B Co Tablets, 001 mg",
     "Vitamin B12, 002 mg",
     "Vitamin E Cream, 500 g",
@@ -1989,7 +1989,7 @@ const medicationOptions = [
     "Trifen Adult, 100 ml",
     "Tumsulosin, 0.5 mg",
     "Urirex K, 050 mg",
-    "Venteze Resp.Sol, 005 mg/20ml",
+    "Venteze Resp.Sol, 005 mg 20ml",
     "Vitamin B Co Tablets, 001 mg",
     "Vitamin B12, 002 mg",
     "Vitamin E Cream, 500 g",
