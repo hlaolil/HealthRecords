@@ -729,6 +729,7 @@ const positionOptions = [
     "Cleaner",
     "Controller",
     "Director",
+    "Diesel Depo",
     "Drilling",
     "Drivers",
     "Electricians",
@@ -909,7 +910,7 @@ const medicationOptions = [
     "Heparine, 1000 SIU",
     "Histacon Caps, 200 mg",
     "Hydalazine Injection, 020 mg",
-    "Hydralazine Hcl Tabs , 010 mg",
+    "Hydralazine Hcl Tabs, 010 mg",
     "Hydralazine Hcl Tabs, 050 mg",
     "Hydrochlorothiazide Tabs, 025 mg",
     "Hydrocortisone Cream, 500 g",
@@ -929,7 +930,7 @@ const medicationOptions = [
     "Lactulose, 150 ml",
     "Lignocaine Injection, 002 %",
     "Lignocaine Spray, 050 ml",
-    "Liquid Paraffin , 100 ml",
+    "Liquid Paraffin, 100 ml",
     "Lisinopril, 020, mg",
     "Loperamide Tabs, 002 mg",
     "Loratadine, 010 mg",
@@ -1042,7 +1043,7 @@ const medicationOptions = [
     "Zuvamor, 040 mg",
     "Amoxyl, 500 mg",
     "Labetolol, 5mg",
-    "Morpine tabs , 10mg"
+    "Morpine tabs, 10mg"
 ];
 function addInputListener(input, type) {
     input.addEventListener('input', function() {
@@ -1521,7 +1522,7 @@ const medicationOptions = [
     "Heparine, 1000 SIU",
     "Histacon Caps, 200 mg",
     "Hydalazine Injection, 020 mg",
-    "Hydralazine Hcl Tabs , 010 mg",
+    "Hydralazine Hcl Tabs, 010 mg",
     "Hydralazine Hcl Tabs, 050 mg",
     "Hydrochlorothiazide Tabs, 025 mg",
     "Hydrocortisone Cream, 500 g",
@@ -1541,7 +1542,7 @@ const medicationOptions = [
     "Lactulose, 150 ml",
     "Lignocaine Injection, 002 %",
     "Lignocaine Spray, 050 ml",
-    "Liquid Paraffin , 100 ml",
+    "Liquid Paraffin, 100 ml",
     "Lisinopril, 020, mg",
     "Loperamide Tabs, 002 mg",
     "Loratadine, 010 mg",
@@ -1654,7 +1655,7 @@ const medicationOptions = [
     "Zuvamor, 040 mg",
     "Amoxyl, 500 mg",
     "Labetolol, 5mg",
-    "Morpine tabs , 10mg"
+    "Morpine tabs, 10mg"
 ];
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -1869,7 +1870,7 @@ const medicationOptions = [
     "Heparine, 1000 SIU",
     "Histacon Caps, 200 mg",
     "Hydalazine Injection, 020 mg",
-    "Hydralazine Hcl Tabs , 010 mg",
+    "Hydralazine Hcl Tabs, 010 mg",
     "Hydralazine Hcl Tabs, 050 mg",
     "Hydrochlorothiazide Tabs, 025 mg",
     "Hydrocortisone Cream, 500 g",
@@ -1889,7 +1890,7 @@ const medicationOptions = [
     "Lactulose, 150 ml",
     "Lignocaine Injection, 002 %",
     "Lignocaine Spray, 050 ml",
-    "Liquid Paraffin , 100 ml",
+    "Liquid Paraffin, 100 ml",
     "Lisinopril, 020, mg",
     "Loperamide Tabs, 002 mg",
     "Loratadine, 010 mg",
@@ -2002,7 +2003,7 @@ const medicationOptions = [
     "Zuvamor, 040 mg",
     "Amoxyl, 500 mg",
     "Labetolol, 5mg",
-    "Morpine tabs , 10mg"
+    "Morpine tabs, 10mg"
 ];
 document.addEventListener('DOMContentLoaded', function() {
     const medInput = document.getElementById('med_name');
