@@ -2372,6 +2372,7 @@ REGISTER_TEMPLATE = CSS_STYLE + """
         <label>Role:</label>
         <select name="role" required>
             <option value="employee">Employee</option>
+            <option value="viewer">Viewer (no patient names)</option>
             <option value="admin">Admin</option>
         </select><br>
         <input type="submit" value="Register">
