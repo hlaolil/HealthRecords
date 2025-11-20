@@ -669,24 +669,31 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                     <td>{{ t.med_name }}</td>
                     <td>{{ t.quantity }}</td>
                     <td class="action-buttons">
-                        <a href="{{ url_for('dispense',
-                                            edit=t.transaction_id,
-                                            start_date=start_date,
-                                            end_date=end_date,
-                                            search=search) }}">
-                            <button type="button" class="edit-btn">Edit</button>
-                        </a>
+                        {% if session['user']['role'] != 'viewer' %}
+                            <a href="{{ url_for('dispense',
+                                                edit=t.transaction_id,
+                                                start_date=start_date,
+                                                end_date=end_date,
+                                                search=search) }}">
+                                <button type="button" class="edit-btn">Edit</button>
+                            </a>
+                        {% endif %}
+
                         {% if session['user']['role'] == 'admin' %}
-                        <form class="delete-btn" method="POST"
-                              action="{{ url_for('delete_dispense') }}"
-                              style="display:inline;"
-                              onsubmit="return confirm('Permanently delete this dispense transaction?\nStock will be restored.');">
-                            <input type="hidden" name="transaction_id" value="{{ t.transaction_id }}">
-                            <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-                            <input type="hidden" name="end_date" value="{{ end_date or '' }}">
-                            <input type="hidden" name="search" value="{{ search or '' }}">
-                            <button type="submit" class="delete-btn">Delete</button>
-                        </form>
+                            <form class="delete-btn" method="POST"
+                                  action="{{ url_for('delete_dispense') }}"
+                                  style="display:inline;"
+                                  onsubmit="return confirm('Permanently delete this dispense transaction?\nStock will be restored.');">
+                                <input type="hidden" name="transaction_id" value="{{ t.transaction_id }}">
+                                <input type="hidden" name="start_date" value="{{ start_date or '' }}">
+                                <input type="hidden" name="end_date" value="{{ end_date or '' }}">
+                                <input type="hidden" name="search" value="{{ search or '' }}">
+                                <button type="submit" class="delete-btn">Delete</button>
+                            </form>
+                        {% endif %}
+
+                        {% if session['user']['role'] == 'viewer' %}
+                            <span>—</span>  <!-- optional: shows a dash so the column isn’t empty -->
                         {% endif %}
                     </td>
                 </tr>
