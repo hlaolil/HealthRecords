@@ -649,7 +649,13 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                 <tr>
             {% endif %}
                     <td>{{ t.date }}</td>
-                    <td>{{ t.patient }}</td>
+                    <td>
+                        {% if session['user']['role'] == 'viewer' %}
+                            ***HIDDEN***
+                        {% else %}
+                            {{ t.patient }}
+                        {% endif %}
+                    </td>
                     <td>{{ t.company }}</td>
                     <td>{{ t.position }}</td>
                     <td>{{ t.gender }}</td>
