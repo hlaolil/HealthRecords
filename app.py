@@ -1399,7 +1399,7 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
                     <button type="submit" class="delete-btn">Delete</button>
                 </form>
                 {% endif %}
-                % if session['user']['role'] == 'viewer' %}
+                {% if session['user']['role'] == 'viewer' %}
                     <span>—</span>  <!-- optional: shows a dash so the column isn’t empty -->
                 {% endif %}
             </td>
