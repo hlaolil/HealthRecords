@@ -21,7 +21,7 @@ from pymongo.errors import ServerSelectionTimeoutError
 # --------------------------------------------------------------------------- #
 # Configuration (adjust if you keep the file elsewhere)
 # --------------------------------------------------------------------------- #
-LOG_FILE = "errors.log"                     # will be created in the root folder
+LOG_FILE = "/tmp/errors.log"                     # will be created in the root folder
 MONGO_URI = None                            # will be read from env, fallback to app config
 ERROR_COLLECTION = "error_logs"
 
