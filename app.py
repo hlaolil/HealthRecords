@@ -3071,7 +3071,7 @@ def reports():
                                 beginning_balance = max(0, beginning_balance)
                                 average_daily = dispensed / days_in_period
                                 average_monthly = average_daily * 30
-                                lead_time_stock = average_daily * 14
+                                lead_time_stock = average_daily * 60
                                 amount_to_order = max(0, average_monthly - current_balance + lead_time_stock)
                                 report_data.append({
                                     'med_name': med_name,
