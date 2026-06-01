@@ -1,47 +1,35 @@
 # audit_logger.py
-# --------------------------------------------------------------
-# Drop this file in the root folder (same level as app.py)
-# It will automatically monkey-patch the Flask routes that
-# perform edits / deletes and store an immutable audit trail.
-# --------------------------------------------------------------
-
 import os
 import uuid
 from datetime import datetime, timezone
 from functools import wraps
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
-from flask import request, session, current_app, g
+from flask import request, session, current_app
 
-# ------------------------------------------------------------------
-# Configuration – change only if you want a different DB / collection
-# ------------------------------------------------------------------
 MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
 DB_NAME     = 'pharmacy_db'
-COLLECTION  = 'audit_log'      # <-- audit records go here
-# ------------------------------------------------------------------
+COLLECTION  = 'audit_log'
 
 def get_mongo_client():
-    """Lazy client – safe for forks."""
     return MongoClient(MONGODB_URI, serverSelectionTimeoutMS=120000)
 
 def write_audit(action, target_type, target_id, changes, user):
-    """Persist a single audit entry."""
+    """Persist audit entry (unchanged)."""
     try:
         client = get_mongo_client()
         db = client[DB_NAME]
         coll = db[COLLECTION]
-
         doc = {
-            'audit_id'     : str(uuid.uuid4()),
-            'timestamp'    : datetime.now(timezone.utc),
-            'action'       : action,          # CREATE / UPDATE / DELETE
-            'target_type'  : target_type,     # dispense / medication
-            'target_id'    : target_id,       # transaction_id or med_name
-            'changes'      : changes,         # dict of old→new or list of meds
-            'user'         : user,
-            'ip'           : request.remote_addr,
-            'user_agent'   : request.headers.get('User-Agent'),
+            'audit_id': str(uuid.uuid4()),
+            'timestamp': datetime.now(timezone.utc),
+            'action': action,
+            'target_type': target_type,
+            'target_id': target_id,
+            'changes': changes,
+            'user': user,
+            'ip': request.remote_addr,
+            'user_agent': request.headers.get('User-Agent'),
         }
         coll.insert_one(doc)
     except ServerSelectionTimeoutError:
@@ -49,90 +37,97 @@ def write_audit(action, target_type, target_id, changes, user):
     finally:
         client.close()
 
+def init_audit(app):
+    """Monkey-patch only the routes we care about using Flask's view_functions registry.
+       Works perfectly with single-file app.py."""
+    # Dispense (create + edit)
+    if 'dispense' in app.view_functions:
+        original_dispense = app.view_functions['dispense']
+        app.view_functions['dispense'] = audit_dispense_edit(original_dispense)
 
-# ------------------------------------------------------------------
-# Helper decorators – they wrap the original view functions
-# ------------------------------------------------------------------
+    # Delete dispense
+    if 'delete_dispense' in app.view_functions:
+        original_delete_dispense = app.view_functions['delete_dispense']
+        app.view_functions['delete_dispense'] = audit_dispense_delete(original_delete_dispense)
+
+    # Receive delete (we'll keep it simple for now)
+    if 'delete_receive' in app.view_functions:
+        original_delete_receive = app.view_functions['delete_receive']
+        app.view_functions['delete_receive'] = audit_delete_receive(original_delete_receive)
+
+    # Medication CRUD (add/edit/delete)
+    if 'add_medication' in app.view_functions:
+        app.view_functions['add_medication'] = audit_medication_create(app.view_functions['add_medication'])
+    if 'edit_medication' in app.view_functions:   # note: endpoint is usually the function name
+        app.view_functions['edit_medication'] = audit_medication_update(app.view_functions['edit_medication'])
+    if 'delete_medication' in app.view_functions:
+        app.view_functions['delete_medication'] = audit_medication_delete(app.view_functions['delete_medication'])
+
+    app.logger.info("✅ Audit logger attached successfully (single-file mode).")
+
+# Keep your existing wrapper decorators (they still work)
 def audit_dispense_edit(original_func):
-    """Wraps the POST handling in /dispense when editing."""
     @wraps(original_func)
     def wrapper(*args, **kwargs):
-        # Detect edit mode
-        if request.form.get('transaction_id'):
+        if request.method == 'POST' and request.form.get('transaction_id'):  # edit mode
             tx_id = request.form['transaction_id']
-            # Grab the *old* rows before they are deleted
             client = get_mongo_client()
-            db = client[DB_NAME]
-            old_rows = list(db['transactions'].find(
+            old_rows = list(client[DB_NAME]['transactions'].find(
                 {'transaction_id': tx_id, 'type': 'dispense'}
             ))
             client.close()
+            old_meds = [{'med_name': r['med_name'], 'quantity': r['quantity']} for r in old_rows]
 
-            old_meds = [
-                {'med_name': r['med_name'], 'quantity': r['quantity']}
-                for r in old_rows
-            ]
-
-            # Let the original view run (it will delete + re-insert)
             response = original_func(*args, **kwargs)
 
-            # After success – record the change
-            user = session['user']['name']
-            write_audit(
-                action='UPDATE',
-                target_type='dispense',
-                target_id=tx_id,
-                changes={'old_meds': old_meds,
-                         'new_meds': [
-                             {'med_name': n, 'quantity': int(q)}
-                             for n, q in zip(
-                                 request.form.getlist('med_names'),
-                                 request.form.getlist('quantities')
-                             ) if n.strip()
-                         ]},
-                user=user
-            )
+            user = session.get('user', {}).get('name', 'unknown')
+            write_audit('UPDATE', 'dispense', tx_id, {
+                'old_meds': old_meds,
+                'new_meds': [{'med_name': n, 'quantity': int(q)} 
+                             for n, q in zip(request.form.getlist('med_names'), 
+                                             request.form.getlist('quantities')) if n.strip()]
+            }, user)
             return response
-
-        # Normal (create) path – just continue
         return original_func(*args, **kwargs)
     return wrapper
 
-
 def audit_dispense_delete(original_func):
-    """Wraps /delete-dispense."""
     @wraps(original_func)
     def wrapper(*args, **kwargs):
         tx_id = request.form.get('transaction_id')
-        if not tx_id:
-            return original_func(*args, **kwargs)
+        if tx_id:
+            client = get_mongo_client()
+            rows = list(client[DB_NAME]['transactions'].find(
+                {'transaction_id': tx_id, 'type': 'dispense'}
+            ))
+            client.close()
+            meds = [{'med_name': r['med_name'], 'quantity': r['quantity']} for r in rows]
 
-        # Capture the rows that are about to be removed
-        client = get_mongo_client()
-        db = client[DB_NAME]
-        rows = list(db['transactions'].find(
-            {'transaction_id': tx_id, 'type': 'dispense'}
-        ))
-        client.close()
+            response = original_func(*args, **kwargs)
 
-        meds = [
-            {'med_name': r['med_name'], 'quantity': r['quantity']}
-            for r in rows
-        ]
-
-        response = original_func(*args, **kwargs)
-
-        # Log the deletion
-        user = session['user']['name']
-        write_audit(
-            action='DELETE',
-            target_type='dispense',
-            target_id=tx_id,
-            changes={'removed_meds': meds},
-            user=user
-        )
-        return response
+            user = session.get('user', {}).get('name', 'unknown')
+            write_audit('DELETE', 'dispense', tx_id, {'removed_meds': meds}, user)
+            return response
+        return original_func(*args, **kwargs)
     return wrapper
+
+def audit_delete_receive(original_func):
+    @wraps(original_func)
+    def wrapper(*args, **kwargs):
+        receive_id = request.form.get('receive_id')
+        if receive_id:
+            client = get_mongo_client()
+            rx = client[DB_NAME]['transactions'].find_one({'_id': receive_id, 'type': 'receive'})
+            client.close()
+            if rx:
+                user = session.get('user', {}).get('name', 'unknown')
+                write_audit('DELETE', 'receive', str(rx['_id']), 
+                           {'removed': {'med_name': rx['med_name'], 'quantity': rx['quantity']}}, user)
+        return original_func(*args, **kwargs)
+    return wrapper
+
+# Keep the medication audit wrappers exactly as you had them (they don't rely on relative imports)
+# ... (copy your original audit_medication_create, audit_medication_update, audit_medication_delete here)
 
 
 def audit_medication_create(original_func):
