@@ -3421,31 +3421,42 @@ def delete_receive():
     if session['user'].get('role') != 'admin':
         flash('Only admins can delete receive transactions.', 'error')
         return redirect(url_for('receive'))
+
     receive_id = request.form.get('receive_id')
     if not receive_id:
         flash('No transaction selected.', 'error')
         return redirect(url_for('receive'))
+
+    try:
+        oid = ObjectId(receive_id)   # <-- THIS WAS MISSING
+    except InvalidId:
+        flash('Invalid receive ID.', 'error')
+        return redirect(url_for('receive'))
+
     try:
         client = get_mongo_client()
         db = client['pharmacy_db']
         transactions = db['transactions']
         medications = db['medications']
-        rx = transactions.find_one({'_id': receive_id, 'type': 'receive'})
+
+        rx = transactions.find_one({'_id': oid, 'type': 'receive'})
         if not rx:
             flash('Transaction not found.', 'error')
             return redirect(url_for('receive'))
+
         # Reduce stock
         medications.update_one(
             {'name': rx['med_name']},
             {'$inc': {'balance': -rx['quantity']}}
         )
         # Delete transaction
-        transactions.delete_one({'_id': receive_id})
+        transactions.delete_one({'_id': oid})
         flash('Receive transaction deleted – stock reduced.', 'success')
     except Exception as e:
         flash(f'Delete failed: {str(e)}', 'error')
     finally:
         client.close()
+
     return redirect(url_for('receive',
                             start_date=request.form.get('start_date'),
                             end_date=request.form.get('end_date'),
