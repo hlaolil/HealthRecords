@@ -141,6 +141,114 @@ def audit_medication_create(original_func):
     return wrapper
 
 
+# NEW: receive edits were previously not audited at all.
+def audit_receive_edit(original_func):
+    @wraps(original_func)
+    def wrapper(*args, **kwargs):
+        receive_id = kwargs.get('receive_id') or (args[0] if args else None)
+        old_rx = None
+        if request.method == 'POST' and receive_id:
+            try:
+                client = get_mongo_client()
+                old_rx = client[DB_NAME]['transactions'].find_one(
+                    {'_id': ObjectId(receive_id), 'type': 'receive'}
+                )
+                client.close()
+            except Exception:
+                old_rx = None
+
+        response = original_func(*args, **kwargs)
+
+        if request.method == 'POST' and old_rx:
+            user = session.get('user', {}).get('name', 'unknown')
+            write_audit('UPDATE', 'receive', receive_id, {
+                'old': {
+                    'med_name': old_rx.get('med_name'),
+                    'quantity': old_rx.get('quantity'),
+                    'batch': old_rx.get('batch'),
+                    'price': old_rx.get('price'),
+                    'expiry_date': old_rx.get('expiry_date'),
+                },
+                'new': {
+                    'med_name': request.form.get('med_name'),
+                    'quantity': request.form.get('quantity'),
+                    'batch': request.form.get('batch'),
+                    'price': request.form.get('price'),
+                    'expiry_date': request.form.get('expiry_date'),
+                }
+            }, user)
+        return response
+    return wrapper
+
+
+# NEW: medication record edits (balance/batch/price/expiry/schedule) were
+# previously not audited.
+def audit_medication_edit(original_func):
+    @wraps(original_func)
+    def wrapper(*args, **kwargs):
+        med_name = kwargs.get('med_name') or (args[0] if args else None)
+        old_med = None
+        if request.method == 'POST' and med_name:
+            try:
+                client = get_mongo_client()
+                old_med = client[DB_NAME]['medications'].find_one({'name': med_name})
+                client.close()
+            except Exception:
+                old_med = None
+
+        response = original_func(*args, **kwargs)
+
+        if request.method == 'POST' and old_med:
+            user = session.get('user', {}).get('name', 'unknown')
+            write_audit('UPDATE', 'medication', med_name, {
+                'old': {
+                    'balance': old_med.get('balance'),
+                    'batch': old_med.get('batch'),
+                    'price': old_med.get('price'),
+                    'expiry_date': old_med.get('expiry_date'),
+                    'schedule': old_med.get('schedule'),
+                },
+                'new': {
+                    'balance': request.form.get('balance'),
+                    'batch': request.form.get('batch'),
+                    'price': request.form.get('price'),
+                    'expiry_date': request.form.get('expiry_date'),
+                    'schedule': request.form.get('schedule'),
+                }
+            }, user)
+        return response
+    return wrapper
+
+
+# NEW: medication deletion was previously not audited.
+def audit_medication_delete(original_func):
+    @wraps(original_func)
+    def wrapper(*args, **kwargs):
+        med_name = request.form.get('med_name')
+        old_med = None
+        if med_name:
+            try:
+                client = get_mongo_client()
+                old_med = client[DB_NAME]['medications'].find_one({'name': med_name})
+                client.close()
+            except Exception:
+                old_med = None
+
+        response = original_func(*args, **kwargs)
+
+        if old_med:
+            user = session.get('user', {}).get('name', 'unknown')
+            write_audit('DELETE', 'medication', med_name, {
+                'balance': old_med.get('balance'),
+                'batch': old_med.get('batch'),
+                'price': old_med.get('price'),
+                'expiry_date': old_med.get('expiry_date'),
+                'schedule': old_med.get('schedule'),
+            }, user)
+        return response
+    return wrapper
+
+
 # ====================== INIT ======================
 def init_audit(app):
     """Attach audit wrappers to routes after the app is fully initialised."""
@@ -151,8 +259,14 @@ def init_audit(app):
             app.view_functions['delete_dispense'] = audit_dispense_delete(app.view_functions['delete_dispense'])
         if 'delete_receive' in app.view_functions:
             app.view_functions['delete_receive'] = audit_delete_receive(app.view_functions['delete_receive'])
+        if 'edit_receive' in app.view_functions:
+            app.view_functions['edit_receive'] = audit_receive_edit(app.view_functions['edit_receive'])
         if 'add_medication' in app.view_functions:
             app.view_functions['add_medication'] = audit_medication_create(app.view_functions['add_medication'])
+        if 'edit_medication' in app.view_functions:
+            app.view_functions['edit_medication'] = audit_medication_edit(app.view_functions['edit_medication'])
+        if 'delete_medication' in app.view_functions:
+            app.view_functions['delete_medication'] = audit_medication_delete(app.view_functions['delete_medication'])
 
         app.logger.info("✅ Audit logger successfully attached!")
         print("✅ Audit logger initialized successfully")

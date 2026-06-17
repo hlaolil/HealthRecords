@@ -135,12 +135,14 @@ def get_nav_links():
         # but any HTML characters in the name are neutralised.
         name = escape(user.get('name', user.get('login', 'User')))
         add_med_link = '<a href="/add-medication">Add Medication</a> | ' if is_admin else ''
+        audit_link = '<a href="/audit">Audit Log</a> | ' if is_admin else ''
         return f"""
         <p class="nav-links"><strong>Navigate:</strong>
             <a href="/dispense">Dispensing</a> |
             <a href="/receive">Receiving</a> |
             {add_med_link}
             <a href="/reports">Reports</a> |
+            {audit_link}
             <span>Welcome, {name}! <a href="/logout">Logout</a></span>
         </p>
         """
@@ -395,6 +397,11 @@ CSS_STYLE = """
         background-color: #d4edda;
         color: #155724;
     }
+    .message.partial {
+        background-color: #fff3cd;
+        color: #856404;
+        border: 1px solid #ffeeba;
+    }
     .message.error {
         background-color: #f8d7da;
         color: #721c24;
@@ -486,7 +493,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
 {% if message %}
-    <p class="message {% if 'successfully' in message|lower or 'updated' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+    <p class="message {% if 'partial success' in message|lower %}partial{% elif 'successfully' in message|lower or 'updated' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
 <h2>{% if tx_data %}Edit Dispense{% else %}Dispense Medication{% endif %}</h2>
 <form method="POST" action="{{ url_for('dispense') }}" class="dispense-form">
@@ -884,7 +891,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('.diag-input').forEach(i => addInputListener(i, 'diagnosis'));
 });
 
-{% if message and ('successfully' in message|lower or 'updated' in message|lower) %}
+{% if message and ('successfully' in message|lower or 'updated' in message|lower) and 'partial success' not in message|lower %}
     {% if not tx_data %}
         clearForm();
     {% endif %}
@@ -1389,6 +1396,106 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 {% endfor %}
 {% else %}
 <p>No controlled drugs found or no data for this period.</p>
+{% endif %}
+"""
+
+# NEW: admin-only audit trail viewer. Surfaces every CREATE/UPDATE/DELETE
+# recorded by audit_logger.py (audit_log collection) and every unhandled
+# exception recorded by error_logger.py (error_logs collection) in one place.
+AUDIT_TEMPLATE = CSS_STYLE + """
+<h1>Audit &amp; Error Log</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
+{{ nav_links|safe }}
+{% if message %}
+    <p class="message error">{{ message }}</p>
+{% endif %}
+
+<form method="GET" action="{{ url_for('audit_log') }}" class="filter-form">
+    <div class="filter-section">
+        <div>
+            <label>View:</label>
+            <select name="view">
+                <option value="changes" {% if view == 'changes' %}selected{% endif %}>Edits &amp; Deletes</option>
+                <option value="errors" {% if view == 'errors' %}selected{% endif %}>Application Errors</option>
+            </select>
+        </div>
+        <div>
+            <label>Start Date:</label>
+            <input name="start_date" type="date" value="{{ start_date or '' }}">
+        </div>
+        <div>
+            <label>End Date:</label>
+            <input name="end_date" type="date" value="{{ end_date or '' }}">
+        </div>
+        <div>
+            <label>Search:</label>
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="User, action, target, medication...">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Filter">
+            <a href="{{ url_for('audit_log') }}">Clear</a>
+        </div>
+    </div>
+</form>
+
+{% if view == 'changes' %}
+<h2>Edits &amp; Deletes ({{ entries|length }})</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Timestamp</th>
+            <th>Action</th>
+            <th>Record Type</th>
+            <th>Target</th>
+            <th>User</th>
+            <th>IP</th>
+            <th>Details</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for e in entries %}
+        <tr class="{% if e.action == 'DELETE' %}expired{% elif e.action == 'UPDATE' %}close-to-expire{% else %}normal{% endif %}">
+            <td>{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            <td>{{ e.action }}</td>
+            <td>{{ e.target_type }}</td>
+            <td>{{ e.target_id }}</td>
+            <td>{{ e.user }}</td>
+            <td>{{ e.ip }}</td>
+            <td><pre style="white-space: pre-wrap; margin: 0; font-size: 12px;">{{ e.changes }}</pre></td>
+        </tr>
+    {% else %}
+        <tr><td colspan="7">No edit or delete records found.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<h2>Application Errors ({{ entries|length }})</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Timestamp</th>
+            <th>Method</th>
+            <th>Path</th>
+            <th>Endpoint</th>
+            <th>Remote Addr</th>
+            <th>Traceback (last line)</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for e in entries %}
+        <tr class="expired">
+            <td>{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            <td>{{ e.method }}</td>
+            <td>{{ e.path }}</td>
+            <td>{{ e.endpoint }}</td>
+            <td>{{ e.remote_addr }}</td>
+            <td><pre style="white-space: pre-wrap; margin: 0; font-size: 12px;">{{ e.traceback[-1] if e.traceback else '' }}</pre></td>
+        </tr>
+    {% else %}
+        <tr><td colspan="6">No application errors found.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
 {% endif %}
 """
 
@@ -2185,6 +2292,82 @@ def reports():
             report_type=None, report_data=[], receive_list=[], stock_data=[],
             controlled_register=[], start_date=None, end_date=None,
             total_transactions=0, search=None, report_title=None, is_admin=is_admin
+        ), 500
+
+
+# NEW: admin-only audit trail. Gives admins visibility into every edit/delete
+# (from audit_logger.py's audit_log collection) and every unhandled exception
+# (from error_logger.py's error_logs collection) across the whole app.
+@app.route('/audit', methods=['GET'])
+@login_required
+def audit_log():
+    if session['user'].get('role') != 'admin':
+        flash('Access denied. Only admins can view the audit log.', 'error')
+        return redirect('/reports')
+
+    view = request.args.get('view', 'changes')
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    search = request.args.get('search')
+    message = None
+    entries = []
+
+    try:
+        client = get_mongo_client()
+        db = client['pharmacy_db']
+
+        date_query = {}
+        if start_date:
+            date_query['$gte'] = datetime.strptime(start_date, '%Y-%m-%d')
+        if end_date:
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
+            date_query['$lte'] = end_dt
+
+        if view == 'errors':
+            query = {}
+            if date_query:
+                query['timestamp'] = date_query
+            if search:
+                query['$or'] = [
+                    {'path':     {'$regex': search, '$options': 'i'}},
+                    {'endpoint': {'$regex': search, '$options': 'i'}},
+                    {'method':   {'$regex': search, '$options': 'i'}},
+                ]
+            entries = list(
+                db['error_logs'].find(query).sort('timestamp', -1).limit(500)
+            )
+        else:
+            view = 'changes'  # normalize any unexpected value
+            query = {}
+            if date_query:
+                query['timestamp'] = date_query
+            if search:
+                query['$or'] = [
+                    {'action':      {'$regex': search, '$options': 'i'}},
+                    {'target_type': {'$regex': search, '$options': 'i'}},
+                    {'target_id':   {'$regex': search, '$options': 'i'}},
+                    {'user':        {'$regex': search, '$options': 'i'}},
+                ]
+            entries = list(
+                db['audit_log'].find(query).sort('timestamp', -1).limit(500)
+            )
+
+        return render_template_string(
+            AUDIT_TEMPLATE,
+            nav_links=get_nav_links(),
+            message=message,
+            view=view,
+            entries=entries,
+            start_date=start_date,
+            end_date=end_date,
+            search=search
+        )
+    except ServerSelectionTimeoutError:
+        return render_template_string(
+            AUDIT_TEMPLATE,
+            nav_links=get_nav_links(),
+            message="Database connection failed. Please try again later.",
+            view=view, entries=[], start_date=start_date, end_date=end_date, search=search
         ), 500
 
 
