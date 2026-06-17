@@ -9,14 +9,42 @@ from uuid import uuid4
 from collections import defaultdict
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
-load_dotenv() # Loads .env into os.environ
+from markupsafe import escape  # FIX: used to prevent XSS in nav links
+
+load_dotenv()
+
 from error_logger import init_error_logging
 from bson import ObjectId
 from bson.errors import InvalidId
+
 app = Flask(__name__)
-init_error_logging(app) # <-- this activates everything
-app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+init_error_logging(app)
+app.secret_key = os.getenv('SECRET_KEY')
+
+# FIX: fail loudly at startup if SECRET_KEY is not set, rather than silently
+# using a weak dev key in production.
+if not app.secret_key:
+    raise RuntimeError(
+        "SECRET_KEY environment variable is not set. "
+        "Set it to a long random string before starting the server."
+    )
+
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
+
+# -----------------------------------------------------------------------
+# FIX (Performance): MongoDB module-level client with connection pooling.
+# Previously a new MongoClient was created and closed on every request,
+# which is slow and defeats PyMongo's built-in connection pool.
+# -----------------------------------------------------------------------
+_mongo_client = None
+
+def get_mongo_client():
+    global _mongo_client
+    if _mongo_client is None:
+        mongouri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
+        _mongo_client = MongoClient(mongouri, serverSelectionTimeoutMS=120000)
+    return _mongo_client
+
 # Diagnosis options
 DIAGNOSES_OPTIONS = [
     'ARDS', 'Abscess', 'Acne (Moderate to severe)', 'Acute Bronchitis', 'Acute Gastroenteritis (AGE)',
@@ -86,10 +114,7 @@ DIAGNOSES_OPTIONS = [
     'Drug induced kidney injury', 'Urethral stricture/Urinary outlet obstruction', 'Kidney stone',
     'Bladder stone', 'Warts', 'DM', 'Hyperglycaemia', 'Hypoglycaemia', 'DKA', 'HHS'
 ]
-# MongoDB connection function (lazy initialization for fork-safety)
-def get_mongo_client():
-    monguri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
-    return MongoClient(monguri, serverSelectionTimeoutMS=120000)
+
 # Login required decorator
 def login_required(f):
     @wraps(f)
@@ -98,12 +123,17 @@ def login_required(f):
             return redirect('/login')
         return f(*args, **kwargs)
     return decorated_function
-# Navigation links (updated to include user info and logout)
+
+# FIX (Security/XSS): escape user-controlled values before inserting into nav HTML.
+# Previously the user's display name came straight from the DB and was rendered
+# with |safe, allowing a name like <script>alert(1)</script> to execute.
 def get_nav_links():
     if 'user' in session:
         user = session['user']
         is_admin = user.get('role') == 'admin'
-        name = user.get('name', user.get('login', 'User'))
+        # escape() returns a Markup object that Jinja will not double-escape,
+        # but any HTML characters in the name are neutralised.
+        name = escape(user.get('name', user.get('login', 'User')))
         add_med_link = '<a href="/add-medication">Add Medication</a> | ' if is_admin else ''
         return f"""
         <p class="nav-links"><strong>Navigate:</strong>
@@ -120,7 +150,8 @@ def get_nav_links():
             <a href="/login">Login</a> | <a href="/register">Register</a>
         </p>
         """
-# CSS for all templates (same colors, improved button design)
+
+# CSS for all templates
 CSS_STYLE = """
 <style>
     body {
@@ -235,7 +266,6 @@ CSS_STYLE = """
     .form-buttons {
         text-align: center;
     }
-    /* === Improved Buttons (keeping original colors) === */
     form input[type="submit"],
     form button {
         background-color: #0056b3;
@@ -262,7 +292,6 @@ CSS_STYLE = """
         transform: scale(0.97);
         box-shadow: 0 2px 4px rgba(0,0,0,0.15);
     }
-    /* === Action Buttons (Edit / Delete / View) === */
     .action-buttons {
         padding: 6px 10px;
         border-radius: 4px;
@@ -301,11 +330,10 @@ CSS_STYLE = """
     .action-buttons .view-btn:hover {
         background-color: #218838;
     }
-    /* === Override Delete Button inside forms === */
     form button.delete-btn {
         background-color: #dc3545 !important;
         color: #fff !important;
-        padding: 0 !important; /* smaller size */
+        padding: 0 !important;
         font-size: 13px !important;
         border-radius: 2px !important;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
@@ -419,32 +447,41 @@ CSS_STYLE = """
         text-align: center;
     }
     @media (max-width: 600px) {
-        body {
-            padding: 10px;
-        }
-        form, table {
-            max-width: 100%;
-        }
-        .common-section {
-            grid-template-columns: 1fr;
-        }
-        #medications, #diagnoses {
-            grid-template-columns: 1fr;
-        }
-        .med-row, .diag-row {
-            grid-template-columns: 1fr;
-        }
-        table th, table td {
-            font-size: 14px;
-            padding: 8px;
-        }
-        .filter-section {
-            grid-template-columns: 1fr;
-        }
+        body { padding: 10px; }
+        form, table { max-width: 100%; }
+        .common-section { grid-template-columns: 1fr; }
+        #medications, #diagnoses { grid-template-columns: 1fr; }
+        .med-row, .diag-row { grid-template-columns: 1fr; }
+        table th, table td { font-size: 14px; padding: 8px; }
+        .filter-section { grid-template-columns: 1fr; }
     }
 </style>
 """
-DISPENSE_TEMPLATE = CSS_STYLE + """
+
+# FIX (Performance): medication options are now served from a single endpoint
+# /api/medications instead of being duplicated verbatim in three HTML templates.
+# Templates reference MEDICATION_OPTIONS_JS which injects a small loader snippet.
+MEDICATION_OPTIONS_JS = """
+<script>
+// FIX: medication list is fetched once from /api/medications instead of being
+// duplicated in every template. Results are cached in module scope.
+let _medicationOptions = null;
+
+async function getMedicationOptions() {
+    if (_medicationOptions) return _medicationOptions;
+    try {
+        const res = await fetch('/api/medications');
+        _medicationOptions = await res.json();
+    } catch(e) {
+        console.error('Failed to load medication list', e);
+        _medicationOptions = [];
+    }
+    return _medicationOptions;
+}
+</script>
+"""
+
+DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
 <h1>Dispensing</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
@@ -453,7 +490,10 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 {% endif %}
 <h2>{% if tx_data %}Edit Dispense{% else %}Dispense Medication{% endif %}</h2>
 <form method="POST" action="{{ url_for('dispense') }}" class="dispense-form">
-    <input type="hidden" name="transaction_id" value="{{ tx_data.transaction_id if tx_data else '' }}">
+    {# FIX (UX): transaction_id field now has id="transaction_id_field" so
+       clearForm() can reset it, preventing a Clear → Submit from accidentally
+       updating an existing record instead of creating a new one. #}
+    <input type="hidden" name="transaction_id" id="transaction_id_field" value="{{ tx_data.transaction_id if tx_data else '' }}">
     <div class="common-section">
         <div>
             <label>Patient:</label>
@@ -636,18 +676,22 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
         </tr>
     </thead>
     <tbody>
+        {# FIX (UX/Correctness): Group rows by transaction_id in Python (see route)
+           instead of relying on consecutive ordering in the template.
+           tx_groups is a list of (transaction_id, [rows]) in display order. #}
         {% set tx_number = namespace(value=1) %}
-        {% for t in tx_list %}
-            {% if loop.first or t.transaction_id != tx_list[loop.index0 - 1].transaction_id %}
+        {% for group_id, group_rows in tx_groups %}
+            {% for t in group_rows %}
+                {% if loop.first %}
                 <tr style="border-top: 3px double #0056b3;">
-                    <td rowspan="{{ tx_list|selectattr('transaction_id', 'equalto', t.transaction_id)|list|length }}"
+                    <td rowspan="{{ group_rows|length }}"
                         style="vertical-align: middle; font-weight: bold; font-size: 1.1em; color: #0056b3;">
                         {{ tx_number.value }}.
+                        {% set tx_number.value = tx_number.value + 1 %}
                     </td>
-                    {% set tx_number.value = tx_number.value + 1 %}
-            {% else %}
+                {% else %}
                 <tr>
-            {% endif %}
+                {% endif %}
                     <td>{{ t.date }}</td>
                     <td>
                         {% if session['user']['role'] == 'viewer' %}
@@ -669,34 +713,35 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
                     <td>{{ t.med_name }}</td>
                     <td>{{ t.quantity }}</td>
                     <td class="action-buttons">
-                        {% if session['user']['role'] != 'viewer' %}
-                            <a href="{{ url_for('dispense',
-                                                edit=t.transaction_id,
-                                                start_date=start_date,
-                                                end_date=end_date,
-                                                search=search) }}">
-                                <button type="button" class="edit-btn">Edit</button>
-                            </a>
-                        {% endif %}
-
-                        {% if session['user']['role'] == 'admin' %}
-                            <form class="delete-btn" method="POST"
-                                  action="{{ url_for('delete_dispense') }}"
-                                  style="display:inline;"
-                                  onsubmit="return confirm('Permanently delete this dispense transaction?\nStock will be restored.');">
-                                <input type="hidden" name="transaction_id" value="{{ t.transaction_id }}">
-                                <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-                                <input type="hidden" name="end_date" value="{{ end_date or '' }}">
-                                <input type="hidden" name="search" value="{{ search or '' }}">
-                                <button type="submit" class="delete-btn">Delete</button>
-                            </form>
-                        {% endif %}
-
-                        {% if session['user']['role'] == 'viewer' %}
-                            <span>—</span>  <!-- optional: shows a dash so the column isn’t empty -->
+                        {% if loop.first %}
+                            {% if session['user']['role'] != 'viewer' %}
+                                <a href="{{ url_for('dispense',
+                                                    edit=t.transaction_id,
+                                                    start_date=start_date,
+                                                    end_date=end_date,
+                                                    search=search) }}">
+                                    <button type="button" class="edit-btn">Edit</button>
+                                </a>
+                            {% endif %}
+                            {% if session['user']['role'] == 'admin' %}
+                                <form class="delete-btn" method="POST"
+                                      action="{{ url_for('delete_dispense') }}"
+                                      style="display:inline;"
+                                      onsubmit="return confirm('Permanently delete this dispense transaction?\\nStock will be restored.');">
+                                    <input type="hidden" name="transaction_id" value="{{ t.transaction_id }}">
+                                    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
+                                    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
+                                    <input type="hidden" name="search" value="{{ search or '' }}">
+                                    <button type="submit" class="delete-btn">Delete</button>
+                                </form>
+                            {% endif %}
+                            {% if session['user']['role'] == 'viewer' %}
+                                <span>—</span>
+                            {% endif %}
                         {% endif %}
                     </td>
                 </tr>
+            {% endfor %}
         {% else %}
         <tr><td colspan="16">No dispense transactions.</td></tr>
         {% endfor %}
@@ -705,363 +750,27 @@ DISPENSE_TEMPLATE = CSS_STYLE + """
 <script>
 let medRowCount = {{ (tx_data.meds|length if tx_data else 1) }};
 let diagRowCount = {{ (tx_data.diags|length if tx_data else 1) }};
-// Company options array for autocomplete
+
 const companyOptions = [
-    "BLW",
-    "BUSY BEE",
-    "CMS",
-    "Consulmet",
-    "Enaex",
-    "Eminence",
-    "ER24",
-    "Government",
-    "IFS",
-    "LD",
-    "LISELO",
-    "LMPS",
-    "Mendi",
-    "MGC",
-    "MINOPEX",
-    "NMC",
-    "Other",
-    "PLATO",
-    "Public",
-    "THOLO",
-    "TOMRA",
-    "UL4",
-    "UNITRANS"
+    "BLW","BUSY BEE","CMS","Consulmet","Enaex","Eminence","ER24","Government",
+    "IFS","LD","LISELO","LMPS","Mendi","MGC","MINOPEX","NMC","Other","PLATO",
+    "Public","THOLO","TOMRA","UL4","UNITRANS"
 ];
-// Position options array for autocomplete
 const positionOptions = [
-    "Administration",
-    "Artisan",
-    "Blasting",
-    "Boiler Maker",
-    "Chef",
-    "CI",
-    "Cleaner",
-    "Controller",
-    "Director",
-    "Diesel Depo",
-    "Drilling",
-    "Drivers",
-    "Electricians",
-    "Emergency Coordinator",
-    "Environmnet",
-    "Finance",
-    "Fitters",
-    "Food Service Attendant",
-    "General Worker",
-    "Geologist",
-    "Hse",
-    "Housekeeping",
-    "IT",
-    "Intern",
-    "Kitchen",
-    "Lab Technologist",
-    "Maintenance",
-    "Management",
-    "Manager",
-    "Mechanics",
-    "Medical Doctor",
-    "Metallurgy",
-    "Mining",
-    "Nurse",
-    "Operator",
-    "Other",
-    "PHC",
-    "Pharmacist",
-    "Plant Operator",
-    "Police",
-    "Procurement",
-    "Process",
-    "Production",
-    "Public",
-    "Recovery",
-    "Rope Access",
-    "Security",
-    "Sorting",
-    "Storekeeper",
-    "Supervisor",
-    "Survey",
-    "Technician",
-    "Training",
-    "Tourist",
-    "Treatment",
-    "Tyreman",
-    "UNITRANS",
-    "Visitor",
-    "Water Works",
-    "Welder",
-    "Workshop Cleaners",
-    "X-Ray Technologist"
+    "Administration","Artisan","Blasting","Boiler Maker","Chef","CI","Cleaner",
+    "Controller","Director","Diesel Depo","Drilling","Drivers","Electricians",
+    "Emergency Coordinator","Environmnet","Finance","Fitters","Food Service Attendant",
+    "General Worker","Geologist","Hse","Housekeeping","IT","Intern","Kitchen",
+    "Lab Technologist","Maintenance","Management","Manager","Mechanics","Medical Doctor",
+    "Metallurgy","Mining","Nurse","Operator","Other","PHC","Pharmacist","Plant Operator",
+    "Police","Procurement","Process","Production","Public","Recovery","Rope Access",
+    "Security","Sorting","Storekeeper","Supervisor","Survey","Technician","Training",
+    "Tourist","Treatment","Tyreman","UNITRANS","Visitor","Water Works","Welder",
+    "Workshop Cleaners","X-Ray Technologist"
 ];
-// Medication options array for autocomplete
-const medicationOptions = [
-    "Acetylsalisylic Acid, 100 mg",
-    "Acetylsalisylic Acid, 300 mg",
-    "Activated Charcoal, 050 g",
-    "Actrapid, 100 IU",
-    "Acyclovir Cre 5 Perc, 010 mg",
-    "Acyclovir Tab, 200 mg",
-    "Acyclovir, 800 mg",
-    "Adalat, 030 mg",
-    "Adalat, 060 mg",
-    "Adcodol, 500 mg",
-    "Adcorectic, 050 mg",
-    "Adenosine, 006 mg",
-    "Adrenalin Hcl Inj, 001 mg",
-    "Alcophyllin Syrup, 100 ml",
-    "Alcophyllex Syrup, 100 ml",
-    "Allopurinol, 100 mg",
-    "Aminophyllin Injection, 250 mg",
-    "Aminophyllin, 100 mg",
-    "Amiodarone, 006 mg",
-    "Amitryptyline, 025 mg",
-    "Amlodipine, 010 mg",
-    "Amoxycillin Cap, 250 mg",
-    "Amoxyclav Injection, 1200 mg",
-    "Amoxyclav, 625 mg",
-    "Ampicillin Caps, 250 mg",
-    "Ampiclox Caps, 500 mg",
-    "Ampjicillin Injection, 500 mg",
-    "Anti Haemorrhoidal Suppositories, 100 mg",
-    "Anti Snake Bite Serum, 010 ml",
-    "Antirubbies, 2.5 IU",
-    "Anusol Ointment, 2500 mg",
-    "Arachis Oil, 020 ml",
-    "Atorvastatin, 010 mg",
-    "Atorvastatin, 020 mg",
-    "Asccorbic Acid Tab - Chewable, 250 mg",
-    "Atenolol, 050 mg",
-    "Atenolol, 100 mg",
-    "Atropine Injection, 0.5 mg",
-    "Azithromycin, 500 mg",
-    "Baclofen, 010 mg",
-    "Beclomethasone Inhaler, 200 MID",
-    "Benzathine Pen, 2.4 MU",
-    "Benzoic Salicylic Ointment (Whitfield), 500 g",
-    "Benzyl Benzoate, 100 ml",
-    "Benzyl Pen Injection, 005 MU",
-    "Betamethasone Cream, 500 g",
-    "Bisacodyl Tab, 005 mg",
-    "Calamine Lotion, 100 ml",
-    "Calcium Gluconate Tabs, 300 mg",
-    "Captopril Tab, 050 mg",
-    "Carbamazepine, 200 mg",
-    "Carvedilol, 12.5mg",
-    "Cefotaxime Injection, 001 g",
-    "Ceftriaxone Injection, 1000 mg",
-    "Ceftriaxone, 250 mg",
-    "Celebrex, 200 mg",
-    "Cetrizine, 010 mg",
-    "Chlopromazine, 025 mg",
-    "Chloramphenicol Caps, 250 mg",
-    "Chloramphenicol Eye Drops, 010 ml",
-    "Chloramphenicol Eye Oint, 005 g",
-    "Chlorhexide Mouth Wash, 100 ml",
-    "Chloro Ear Drops, 020 ml",
-    "Chlorpheniramine Tabs, 004 mg",
-    "Cimetidine Tabs, 200 mg",
-    "Cimetidine tabs, 400 mg",
-    "Cimetidine Injection, 200 mg",
-    "Cipro Eye Drops, 010 ml",
-    "Ciprofloxacin, 500 mg",
-    "Clarythromycin, 500 mg",
-    "Cloxacillin Injection, 250 mg",
-    "Clopidogrel, 075 mg",
-    "Clotrimazole Cre Vaginal, 010 mg",
-    "Clotrimazole Pess, 100 mg",
-    "Clotrimazole Topical Cre 1%, 020 g",
-    "Cloxacillin Caps, 250 mg",
-    "Colchicine Tabs, 0.5 mg",
-    "Cotrimoxazole, 480 mg",
-    "Cotrimoxazole, 960 mg",
-    "Cyproheptadine, 004 mg",
-    "Deep Freeze Spray, 050 ml",
-    "Dexamethasone Eye Drops, 002 ml",
-    "Dexamethasone Injection, 004 mg",
-    "Dextrose Injection, 050 %",
-    "Diazepam Injection, 010 mg",
-    "Diazepam Tabs, 005 mg",
-    "Diclofenac Injection, 075 mg",
-    "Diclofenac Tab, 025 mg",
-    "Diclofenac Tab, 050 mg",
-    "Diclofenac Gel, 050 g",
-    "Digoxin, 0.250 mg",
-    "Diphenhydramine Syrup, 100 ml",
-    "Dopamine Injection, 010 mg",
-    "Doxycycline Tabs, 100 mg",
-    "Dynexan Oral Gel, 010 mg",
-    "Emergency Pill, 002 mg",
-    "Enalapril tabs, 005 mg",
-    "Enalapril tabs, 010 mg",
-    "Enalapril tabs, 20 mg",
-    "Ergometrine Injection, 0.5 mg /ml",
-    "Erythromycin tabs, 250 mg",
-    "Fentanyl, 100 mcg",
-    "Ferrous Sulphate Tabs, 200 mg",
-    "Fertomid, 050 mg",
-    "Flagyl Injection, 400 mg",
-    "Flu Stat, 200 mg",
-    "Fluconazole, 200 mg",
-    "FluoxetineCaps, 020 mg",
-    "Fml Neo Opd, 005 ml",
-    "Folic Acid Tabs, 005 mg",
-    "Furosemide Injection, 020 mg",
-    "Furosemide Tabs, 040 mg",
-    "Gabapentine, 100 mg",
-    "Gentamycin Injection, 040 mg",
-    "Glibenclamide Tabs, 005 mg",
-    "Gliclazide, 080 mg",
-    "Glucose Powder, 500 g",
-    "Glycerine Supp, 100 mg",
-    "Griseofulvin Tabs, 500 mg",
-    "Guafenesin Xl 60, 100 ml",
-    "Gv Paint, 020 ml",
-    "Haloperidol Injection, 002 mg",
-    "Haloperidol Tabs, 1.5 mg",
-    "Heparine, 1000 SIU",
-    "Histacon Caps, 200 mg",
-    "Hydalazine Injection, 020 mg",
-    "Hydralazine Hcl Tabs, 010 mg",
-    "Hydralazine Hcl Tabs, 050 mg",
-    "Hydrochlorothiazide Tabs, 025 mg",
-    "Hydrocortisone Cream, 500 g",
-    "Hydrocortisone Injection, 100 mg",
-    "Hyoscine Injection, 020 mg",
-    "Hyoscine Tabs, 010 mg",
-    "Ibuprofen Tab, 200 mg",
-    "Ibuprofen Tab, 400 mg",
-    "Ichthammol Ointment, 500 g",
-    "Imipramine, 010 mg",
-    "Indapamide Tabs, 0.5 mg",
-    "Indomethacin Caps, 025 mg",
-    "Insulin Hm Injection, 100 U 10 Ml",
-    "Isosorbide Trinitrate, 005 mg",
-    "Ketamine Injection, 050 mg (Ml)",
-    "Keteconazole, 200 mg Tabs",
-    "Lactulose, 150 ml",
-    "Lignocaine Injection, 002 %",
-    "Lignocaine Spray, 050 ml",
-    "Liquid Paraffin, 100 ml",
-    "Lisinopril, 020, mg",
-    "Loperamide Tabs, 002 mg",
-    "Loratadine, 010 mg",
-    "Losartan, 050 mg",
-    "Losartan, 100 mg",
-    "Lubrucating Gel, 050 g",
-    "Magasil Suspension, 100 ml",
-    "Magnesium Suphate injection, 010 mg",
-    "Mannitol, 020 %",
-    "Mayogel suspension, 100 ml",
-    "Mayogel suspension, 200 ml",
-    "Mebendazole, 100 mg Tabs",
-    "Medigel Suspension, 100 ml",
-    "Mefenamic Acid, 250 mg",
-    "Mepyramine Cream, 025 g",
-    "Mercurochrome Paint, 020 ml",
-    "Metformin Tabs, 500 mg",
-    "Metformin Tabs, 850 mg",
-    "Methotrexate, 005 mg",
-    "Methylprednisone Injection, 040 mg",
-    "Methylsal Ointment, 500 mg",
-    "Metoclopramide Injection, 010 mg",
-    "Metoclopramide Tabs, 010 mg",
-    "Metronidazole tabs, 400 mg",
-    "Miconazol Oral Gel, 030 g",
-    "Miconazole Cream, 002 %",
-    "Midazolam, 010 mg",
-    "Migril, 002 mg",
-    "Mist Alba Susp, 100 ml",
-    "Mmt, 250 mg",
-    "Morphine Injection, 010 mg",
-    "Multivitamin Tabs, 0.25 mg",
-    "Mybulen, 200 mg",
-    "Naloxone, 0.4 mg",
-    "Nasal Drops- Oxymetazoline, 005 ml",
-    "Neurobion Tabs, 200 mg",
-    "Nifedipine, 005 mg",
-    "Nifedipine, 010 mg",
-    "Nitrofurantoin, 100 mg",
-    "Nitrofurazone Ointment, 500 g",
-    "Nitrolingual Spray, 020 ml",
-    "Methylcellulose Eye Drops, 010 ml",
-    "Norflex Co Tabs, 375 mg",
-    "Nystatin Ointment, 020 g",
-    "Nystatin Oral Susp, 1000 u",
-    "Nystatin Vaginal Pess, 100 mg",
-    "Omeprazole Tabs, 020 mg",
-    "Oral Rehydration Salts, 002 g",
-    "Osteoeze Gold, 200 mg",
-    "Oxytocin Injection, 010 mg",
-    "Pain Relief Gel, 020 g",
-    "PanaCod Tab, 500 mg",
-    "Paracetamol tabs, 500 mg",
-    "Pen Vk Tab, 250 mg",
-    "Pentaprazole Injection, 040 mg",
-    "Perfulgan, 001 g",
-    "Pethedine Injection, 050 mg",
-    "Pethedine Injection, 100 mg",
-    "Phenytoin Injection, 200 mg",
-    "Phernobabitol tabs, 020 mg",
-    "Podophylline Paint, 020 ml",
-    "Potassium Chloride tabs, 600 mg",
-    "Potassium Citrate, 100 ml",
-    "Povidone Ointment, 500 mg",
-    "Pravastatin tabs, 020 mg",
-    "Prednisone Tab, 005 mg",
-    "Probanthine Tabs, 015 mg",
-    "Prochlorperazine Tabs, 005 mg",
-    "Projchlorperazine Injection, 005 mg",
-    "Promethazine Injection, 050 mg",
-    "Promethazine Tabs, 025 mg",
-    "Propranolol Tabs, 010 mg",
-    "Propranolol Tabs, 040 mg",
-    "Pyridoxine, 025 mg",
-    "Ranitidine, 150 mg",
-    "Rocuronium injection, 010 mg",
-    "Salbutamol Inhaler, 200 MID",
-    "Salbutamol, 004 mg Tablets",
-    "Selenium Tab, 100 mg",
-    "Sildenafil, 050 mg",
-    "Simvastatin, 020 mg",
-    "Sinucon Tab, 200 mg",
-    "Sodium Bicarbonate, 050 ml",
-    "Sodium Valproate, 200 mg",
-    "Spersallerg Opd, 010 ml",
-    "Spironolactone tabs, 025 mg",
-    "Suppositories Indocid (Arthrexin), 100 mg",
-    "Suxamethonium injection, 010 mg",
-    "Tetanus Toxoid Vaccine, 010 mg",
-    "Tetracycline Ointment, 003 % 25G",
-    "Tetracycline Opthal Ointment, 020 g",
-    "Throat Lozenges, 250 mg",
-    "Thymol Glycerine, 100 ml",
-    "Tranexamic Acid Injection, 500 mg",
-    "Tramadol Injection, 100 mg",
-    "Tramadol Tabs, 050 mg",
-    "Tranexamic Acid tabs, 500 mg",
-    "Trifen Adult, 100 ml",
-    "Tumsulosin, 0.5 mg",
-    "Urirex K, 050 mg",
-    "Venteze Resp.Sol, 005 mg 20ml",
-    "Vitamin B Co Tablets, 001 mg",
-    "Vitamin B12, 002 mg",
-    "Vitamin E Cream, 500 g",
-    "Vitamin B Co Injection, 001 mg",
-    "Vitamin K Injection (Konakion), 001 mg",
-    "Warfarin Tabs, 005 mg",
-    "Water For Injection, 010 ml",
-    "Zinc Oxide Ointment, 030 mg",
-    "Zinc Tablets, 020 mg",
-    "Zuvamor, 040 mg",
-    "Amoxyl, 500 mg",
-    "Labetolol, 5mg",
-    "Morpine tabs, 10mg"
-];
+
 function addInputListener(input, type) {
-    input.addEventListener('input', function() {
+    input.addEventListener('input', async function() {
         const query = this.value.toLowerCase();
         let datalist, options;
         switch(type) {
@@ -1074,129 +783,107 @@ function addInputListener(input, type) {
                 options = positionOptions;
                 break;
             case 'medication':
+                // FIX (Performance): fetch from API instead of using inline array
                 datalist = document.getElementById('med_suggestions');
-                options = medicationOptions;
+                options = await getMedicationOptions();
                 break;
             case 'diagnosis':
                 datalist = document.getElementById('diag_suggestions');
                 fetch(`/api/diagnoses?query=${encodeURIComponent(query)}`)
-                    .then(response => response.json())
+                    .then(r => r.json())
                     .then(suggestions => {
-                        if (suggestions.error) {
-                            console.error(suggestions.error);
-                            return;
-                        }
+                        if (suggestions.error) return;
                         datalist.innerHTML = '';
-                        suggestions.forEach(sugg => {
-                            const option = document.createElement('option');
-                            option.value = sugg;
-                            datalist.appendChild(option);
+                        suggestions.forEach(s => {
+                            const o = document.createElement('option');
+                            o.value = s;
+                            datalist.appendChild(o);
                         });
                     })
-                    .catch(error => console.error('Error fetching diagnoses:', error));
+                    .catch(e => console.error('Error fetching diagnoses:', e));
                 return;
             default:
                 return;
         }
         datalist.innerHTML = '';
         if (query.length < 1) return;
-        const filtered = options.filter(option => option.toLowerCase().includes(query));
-        filtered.forEach(sugg => {
-            const option = document.createElement('option');
-            option.value = sugg;
-            datalist.appendChild(option);
+        options.filter(o => o.toLowerCase().includes(query)).forEach(s => {
+            const o = document.createElement('option');
+            o.value = s;
+            datalist.appendChild(o);
         });
     });
 }
+
 function addRow() {
-    if (medRowCount >= 12) {
-        alert('Maximum 12 medications allowed.');
-        return;
-    }
+    if (medRowCount >= 12) { alert('Maximum 12 medications allowed.'); return; }
     medRowCount++;
     const container = document.getElementById('medications');
     const newRow = document.createElement('div');
     newRow.className = 'med-row';
     newRow.innerHTML = `
-        <div>
-            <label>Medication:</label>
-            <input name="med_names" list="med_suggestions" class="med-input" required>
-        </div>
-        <div>
-            <label>Quantity:</label>
-            <input name="quantities" type="number" min="1" required>
-        </div>
-        <div>
-            <button type="button" onclick="removeRow(this)">Remove</button>
-        </div>
+        <div><label>Medication:</label><input name="med_names" list="med_suggestions" class="med-input" required></div>
+        <div><label>Quantity:</label><input name="quantities" type="number" min="1" required></div>
+        <div><button type="button" onclick="removeRow(this)">Remove</button></div>
     `;
     container.appendChild(newRow);
-    const newInput = newRow.querySelector('.med-input');
-    addInputListener(newInput, 'medication');
+    addInputListener(newRow.querySelector('.med-input'), 'medication');
 }
+
 function removeRow(btn) {
     btn.closest('.med-row').remove();
     medRowCount--;
 }
+
 function addDiagRow() {
-    if (diagRowCount >= 3) {
-        alert('Maximum 3 diagnoses allowed.');
-        return;
-    }
+    if (diagRowCount >= 3) { alert('Maximum 3 diagnoses allowed.'); return; }
     diagRowCount++;
     const container = document.getElementById('diagnoses');
     const newRow = document.createElement('div');
     newRow.className = 'diag-row';
     newRow.innerHTML = `
-        <div>
-            <label>Diagnosis:</label>
-            <input name="diagnoses" list="diag_suggestions" type="text" class="diag-input">
-        </div>
-        <div>
-            <button type="button" onclick="removeDiagRow(this)">Remove</button>
-        </div>
+        <div><label>Diagnosis:</label><input name="diagnoses" list="diag_suggestions" type="text" class="diag-input"></div>
+        <div><button type="button" onclick="removeDiagRow(this)">Remove</button></div>
     `;
     container.appendChild(newRow);
-    const newInput = newRow.querySelector('.diag-input');
-    addInputListener(newInput, 'diagnosis');
+    addInputListener(newRow.querySelector('.diag-input'), 'diagnosis');
 }
+
 function removeDiagRow(btn) {
     btn.closest('.diag-row').remove();
     diagRowCount--;
 }
+
 function clearForm() {
+    // FIX (UX): also reset the hidden transaction_id so a Clear → Submit
+    // creates a new record instead of updating the previously-edited one.
+    document.getElementById('transaction_id_field').value = '';
+
     document.querySelector('.common-section').querySelectorAll('input, select').forEach(el => el.value = '');
+
     const diagContainer = document.getElementById('diagnoses');
-    while (diagContainer.children.length > 1) {
-        diagContainer.removeChild(diagContainer.lastChild);
-    }
-    const firstDiagRow = diagContainer.firstChild;
-    firstDiagRow.querySelectorAll('input').forEach(el => el.value = '');
+    while (diagContainer.children.length > 1) diagContainer.removeChild(diagContainer.lastChild);
+    diagContainer.firstElementChild.querySelectorAll('input').forEach(el => el.value = '');
     diagRowCount = 1;
+
     const medsContainer = document.getElementById('medications');
-    while (medsContainer.children.length > 1) {
-        medsContainer.removeChild(medsContainer.lastChild);
-    }
-    const firstMedRow = medsContainer.firstChild;
-    firstMedRow.querySelectorAll('input').forEach(el => el.value = '');
+    while (medsContainer.children.length > 1) medsContainer.removeChild(medsContainer.lastChild);
+    medsContainer.firstElementChild.querySelectorAll('input').forEach(el => el.value = '');
     medRowCount = 1;
-    document.getElementById('med_suggestions').innerHTML = '';
-    document.getElementById('diag_suggestions').innerHTML = '';
-    document.getElementById('company_suggestions').innerHTML = '';
-    document.getElementById('position_suggestions').innerHTML = '';
+
+    ['med_suggestions','diag_suggestions','company_suggestions','position_suggestions']
+        .forEach(id => document.getElementById(id).innerHTML = '');
 }
-// Initialize listeners for existing inputs
+
 document.addEventListener('DOMContentLoaded', function() {
     const companyInput = document.getElementById('company');
     if (companyInput) addInputListener(companyInput, 'company');
     const positionInput = document.getElementById('position');
     if (positionInput) addInputListener(positionInput, 'position');
-    const existingMedInputs = document.querySelectorAll('.med-input');
-    existingMedInputs.forEach(input => addInputListener(input, 'medication'));
-    const existingDiagInputs = document.querySelectorAll('.diag-input');
-    existingDiagInputs.forEach(input => addInputListener(input, 'diagnosis'));
+    document.querySelectorAll('.med-input').forEach(i => addInputListener(i, 'medication'));
+    document.querySelectorAll('.diag-input').forEach(i => addInputListener(i, 'diagnosis'));
 });
-// Clear form after successful dispense
+
 {% if message and ('successfully' in message|lower or 'updated' in message|lower) %}
     {% if not tx_data %}
         clearForm();
@@ -1204,7 +891,8 @@ document.addEventListener('DOMContentLoaded', function() {
 {% endif %}
 </script>
 """
-RECEIVE_TEMPLATE = CSS_STYLE + """
+
+RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
 <h1>Receiving</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
@@ -1215,16 +903,12 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
 </p>
 {% endif %}
 
-{# ------------------------------------------------- #}
-{#  EDIT or NEW RECEIVE FORM                         #}
-{# ------------------------------------------------- #}
 <h2>{% if rx_data %}Edit Receive Transaction{% else %}Receive Medication{% endif %}</h2>
 
 <form method="POST"
       action="{% if rx_data %}{{ url_for('edit_receive', receive_id=rx_data.receive_id) }}{% else %}/receive{% endif %}"
       class="receive-form">
 
-    {# hidden id only for edit #}
     {% if rx_data %}
         <input type="hidden" name="receive_id" value="{{ rx_data.receive_id }}">
     {% endif %}
@@ -1235,31 +919,25 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
             <input name="med_name" id="med_name" list="med_suggestions"
                    value="{{ rx_data.med_name if rx_data else '' }}" required>
         </div>
-
         <div>
             <label>Quantity:</label>
             <input name="quantity" type="number" min="1"
                    value="{{ rx_data.quantity if rx_data else '' }}" required>
         </div>
-
         <div>
             <label>Batch:</label>
-            <input name="batch"
-                   value="{{ rx_data.batch if rx_data else '' }}" required>
+            <input name="batch" value="{{ rx_data.batch if rx_data else '' }}" required>
         </div>
-
         <div>
             <label>Price per Unit:</label>
             <input name="price" type="number" step="0.01" min="0"
                    value="{{ rx_data.price if rx_data else '' }}" required>
         </div>
-
         <div>
             <label>Expiry Date (YYYY-MM-DD):</label>
             <input name="expiry_date" type="date"
                    value="{{ rx_data.expiry_date if rx_data else '' }}" required>
         </div>
-
         <div>
             <label>Schedule:</label>
             <select name="schedule" required>
@@ -1272,25 +950,21 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
                 {% endfor %}
             </select>
         </div>
-
         <div>
             <label>Stock Receiver:</label>
             <input name="stock_receiver"
                    value="{{ rx_data.stock_receiver if rx_data else '' }}" required>
         </div>
-
         <div>
             <label>Order Number:</label>
             <input name="order_number"
                    value="{{ rx_data.order_number if rx_data else '' }}" required>
         </div>
-
         <div>
             <label>Supplier:</label>
             <input name="supplier"
                    value="{{ rx_data.supplier if rx_data else '' }}" required>
         </div>
-
         <div>
             <label>Invoice Number:</label>
             <input name="invoice_number"
@@ -1303,10 +977,7 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
     <div class="form-buttons">
         <input type="submit" value="{% if rx_data %}Update Receive{% else %}Receive{% endif %}">
         {% if rx_data %}
-            <a href="{{ url_for('receive',
-                                start_date=start_date,
-                                end_date=end_date,
-                                search=search) }}">
+            <a href="{{ url_for('receive', start_date=start_date, end_date=end_date, search=search) }}">
                 <button type="button">Cancel</button>
             </a>
         {% else %}
@@ -1318,7 +989,6 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
         {% endif %}
     </div>
 
-    {# keep filter values for Cancel / pagination #}
     <input type="hidden" name="start_date" value="{{ start_date or '' }}">
     <input type="hidden" name="end_date"   value="{{ end_date   or '' }}">
     <input type="hidden" name="search"     value="{{ search     or '' }}">
@@ -1326,9 +996,6 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
 
 <hr>
 
-{# ------------------------------------------------- #}
-{#  FILTER FORM                                      #}
-{# ------------------------------------------------- #}
 <h2>Receive Transactions</h2>
 
 <form method="GET" action="{{ url_for('receive') }}" class="filter-form">
@@ -1353,9 +1020,6 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
     </div>
 </form>
 
-{# ------------------------------------------------- #}
-{#  TRANSACTIONS TABLE                               #}
-{# ------------------------------------------------- #}
 <table>
     <thead>
         <tr>
@@ -1389,11 +1053,10 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
                         <button type="button" class="edit-btn">Edit</button>
                     </a>
                 {% endif %}
-
                 {% if session['user']['role'] == 'admin' %}
-                <form class="delete-btn "method="POST" action="{{ url_for('delete_receive') }}"
+                <form class="delete-btn" method="POST" action="{{ url_for('delete_receive') }}"
                         style="display:inline;"
-                        onsubmit="return confirm('Permanently delete this receive entry?\nStock will be reduced.');">
+                        onsubmit="return confirm('Permanently delete this receive entry?\\nStock will be reduced.');">
                     <input type="hidden" name="receive_id" value="{{ t._id }}">
                     <input type="hidden" name="start_date" value="{{ start_date or '' }}">
                     <input type="hidden" name="end_date"   value="{{ end_date   or '' }}">
@@ -1402,7 +1065,7 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
                 </form>
                 {% endif %}
                 {% if session['user']['role'] == 'viewer' %}
-                    <span>—</span>  <!-- optional: shows a dash so the column isn’t empty -->
+                    <span>—</span>
                 {% endif %}
             </td>
         </tr>
@@ -1412,288 +1075,20 @@ RECEIVE_TEMPLATE = CSS_STYLE + """
     </tbody>
 </table>
 
-{# ------------------------------------------------- #}
-{#  AUTOCOMPLETE SCRIPT (once)                       #}
-{# ------------------------------------------------- #}
 <script>
-const medicationOptions = [
-    "Acetylsalisylic Acid, 100 mg",
-    "Acetylsalisylic Acid, 300 mg",
-    "Activated Charcoal, 050 g",
-    "Actrapid, 100 IU",
-    "Acyclovir Cre 5 Perc, 010 mg",
-    "Acyclovir Tab, 200 mg",
-    "Acyclovir, 800 mg",
-    "Adalat, 030 mg",
-    "Adalat, 060 mg",
-    "Adcodol, 500 mg",
-    "Adcorectic, 050 mg",
-    "Adenosine, 006 mg",
-    "Adrenalin Hcl Inj, 001 mg",
-    "Alcophyllin Syrup, 100 ml",
-    "Alcophyllex Syrup, 100 ml",
-    "Allopurinol, 100 mg",
-    "Aminophyllin Injection, 250 mg",
-    "Aminophyllin, 100 mg",
-    "Amiodarone, 006 mg",
-    "Amitryptyline, 025 mg",
-    "Amlodipine, 010 mg",
-    "Amoxycillin Cap, 250 mg",
-    "Amoxyclav Injection, 1200 mg",
-    "Amoxyclav, 625 mg",
-    "Ampicillin Caps, 250 mg",
-    "Ampiclox Caps, 500 mg",
-    "Ampjicillin Injection, 500 mg",
-    "Anti Haemorrhoidal Suppositories, 100 mg",
-    "Anti Snake Bite Serum, 010 ml",
-    "Antirubbies, 2.5 IU",
-    "Anusol Ointment, 2500 mg",
-    "Arachis Oil, 020 ml",
-    "Atorvastatin, 010 mg",
-    "Atorvastatin, 020 mg",
-    "Asccorbic Acid Tab - Chewable, 250 mg",
-    "Atenolol, 050 mg",
-    "Atenolol, 100 mg",
-    "Atropine Injection, 0.5 mg",
-    "Azithromycin, 500 mg",
-    "Baclofen, 010 mg",
-    "Beclomethasone Inhaler, 200 MID",
-    "Benzathine Pen, 2.4 MU",
-    "Benzoic Salicylic Ointment (Whitfield), 500 g",
-    "Benzyl Benzoate, 100 ml",
-    "Benzyl Pen Injection, 005 MU",
-    "Betamethasone Cream, 500 g",
-    "Bisacodyl Tab, 005 mg",
-    "Calamine Lotion, 100 ml",
-    "Calcium Gluconate Tabs, 300 mg",
-    "Captopril Tab, 050 mg",
-    "Carbamazepine, 200 mg",
-    "Carvedilol, 12.5mg",
-    "Cefotaxime Injection, 001 g",
-    "Ceftriaxone Injection, 1000 mg",
-    "Ceftriaxone, 250 mg",
-    "Celebrex, 200 mg",
-    "Cetrizine, 010 mg",
-    "Chlopromazine, 025 mg",
-    "Chloramphenicol Caps, 250 mg",
-    "Chloramphenicol Eye Drops, 010 ml",
-    "Chloramphenicol Eye Oint, 005 g",
-    "Chlorhexide Mouth Wash, 100 ml",
-    "Chloro Ear Drops, 020 ml",
-    "Chlorpheniramine Tabs, 004 mg",
-    "Cimetidine Tabs, 200 mg",
-    "Cimetidine tabs, 400 mg",
-    "Cimetidine Injection, 200 mg",
-    "Cipro Eye Drops, 010 ml",
-    "Ciprofloxacin, 500 mg",
-    "Clarythromycin, 500 mg",
-    "Cloxacillin Injection, 250 mg",
-    "Clopidogrel, 075 mg",
-    "Clotrimazole Cre Vaginal, 010 mg",
-    "Clotrimazole Pess, 100 mg",
-    "Clotrimazole Topical Cre 1%, 020 g",
-    "Cloxacillin Caps, 250 mg",
-    "Colchicine Tabs, 0.5 mg",
-    "Cotrimoxazole, 480 mg",
-    "Cotrimoxazole, 960 mg",
-    "Cyproheptadine, 004 mg",
-    "Deep Freeze Spray, 050 ml",
-    "Dexamethasone Eye Drops, 002 ml",
-    "Dexamethasone Injection, 004 mg",
-    "Dextrose Injection, 050 %",
-    "Diazepam Injection, 010 mg",
-    "Diazepam Tabs, 005 mg",
-    "Diclofenac Injection, 075 mg",
-    "Diclofenac Tab, 025 mg",
-    "Diclofenac Tab, 050 mg",
-    "Diclofenac Gel, 050 g",
-    "Digoxin, 0.250 mg",
-    "Diphenhydramine Syrup, 100 ml",
-    "Dopamine Injection, 010 mg",
-    "Doxycycline Tabs, 100 mg",
-    "Dynexan Oral Gel, 010 mg",
-    "Emergency Pill, 002 mg",
-    "Enalapril tabs, 005 mg",
-    "Enalapril tabs, 010 mg",
-    "Enalapril tabs, 20 mg",
-    "Ergometrine Injection, 0.5 mg /ml",
-    "Erythromycin tabs, 250 mg",
-    "Fentanyl, 100 mcg",
-    "Ferrous Sulphate Tabs, 200 mg",
-    "Fertomid, 050 mg",
-    "Flagyl Injection, 400 mg",
-    "Flu Stat, 200 mg",
-    "Fluconazole, 200 mg",
-    "FluoxetineCaps, 020 mg",
-    "Fml Neo Opd, 005 ml",
-    "Folic Acid Tabs, 005 mg",
-    "Furosemide Injection, 020 mg",
-    "Furosemide Tabs, 040 mg",
-    "Gabapentine, 100 mg",
-    "Gentamycin Injection, 040 mg",
-    "Glibenclamide Tabs, 005 mg",
-    "Gliclazide, 080 mg",
-    "Glucose Powder, 500 g",
-    "Glycerine Supp, 100 mg",
-    "Griseofulvin Tabs, 500 mg",
-    "Guafenesin Xl 60, 100 ml",
-    "Gv Paint, 020 ml",
-    "Haloperidol Injection, 002 mg",
-    "Haloperidol Tabs, 1.5 mg",
-    "Heparine, 1000 SIU",
-    "Histacon Caps, 200 mg",
-    "Hydalazine Injection, 020 mg",
-    "Hydralazine Hcl Tabs, 010 mg",
-    "Hydralazine Hcl Tabs, 050 mg",
-    "Hydrochlorothiazide Tabs, 025 mg",
-    "Hydrocortisone Cream, 500 g",
-    "Hydrocortisone Injection, 100 mg",
-    "Hyoscine Injection, 020 mg",
-    "Hyoscine Tabs, 010 mg",
-    "Ibuprofen Tab, 200 mg",
-    "Ibuprofen Tab, 400 mg",
-    "Ichthammol Ointment, 500 g",
-    "Imipramine, 010 mg",
-    "Indapamide Tabs, 0.5 mg",
-    "Indomethacin Caps, 025 mg",
-    "Insulin Hm Injection, 100 U 10 Ml",
-    "Isosorbide Trinitrate, 005 mg",
-    "Ketamine Injection, 050 mg (Ml)",
-    "Keteconazole, 200 mg Tabs",
-    "Lactulose, 150 ml",
-    "Lignocaine Injection, 002 %",
-    "Lignocaine Spray, 050 ml",
-    "Liquid Paraffin, 100 ml",
-    "Lisinopril, 020, mg",
-    "Loperamide Tabs, 002 mg",
-    "Loratadine, 010 mg",
-    "Losartan, 050 mg",
-    "Losartan, 100 mg",
-    "Lubrucating Gel, 050 g",
-    "Magasil Suspension, 100 ml",
-    "Magnesium Suphate injection, 010 mg",
-    "Mannitol, 020 %",
-    "Mayogel suspension, 100 ml",
-    "Mayogel suspension, 200 ml",
-    "Mebendazole, 100 mg Tabs",
-    "Medigel Suspension, 100 ml",
-    "Mefenamic Acid, 250 mg",
-    "Mepyramine Cream, 025 g",
-    "Mercurochrome Paint, 020 ml",
-    "Metformin Tabs, 500 mg",
-    "Metformin Tabs, 850 mg",
-    "Methotrexate, 005 mg",
-    "Methylprednisone Injection, 040 mg",
-    "Methylsal Ointment, 500 mg",
-    "Metoclopramide Injection, 010 mg",
-    "Metoclopramide Tabs, 010 mg",
-    "Metronidazole tabs, 400 mg",
-    "Miconazol Oral Gel, 030 g",
-    "Miconazole Cream, 002 %",
-    "Midazolam, 010 mg",
-    "Migril, 002 mg",
-    "Mist Alba Susp, 100 ml",
-    "Mmt, 250 mg",
-    "Morphine Injection, 010 mg",
-    "Multivitamin Tabs, 0.25 mg",
-    "Mybulen, 200 mg",
-    "Naloxone, 0.4 mg",
-    "Nasal Drops- Oxymetazoline, 005 ml",
-    "Neurobion Tabs, 200 mg",
-    "Nifedipine, 005 mg",
-    "Nifedipine, 010 mg",
-    "Nitrofurantoin, 100 mg",
-    "Nitrofurazone Ointment, 500 g",
-    "Nitrolingual Spray, 020 ml",
-    "Methylcellulose Eye Drops, 010 ml",
-    "Norflex Co Tabs, 375 mg",
-    "Nystatin Ointment, 020 g",
-    "Nystatin Oral Susp, 1000 u",
-    "Nystatin Vaginal Pess, 100 mg",
-    "Omeprazole Tabs, 020 mg",
-    "Oral Rehydration Salts, 002 g",
-    "Osteoeze Gold, 200 mg",
-    "Oxytocin Injection, 010 mg",
-    "Pain Relief Gel, 020 g",
-    "PanaCod Tab, 500 mg",
-    "Paracetamol tabs, 500 mg",
-    "Pen Vk Tab, 250 mg",
-    "Pentaprazole Injection, 040 mg",
-    "Perfulgan, 001 g",
-    "Pethedine Injection, 050 mg",
-    "Pethedine Injection, 100 mg",
-    "Phenytoin Injection, 200 mg",
-    "Phernobabitol tabs, 020 mg",
-    "Podophylline Paint, 020 ml",
-    "Potassium Chloride tabs, 600 mg",
-    "Potassium Citrate, 100 ml",
-    "Povidone Ointment, 500 mg",
-    "Pravastatin tabs, 020 mg",
-    "Prednisone Tab, 005 mg",
-    "Probanthine Tabs, 015 mg",
-    "Prochlorperazine Tabs, 005 mg",
-    "Projchlorperazine Injection, 005 mg",
-    "Promethazine Injection, 050 mg",
-    "Promethazine Tabs, 025 mg",
-    "Propranolol Tabs, 010 mg",
-    "Propranolol Tabs, 040 mg",
-    "Pyridoxine, 025 mg",
-    "Ranitidine, 150 mg",
-    "Rocuronium injection, 010 mg",
-    "Salbutamol Inhaler, 200 MID",
-    "Salbutamol, 004 mg Tablets",
-    "Selenium Tab, 100 mg",
-    "Sildenafil, 050 mg",
-    "Simvastatin, 020 mg",
-    "Sinucon Tab, 200 mg",
-    "Sodium Bicarbonate, 050 ml",
-    "Sodium Valproate, 200 mg",
-    "Spersallerg Opd, 010 ml",
-    "Spironolactone tabs, 025 mg",
-    "Suppositories Indocid (Arthrexin), 100 mg",
-    "Suxamethonium injection, 010 mg",
-    "Tetanus Toxoid Vaccine, 010 mg",
-    "Tetracycline Ointment, 003 % 25G",
-    "Tetracycline Opthal Ointment, 020 g",
-    "Throat Lozenges, 250 mg",
-    "Thymol Glycerine, 100 ml",
-    "Tranexamic Acid Injection, 500 mg",
-    "Tramadol Injection, 100 mg",
-    "Tramadol Tabs, 050 mg",
-    "Tranexamic Acid tabs, 500 mg",
-    "Trifen Adult, 100 ml",
-    "Tumsulosin, 0.5 mg",
-    "Urirex K, 050 mg",
-    "Venteze Resp.Sol, 005 mg 20ml",
-    "Vitamin B Co Tablets, 001 mg",
-    "Vitamin B12, 002 mg",
-    "Vitamin E Cream, 500 g",
-    "Vitamin B Co Injection, 001 mg",
-    "Vitamin K Injection (Konakion), 001 mg",
-    "Warfarin Tabs, 005 mg",
-    "Water For Injection, 010 ml",
-    "Zinc Oxide Ointment, 030 mg",
-    "Zinc Tablets, 020 mg",
-    "Zuvamor, 040 mg",
-    "Amoxyl, 500 mg",
-    "Labetolol, 5mg",
-    "Morpine tabs, 10mg"
-];
-
-document.addEventListener('DOMContentLoaded', () => {
-    const input   = document.getElementById('med_name');
+document.addEventListener('DOMContentLoaded', async () => {
+    const input    = document.getElementById('med_name');
     const datalist = document.getElementById('med_suggestions');
-
     if (!input) return;
 
-    // Populate datalist once (faster than re-creating on every keystroke)
-    medicationOptions.forEach(m => {
+    // FIX (Performance): options come from /api/medications, not an inline array
+    const options = await getMedicationOptions();
+    options.forEach(m => {
         const opt = document.createElement('option');
         opt.value = m;
         datalist.appendChild(opt);
     });
 
-    // Optional: filter visually while typing (nice UX)
     input.addEventListener('input', () => {
         const q = input.value.toLowerCase();
         Array.from(datalist.options).forEach(opt => {
@@ -1703,7 +1098,8 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 </script>
 """
-ADD_MED_TEMPLATE = CSS_STYLE + """
+
+ADD_MED_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
 <h1>Add New Medication</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
@@ -1761,292 +1157,30 @@ ADD_MED_TEMPLATE = CSS_STYLE + """
     <datalist id="med_suggestions"></datalist>
     <div class="form-buttons">
         <input type="submit" value="Add Medication">
-        <button type="button" onclick="document.querySelector('form').reset(); document.getElementById('med_suggestions').innerHTML = ''; ">Clear Form</button>
+        <button type="button" onclick="document.querySelector('form').reset(); document.getElementById('med_suggestions').innerHTML='';">Clear Form</button>
     </div>
 </form>
 <script>
-// Medication options array for autocomplete
-const medicationOptions = [
-    "Acetylsalisylic Acid, 100 mg",
-    "Acetylsalisylic Acid, 300 mg",
-    "Activated Charcoal, 050 g",
-    "Actrapid, 100 IU",
-    "Acyclovir Cre 5 Perc, 010 mg",
-    "Acyclovir Tab, 200 mg",
-    "Acyclovir, 800 mg",
-    "Adalat, 030 mg",
-    "Adalat, 060 mg",
-    "Adcodol, 500 mg",
-    "Adcorectic, 050 mg",
-    "Adenosine, 006 mg",
-    "Adrenalin Hcl Inj, 001 mg",
-    "Alcophyllin Syrup, 100 ml",
-    "Alcophyllex Syrup, 100 ml",
-    "Allopurinol, 100 mg",
-    "Aminophyllin Injection, 250 mg",
-    "Aminophyllin, 100 mg",
-    "Amiodarone, 006 mg",
-    "Amitryptyline, 025 mg",
-    "Amlodipine, 010 mg",
-    "Amoxycillin Cap, 250 mg",
-    "Amoxyclav Injection, 1200 mg",
-    "Amoxyclav, 625 mg",
-    "Ampicillin Caps, 250 mg",
-    "Ampiclox Caps, 500 mg",
-    "Ampjicillin Injection, 500 mg",
-    "Anti Haemorrhoidal Suppositories, 100 mg",
-    "Anti Snake Bite Serum, 010 ml",
-    "Antirubbies, 2.5 IU",
-    "Anusol Ointment, 2500 mg",
-    "Arachis Oil, 020 ml",
-    "Atorvastatin, 010 mg",
-    "Atorvastatin, 020 mg",
-    "Asccorbic Acid Tab - Chewable, 250 mg",
-    "Atenolol, 050 mg",
-    "Atenolol, 100 mg",
-    "Atropine Injection, 0.5 mg",
-    "Azithromycin, 500 mg",
-    "Baclofen, 010 mg",
-    "Beclomethasone Inhaler, 200 MID",
-    "Benzathine Pen, 2.4 MU",
-    "Benzoic Salicylic Ointment (Whitfield), 500 g",
-    "Benzyl Benzoate, 100 ml",
-    "Benzyl Pen Injection, 005 MU",
-    "Betamethasone Cream, 500 g",
-    "Bisacodyl Tab, 005 mg",
-    "Calamine Lotion, 100 ml",
-    "Calcium Gluconate Tabs, 300 mg",
-    "Captopril Tab, 050 mg",
-    "Carbamazepine, 200 mg",
-    "Carvedilol, 12.5mg",
-    "Cefotaxime Injection, 001 g",
-    "Ceftriaxone Injection, 1000 mg",
-    "Ceftriaxone, 250 mg",
-    "Celebrex, 200 mg",
-    "Cetrizine, 010 mg",
-    "Chlopromazine, 025 mg",
-    "Chloramphenicol Caps, 250 mg",
-    "Chloramphenicol Eye Drops, 010 ml",
-    "Chloramphenicol Eye Oint, 005 g",
-    "Chlorhexide Mouth Wash, 100 ml",
-    "Chloro Ear Drops, 020 ml",
-    "Chlorpheniramine Tabs, 004 mg",
-    "Cimetidine Tabs, 200 mg",
-    "Cimetidine tabs, 400 mg",
-    "Cimetidine Injection, 200 mg",
-    "Cipro Eye Drops, 010 ml",
-    "Ciprofloxacin, 500 mg",
-    "Clarythromycin, 500 mg",
-    "Cloxacillin Injection, 250 mg",
-    "Clopidogrel, 075 mg",
-    "Clotrimazole Cre Vaginal, 010 mg",
-    "Clotrimazole Pess, 100 mg",
-    "Clotrimazole Topical Cre 1%, 020 g",
-    "Cloxacillin Caps, 250 mg",
-    "Colchicine Tabs, 0.5 mg",
-    "Cotrimoxazole, 480 mg",
-    "Cotrimoxazole, 960 mg",
-    "Cyproheptadine, 004 mg",
-    "Deep Freeze Spray, 050 ml",
-    "Dexamethasone Eye Drops, 002 ml",
-    "Dexamethasone Injection, 004 mg",
-    "Dextrose Injection, 050 %",
-    "Diazepam Injection, 010 mg",
-    "Diazepam Tabs, 005 mg",
-    "Diclofenac Injection, 075 mg",
-    "Diclofenac Tab, 025 mg",
-    "Diclofenac Tab, 050 mg",
-    "Diclofenac Gel, 050 g",
-    "Digoxin, 0.250 mg",
-    "Diphenhydramine Syrup, 100 ml",
-    "Dopamine Injection, 010 mg",
-    "Doxycycline Tabs, 100 mg",
-    "Dynexan Oral Gel, 010 mg",
-    "Emergency Pill, 002 mg",
-    "Enalapril tabs, 005 mg",
-    "Enalapril tabs, 010 mg",
-    "Enalapril tabs, 20 mg",
-    "Ergometrine Injection, 0.5 mg /ml",
-    "Erythromycin tabs, 250 mg",
-    "Fentanyl, 100 mcg",
-    "Ferrous Sulphate Tabs, 200 mg",
-    "Fertomid, 050 mg",
-    "Flagyl Injection, 400 mg",
-    "Flu Stat, 200 mg",
-    "Fluconazole, 200 mg",
-    "FluoxetineCaps, 020 mg",
-    "Fml Neo Opd, 005 ml",
-    "Folic Acid Tabs, 005 mg",
-    "Furosemide Injection, 020 mg",
-    "Furosemide Tabs, 040 mg",
-    "Gabapentine, 100 mg",
-    "Gentamycin Injection, 040 mg",
-    "Glibenclamide Tabs, 005 mg",
-    "Gliclazide, 080 mg",
-    "Glucose Powder, 500 g",
-    "Glycerine Supp, 100 mg",
-    "Griseofulvin Tabs, 500 mg",
-    "Guafenesin Xl 60, 100 ml",
-    "Gv Paint, 020 ml",
-    "Haloperidol Injection, 002 mg",
-    "Haloperidol Tabs, 1.5 mg",
-    "Heparine, 1000 SIU",
-    "Histacon Caps, 200 mg",
-    "Hydalazine Injection, 020 mg",
-    "Hydralazine Hcl Tabs, 010 mg",
-    "Hydralazine Hcl Tabs, 050 mg",
-    "Hydrochlorothiazide Tabs, 025 mg",
-    "Hydrocortisone Cream, 500 g",
-    "Hydrocortisone Injection, 100 mg",
-    "Hyoscine Injection, 020 mg",
-    "Hyoscine Tabs, 010 mg",
-    "Ibuprofen Tab, 200 mg",
-    "Ibuprofen Tab, 400 mg",
-    "Ichthammol Ointment, 500 g",
-    "Imipramine, 010 mg",
-    "Indapamide Tabs, 0.5 mg",
-    "Indomethacin Caps, 025 mg",
-    "Insulin Hm Injection, 100 U 10 Ml",
-    "Isosorbide Trinitrate, 005 mg",
-    "Ketamine Injection, 050 mg (Ml)",
-    "Keteconazole, 200 mg Tabs",
-    "Lactulose, 150 ml",
-    "Lignocaine Injection, 002 %",
-    "Lignocaine Spray, 050 ml",
-    "Liquid Paraffin, 100 ml",
-    "Lisinopril, 020, mg",
-    "Loperamide Tabs, 002 mg",
-    "Loratadine, 010 mg",
-    "Losartan, 050 mg",
-    "Losartan, 100 mg",
-    "Lubrucating Gel, 050 g",
-    "Magasil Suspension, 100 ml",
-    "Magnesium Suphate injection, 010 mg",
-    "Mannitol, 020 %",
-    "Mayogel suspension, 100 ml",
-    "Mayogel suspension, 200 ml",
-    "Mebendazole, 100 mg Tabs",
-    "Medigel Suspension, 100 ml",
-    "Mefenamic Acid, 250 mg",
-    "Mepyramine Cream, 025 g",
-    "Mercurochrome Paint, 020 ml",
-    "Metformin Tabs, 500 mg",
-    "Metformin Tabs, 850 mg",
-    "Methotrexate, 005 mg",
-    "Methylprednisone Injection, 040 mg",
-    "Methylsal Ointment, 500 mg",
-    "Metoclopramide Injection, 010 mg",
-    "Metoclopramide Tabs, 010 mg",
-    "Metronidazole tabs, 400 mg",
-    "Miconazol Oral Gel, 030 g",
-    "Miconazole Cream, 002 %",
-    "Midazolam, 010 mg",
-    "Migril, 002 mg",
-    "Mist Alba Susp, 100 ml",
-    "Mmt, 250 mg",
-    "Morphine Injection, 010 mg",
-    "Multivitamin Tabs, 0.25 mg",
-    "Mybulen, 200 mg",
-    "Naloxone, 0.4 mg",
-    "Nasal Drops- Oxymetazoline, 005 ml",
-    "Neurobion Tabs, 200 mg",
-    "Nifedipine, 005 mg",
-    "Nifedipine, 010 mg",
-    "Nitrofurantoin, 100 mg",
-    "Nitrofurazone Ointment, 500 g",
-    "Nitrolingual Spray, 020 ml",
-    "Methylcellulose Eye Drops, 010 ml",
-    "Norflex Co Tabs, 375 mg",
-    "Nystatin Ointment, 020 g",
-    "Nystatin Oral Susp, 1000 u",
-    "Nystatin Vaginal Pess, 100 mg",
-    "Omeprazole Tabs, 020 mg",
-    "Oral Rehydration Salts, 002 g",
-    "Osteoeze Gold, 200 mg",
-    "Oxytocin Injection, 010 mg",
-    "Pain Relief Gel, 020 g",
-    "PanaCod Tab, 500 mg",
-    "Paracetamol tabs, 500 mg",
-    "Pen Vk Tab, 250 mg",
-    "Pentaprazole Injection, 040 mg",
-    "Perfulgan, 001 g",
-    "Pethedine Injection, 050 mg",
-    "Pethedine Injection, 100 mg",
-    "Phenytoin Injection, 200 mg",
-    "Phernobabitol tabs, 020 mg",
-    "Podophylline Paint, 020 ml",
-    "Potassium Chloride tabs, 600 mg",
-    "Potassium Citrate, 100 ml",
-    "Povidone Ointment, 500 mg",
-    "Pravastatin tabs, 020 mg",
-    "Prednisone Tab, 005 mg",
-    "Probanthine Tabs, 015 mg",
-    "Prochlorperazine Tabs, 005 mg",
-    "Projchlorperazine Injection, 005 mg",
-    "Promethazine Injection, 050 mg",
-    "Promethazine Tabs, 025 mg",
-    "Propranolol Tabs, 010 mg",
-    "Propranolol Tabs, 040 mg",
-    "Pyridoxine, 025 mg",
-    "Ranitidine, 150 mg",
-    "Rocuronium injection, 010 mg",
-    "Salbutamol Inhaler, 200 MID",
-    "Salbutamol, 004 mg Tablets",
-    "Selenium Tab, 100 mg",
-    "Sildenafil, 050 mg",
-    "Simvastatin, 020 mg",
-    "Sinucon Tab, 200 mg",
-    "Sodium Bicarbonate, 050 ml",
-    "Sodium Valproate, 200 mg",
-    "Spersallerg Opd, 010 ml",
-    "Spironolactone tabs, 025 mg",
-    "Suppositories Indocid (Arthrexin), 100 mg",
-    "Suxamethonium injection, 010 mg",
-    "Tetanus Toxoid Vaccine, 010 mg",
-    "Tetracycline Ointment, 003 % 25G",
-    "Tetracycline Opthal Ointment, 020 g",
-    "Throat Lozenges, 250 mg",
-    "Thymol Glycerine, 100 ml",
-    "Tranexamic Acid Injection, 500 mg",
-    "Tramadol Injection, 100 mg",
-    "Tramadol Tabs, 050 mg",
-    "Tranexamic Acid tabs, 500 mg",
-    "Trifen Adult, 100 ml",
-    "Tumsulosin, 0.5 mg",
-    "Urirex K, 050 mg",
-    "Venteze Resp.Sol, 005 mg 20ml",
-    "Vitamin B Co Tablets, 001 mg",
-    "Vitamin B12, 002 mg",
-    "Vitamin E Cream, 500 g",
-    "Vitamin B Co Injection, 001 mg",
-    "Vitamin K Injection (Konakion), 001 mg",
-    "Warfarin Tabs, 005 mg",
-    "Water For Injection, 010 ml",
-    "Zinc Oxide Ointment, 030 mg",
-    "Zinc Tablets, 020 mg",
-    "Zuvamor, 040 mg",
-    "Amoxyl, 500 mg",
-    "Labetolol, 5mg",
-    "Morpine tabs, 10mg"
-];
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
     const medInput = document.getElementById('med_name');
+    const datalist = document.getElementById('med_suggestions');
+    // FIX (Performance): fetch from /api/medications
+    const options = await getMedicationOptions();
+    options.forEach(m => {
+        const o = document.createElement('option');
+        o.value = m;
+        datalist.appendChild(o);
+    });
     medInput.addEventListener('input', function() {
-        const query = this.value.toLowerCase();
-        const datalist = document.getElementById('med_suggestions');
-        datalist.innerHTML = '';
-        if (query.length < 1) return;
-        const filtered = medicationOptions.filter(option => option.toLowerCase().includes(query));
-        filtered.forEach(med => {
-            const option = document.createElement('option');
-            option.value = med;
-            datalist.appendChild(option);
+        const q = this.value.toLowerCase();
+        Array.from(datalist.options).forEach(o => {
+            o.style.display = o.value.toLowerCase().includes(q) ? '' : 'none';
         });
     });
 });
 </script>
 """
-# Edit Medication Template
+
 EDIT_MED_TEMPLATE = CSS_STYLE + """
 <h1>Edit Medication</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
@@ -2092,7 +1226,7 @@ EDIT_MED_TEMPLATE = CSS_STYLE + """
     </div>
 </form>
 """
-# Reports Template (updated with nav and user column in tables, and edit button in stock table)
+
 REPORTS_TEMPLATE = CSS_STYLE + """
 <h1>Inventory Reports</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
@@ -2135,12 +1269,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 <table>
     <thead>
         <tr>
-            <th>Medication</th>
-            <th>Balance</th>
-            <th>Expiry Date</th>
-            <th>Batch</th>
-            <th>Price</th>
-            <th>Actions</th>
+            <th>Medication</th><th>Balance</th><th>Expiry Date</th><th>Batch</th><th>Price</th><th>Actions</th>
         </tr>
     </thead>
     <tbody>
@@ -2156,7 +1285,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
                 <a href="{{ url_for('edit_medication', med_name=med.name|urlencode) }}"><button class="edit-btn">Edit</button></a>
                 <form class="delete-btn" method="POST" action="{{ url_for('delete_medication') }}" style="display: inline;">
                     <input type="hidden" name="med_name" value="{{ med.name }}">
-                    <button type="submit" class="delete-btn" onclick="return confirm('Are you sure you want to delete {{ med.name }}? This will remove it from the inventory.');">Delete</button>
+                    <button type="submit" class="delete-btn" onclick="return confirm('Are you sure you want to delete {{ med.name }}?');">Delete</button>
                 </form>
                 {% else %}
                 <span>-</span>
@@ -2172,45 +1301,22 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 <form method="POST" action="{{ url_for('reports') }}" class="filter-form">
     <input type="hidden" name="report_type" value="inventory">
     <div class="filter-section">
-        <div>
-            <label>Start Date:</label>
-            <input name="start_date" type="date" value="{{ start_date or '' }}">
-        </div>
-        <div>
-            <label>End Date:</label>
-            <input name="end_date" type="date" value="{{ end_date or '' }}">
-        </div>
-        <div>
-            <label>Search Medication:</label>
-            <input name="search" type="text" value="{{ search or '' }}" placeholder="Filter by medication name">
-        </div>
-        <div class="button-div">
-            <input type="submit" value="Refine">
-            <a href="{{ url_for('reports') }}">Back to Menu</a>
-        </div>
+        <div><label>Start Date:</label><input name="start_date" type="date" value="{{ start_date or '' }}"></div>
+        <div><label>End Date:</label><input name="end_date" type="date" value="{{ end_date or '' }}"></div>
+        <div><label>Search Medication:</label><input name="search" type="text" value="{{ search or '' }}" placeholder="Filter by medication name"></div>
+        <div class="button-div"><input type="submit" value="Refine"><a href="{{ url_for('reports') }}">Back to Menu</a></div>
     </div>
 </form>
 <h2>Inventory Report for {{ start_date }} to {{ end_date }}</h2>
 <table>
     <thead>
-        <tr>
-            <th>Medication</th>
-            <th>Beginning Balance</th>
-            <th>Dispensed</th>
-            <th>Received</th>
-            <th>Current Balance</th>
-            <th>Amount to Order</th>
-        </tr>
+        <tr><th>Medication</th><th>Beginning Balance</th><th>Dispensed</th><th>Received</th><th>Current Balance</th><th>Amount to Order</th></tr>
     </thead>
     <tbody>
     {% for row in report_data %}
         <tr>
-            <td>{{ row.med_name }}</td>
-            <td>{{ row.beginning_balance }}</td>
-            <td>{{ row.dispensed }}</td>
-            <td>{{ row.received }}</td>
-            <td>{{ row.current_balance }}</td>
-            <td>{{ row.amount_to_order }}</td>
+            <td>{{ row.med_name }}</td><td>{{ row.beginning_balance }}</td><td>{{ row.dispensed }}</td>
+            <td>{{ row.received }}</td><td>{{ row.current_balance }}</td><td>{{ row.amount_to_order }}</td>
         </tr>
     {% else %}
         <tr><td colspan="6">No data for this period.</td></tr>
@@ -2221,54 +1327,24 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 <form method="POST" action="{{ url_for('reports') }}" class="filter-form">
     <input type="hidden" name="report_type" value="receive_list">
     <div class="filter-section">
-        <div>
-            <label>Start Date:</label>
-            <input name="start_date" type="date" value="{{ start_date or '' }}">
-        </div>
-        <div>
-            <label>End Date:</label>
-            <input name="end_date" type="date" value="{{ end_date or '' }}">
-        </div>
-        <div>
-            <label>Search:</label>
-            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search medication, batch, supplier...">
-        </div>
-        <div class="button-div">
-            <input type="submit" value="Refine">
-            <a href="{{ url_for('reports') }}">Back to Menu</a>
-        </div>
+        <div><label>Start Date:</label><input name="start_date" type="date" value="{{ start_date or '' }}"></div>
+        <div><label>End Date:</label><input name="end_date" type="date" value="{{ end_date or '' }}"></div>
+        <div><label>Search:</label><input name="search" type="text" value="{{ search or '' }}" placeholder="Search medication, batch, supplier..."></div>
+        <div class="button-div"><input type="submit" value="Refine"><a href="{{ url_for('reports') }}">Back to Menu</a></div>
     </div>
 </form>
 <h2>Receive List for {{ start_date }} to {{ end_date }}</h2>
 <table>
     <thead>
-        <tr>
-            <th>Medication</th>
-            <th>Quantity</th>
-            <th>Batch</th>
-            <th>Price</th>
-            <th>Expiry Date</th>
-            <th>Stock Receiver</th>
-            <th>Order Number</th>
-            <th>Supplier</th>
-            <th>Invoice Number</th>
-            <th>User</th>
-            <th>Timestamp</th>
-        </tr>
+        <tr><th>Medication</th><th>Quantity</th><th>Batch</th><th>Price</th><th>Expiry Date</th><th>Stock Receiver</th><th>Order Number</th><th>Supplier</th><th>Invoice Number</th><th>User</th><th>Timestamp</th></tr>
     </thead>
     <tbody>
     {% for t in receive_list %}
         <tr>
-            <td>{{ t.med_name }}</td>
-            <td>{{ t.quantity }}</td>
-            <td>{{ t.batch }}</td>
-            <td>${{ "%.2f"|format(t.price) }}</td>
-            <td>{{ t.expiry_date }}</td>
-            <td>{{ t.stock_receiver }}</td>
-            <td>{{ t.order_number }}</td>
-            <td>{{ t.supplier }}</td>
-            <td>{{ t.invoice_number }}</td>
-            <td>{{ t.user }}</td>
+            <td>{{ t.med_name }}</td><td>{{ t.quantity }}</td><td>{{ t.batch }}</td>
+            <td>${{ "%.2f"|format(t.price) }}</td><td>{{ t.expiry_date }}</td>
+            <td>{{ t.stock_receiver }}</td><td>{{ t.order_number }}</td><td>{{ t.supplier }}</td>
+            <td>{{ t.invoice_number }}</td><td>{{ t.user }}</td>
             <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
         </tr>
     {% else %}
@@ -2280,48 +1356,25 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 <form method="POST" action="{{ url_for('reports') }}" class="filter-form">
     <input type="hidden" name="report_type" value="controlled_drug_register">
     <div class="filter-section">
-        <div>
-            <label>Start Date:</label>
-            <input name="start_date" type="date" value="{{ start_date or '' }}">
-        </div>
-        <div>
-            <label>End Date:</label>
-            <input name="end_date" type="date" value="{{ end_date or '' }}">
-        </div>
-        <div>
-            <label>Search:</label>
-            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search transactions by patient, medication, supplier...">
-        </div>
-        <div class="button-div">
-            <input type="submit" value="Refine">
-            <a href="{{ url_for('reports') }}">Back to Menu</a>
-        </div>
+        <div><label>Start Date:</label><input name="start_date" type="date" value="{{ start_date or '' }}"></div>
+        <div><label>End Date:</label><input name="end_date" type="date" value="{{ end_date or '' }}"></div>
+        <div><label>Search:</label><input name="search" type="text" value="{{ search or '' }}" placeholder="Search transactions..."></div>
+        <div class="button-div"><input type="submit" value="Refine"><a href="{{ url_for('reports') }}">Back to Menu</a></div>
     </div>
 </form>
 <h2>Controlled Drug Register for {{ start_date }} to {{ end_date }}</h2>
 {% for reg in controlled_register %}
-    <h3>{{ reg.med_name }} - Beginning Balance: {{ reg.beginning_balance }} | Ending Balance: {{ reg.ending_balance }} | Received: {{ reg.received }} | Dispensed: {{ reg.dispensed }}</h3>
+    <h3>{{ reg.med_name }} — Beginning: {{ reg.beginning_balance }} | Ending: {{ reg.ending_balance }} | Received: {{ reg.received }} | Dispensed: {{ reg.dispensed }}</h3>
     {% if reg.transactions %}
     <table>
         <thead>
-            <tr>
-                <th>Date</th>
-                <th>Type</th>
-                <th>Quantity</th>
-                <th>Balance After</th>
-                <th>Prescriber</th>
-                <th>Issuer/Receiver</th>
-                <th>User</th>
-                <th>Reference/Patient</th>
-            </tr>
+            <tr><th>Date</th><th>Type</th><th>Quantity</th><th>Balance After</th><th>Prescriber</th><th>Issuer/Receiver</th><th>User</th><th>Reference/Patient</th></tr>
         </thead>
         <tbody>
         {% for tx in reg.transactions %}
             <tr>
                 <td>{{ tx.get('date', tx.timestamp.strftime('%Y-%m-%d')) }}</td>
-                <td>{{ tx.type }}</td>
-                <td>{{ tx.quantity }}</td>
-                <td>{{ tx.balance_after }}</td>
+                <td>{{ tx.type }}</td><td>{{ tx.quantity }}</td><td>{{ tx.balance_after }}</td>
                 <td>{{ tx.get('prescriber', '') }}</td>
                 <td>{{ tx.get('dispenser', tx.get('stock_receiver', '')) }}</td>
                 <td>{{ tx.get('user', '') }}</td>
@@ -2338,61 +1391,47 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 <p>No controlled drugs found or no data for this period.</p>
 {% endif %}
 """
-# Login Template
+
 LOGIN_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Login</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 <div class="login-form">
     <h2>Login</h2>
-    {% if error %}
-        <p class="message error">{{ error }}</p>
-    {% endif %}
+    {% if error %}<p class="message error">{{ error }}</p>{% endif %}
     <form method="POST">
-        <label>Username:</label>
-        <input type="text" name="username" required><br>
-        <label>Password:</label>
-        <input type="password" name="password" required><br>
+        <label>Username:</label><input type="text" name="username" required><br>
+        <label>Password:</label><input type="password" name="password" required><br>
         <input type="submit" value="Login">
     </form>
     <p><a href="/register">Don't have an account? Register here.</a></p>
 </div>
 """
-# Register Password Template
+
 REGISTER_PASSWORD_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Registration</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 <div class="register-form">
     <h2>Admin Access Required</h2>
-    {% if error %}
-        <p class="message error">{{ error }}</p>
-    {% endif %}
+    {% if error %}<p class="message error">{{ error }}</p>{% endif %}
     <form method="POST">
-        <label>Admin Password:</label>
-        <input type="password" name="admin_pass" required><br>
+        <label>Admin Password:</label><input type="password" name="admin_pass" required><br>
         <input type="submit" value="Access Registration">
     </form>
     <p><a href="/login">Back to Login</a></p>
 </div>
 """
-# Register Template
+
 REGISTER_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Registration</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 <div class="register-form">
     <h2>Register</h2>
-    {% if error %}
-        <p class="message error">{{ error }}</p>
-    {% endif %}
-    {% if message %}
-        <p class="message success">{{ message }}</p>
-    {% endif %}
+    {% if error %}<p class="message error">{{ error }}</p>{% endif %}
+    {% if message %}<p class="message success">{{ message }}</p>{% endif %}
     <form method="POST">
-        <label>Username:</label>
-        <input type="text" name="username" required><br>
-        <label>Password:</label>
-        <input type="password" name="password" required><br>
-        <label>Full Name:</label>
-        <input type="text" name="name" required><br>
+        <label>Username:</label><input type="text" name="username" required><br>
+        <label>Password:</label><input type="password" name="password" required><br>
+        <label>Full Name:</label><input type="text" name="name" required><br>
         <label>Role:</label>
         <select name="role" required>
             <option value="employee">Employee</option>
@@ -2404,11 +1443,17 @@ REGISTER_TEMPLATE = CSS_STYLE + """
     <p><a href="/login">Already have an account? Login here.</a></p>
 </div>
 """
+
+# ============================================================
 # Routes
+# ============================================================
+
 @app.route('/', methods=['GET'])
 @login_required
 def home():
     return redirect('/reports')
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -2417,7 +1462,6 @@ def login():
         if not username or not password:
             session['error'] = 'Username and password are required.'
             return redirect('/login')
-      
         try:
             client = get_mongo_client()
             db = client['pharmacy_db']
@@ -2434,12 +1478,12 @@ def login():
                 session['error'] = 'Invalid username or password.'
         except ServerSelectionTimeoutError:
             session['error'] = 'Database connection failed. Please try again later.'
-        finally:
-            client.close()
         return redirect('/login')
-  
+
     error = session.pop('error', None)
     return render_template_string(LOGIN_TEMPLATE, error=error)
+
+
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
@@ -2464,7 +1508,6 @@ def register():
             if not username or not password or not name or not role:
                 session['error'] = 'All fields are required.'
                 return redirect('/register')
-          
             try:
                 client = get_mongo_client()
                 db = client['pharmacy_db']
@@ -2472,7 +1515,6 @@ def register():
                 if users.find_one({'username': username}):
                     session['error'] = 'Username already exists.'
                     return redirect('/register')
-              
                 password_hash = generate_password_hash(password)
                 users.insert_one({
                     'username': username,
@@ -2485,21 +1527,23 @@ def register():
                 return redirect('/login')
             except ServerSelectionTimeoutError:
                 session['error'] = 'Database connection failed. Please try again later.'
-            finally:
-                client.close()
             return redirect('/register')
-  
+
     error = session.pop('error', None)
     message = session.pop('message', None)
     if 'admin_access' not in session:
         return render_template_string(REGISTER_PASSWORD_TEMPLATE, error=error)
     else:
         return render_template_string(REGISTER_TEMPLATE, error=error, message=message)
+
+
 @app.route('/logout', methods=['GET'])
 def logout():
     session.pop('user', None)
     session.pop('admin_access', None)
     return redirect('/login')
+
+
 @app.route('/dispense', methods=['GET', 'POST'])
 @login_required
 def dispense():
@@ -2513,7 +1557,7 @@ def dispense():
         end_date = request.values.get('end_date')
         search = request.values.get('search')
         current_user = session['user']['name']
-        # Build query for tx_list
+
         base_query = {'type': 'dispense'}
         date_query = {}
         if start_date:
@@ -2524,88 +1568,98 @@ def dispense():
         if date_query:
             base_query['timestamp'] = date_query
         if search:
-            or_query = [
-                {'patient': {'$regex': search, '$options': 'i'}},
-                {'med_name': {'$regex': search, '$options': 'i'}},
-                {'company': {'$regex': search, '$options': 'i'}},
-                {'position': {'$regex': search, '$options': 'i'}},
+            base_query['$or'] = [
+                {'patient':   {'$regex': search, '$options': 'i'}},
+                {'med_name':  {'$regex': search, '$options': 'i'}},
+                {'company':   {'$regex': search, '$options': 'i'}},
+                {'position':  {'$regex': search, '$options': 'i'}},
                 {'age_group': {'$regex': search, '$options': 'i'}},
-                {'gender': {'$regex': search, '$options': 'i'}},
-                {'prescriber': {'$regex': search, '$options': 'i'}},
+                {'gender':    {'$regex': search, '$options': 'i'}},
+                {'prescriber':{'$regex': search, '$options': 'i'}},
                 {'dispenser': {'$regex': search, '$options': 'i'}},
-                {'date': {'$regex': search, '$options': 'i'}},
-                {'diagnoses.0': {'$regex': search, '$options': 'i'}},
+                {'date':      {'$regex': search, '$options': 'i'}},
+                {'diagnoses.0':{'$regex': search, '$options': 'i'}},
             ]
-            base_query['$or'] = or_query
-        tx_list = list(transactions.find(base_query).sort('timestamp', -1))
+
+        raw_tx = list(transactions.find(base_query).sort('timestamp', -1))
+
+        # FIX (UX/Correctness): group rows by transaction_id in Python so the
+        # template can use reliable rowspan values regardless of sort order or
+        # shared timestamps.  Use an OrderedDict to preserve display order.
+        from collections import OrderedDict
+        grouped = OrderedDict()
+        for t in raw_tx:
+            tid = t['transaction_id']
+            grouped.setdefault(tid, []).append(t)
+        tx_groups = list(grouped.items())   # [(tx_id, [rows]), ...]
+        # Keep flat list for backwards-compat with anything that needs it
+        tx_list = raw_tx
+
         tx_data = None
         edit_id = request.args.get('edit')
         if edit_id:
             tx = transactions.find_one({'transaction_id': edit_id, 'type': 'dispense'})
             if tx:
-                common = {k: v for k, v in tx.items() if k not in ['_id', 'med_name', 'quantity', 'type', 'timestamp', 'transaction_id', 'user']}
-                meds_cursor = transactions.find({'transaction_id': edit_id, 'type': 'dispense'}, {'med_name': 1, 'quantity': 1})
-                meds = [(m['med_name'], m['quantity']) for m in meds_cursor]
-                common['meds'] = meds
+                common = {k: v for k, v in tx.items()
+                          if k not in ['_id', 'med_name', 'quantity', 'type', 'timestamp', 'transaction_id', 'user']}
+                meds_cursor = transactions.find(
+                    {'transaction_id': edit_id, 'type': 'dispense'},
+                    {'med_name': 1, 'quantity': 1}
+                )
+                common['meds'] = [(m['med_name'], m['quantity']) for m in meds_cursor]
                 common['diags'] = common.get('diagnoses', [])
                 common['transaction_id'] = edit_id
                 tx_data = common
+
         if request.method == 'POST':
             transaction_id = request.form.get('transaction_id')
             if transaction_id:
-                # Edit mode
                 old_meds = list(transactions.find({'transaction_id': transaction_id}))
                 for old_tx in old_meds:
-                    med_name = old_tx['med_name']
-                    old_qty = old_tx['quantity']
-                    medications.update_one({'name': med_name}, {'$inc': {'balance': old_qty}})
+                    medications.update_one({'name': old_tx['med_name']}, {'$inc': {'balance': old_tx['quantity']}})
                 transactions.delete_many({'transaction_id': transaction_id})
                 tx_id = transaction_id
                 message_prefix = 'Updated'
             else:
-                # New
                 tx_id = str(uuid4())
                 message_prefix = 'Dispensed'
+
             try:
-                patient = request.form['patient']
-                company = request.form['company']
-                position = request.form['position']
-                age_group = request.form['age_group']
-                prescriber = request.form['prescriber']
-                dispenser = request.form['dispenser']
-                date_str = request.form['date']
-                gender = request.form['gender']
+                patient       = request.form['patient']
+                company       = request.form['company']
+                position      = request.form['position']
+                age_group     = request.form['age_group']
+                prescriber    = request.form['prescriber']
+                dispenser     = request.form['dispenser']
+                date_str      = request.form['date']
+                gender        = request.form['gender']
                 sick_leave_days = int(request.form['sick_leave_days'])
-                diagnoses = [d.strip() for d in request.form.getlist('diagnoses') if d.strip()]
+                diagnoses     = [d.strip() for d in request.form.getlist('diagnoses') if d.strip()]
+
                 if not diagnoses:
                     message = 'Please provide at least one diagnosis.'
                 else:
-                    med_names = [name.strip() for name in request.form.getlist('med_names') if name.strip()]
-                    quantities_str = request.form.getlist('quantities')
+                    med_names = [n.strip() for n in request.form.getlist('med_names') if n.strip()]
                     quantities = []
-                    for q_str in quantities_str:
+                    for q_str in request.form.getlist('quantities'):
                         try:
                             qty = int(q_str)
                             if qty > 0:
                                 quantities.append(qty)
                         except ValueError:
                             pass
+
                     if len(med_names) != len(quantities) or not med_names:
                         message = 'Please provide at least one valid medication and quantity.'
                     else:
-                        success = True
                         error_msgs = []
                         dispensed_meds = []
                         for med_name, quantity in zip(med_names, quantities):
                             med = medications.find_one({'name': med_name})
                             if not med:
                                 error_msgs.append(f'Medication "{med_name}" not found.')
-                                success = False
-                                continue
                             elif med.get('balance', 0) < quantity:
                                 error_msgs.append(f'Insufficient stock for "{med_name}".')
-                                success = False
-                                continue
                             else:
                                 medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
                                 transactions.insert_one({
@@ -2627,17 +1681,37 @@ def dispense():
                                     'timestamp': datetime.utcnow()
                                 })
                                 dispensed_meds.append(med_name)
-                        if success and dispensed_meds:
+
+                        if dispensed_meds and not error_msgs:
                             message = f'{message_prefix} successfully: {", ".join(dispensed_meds)}'
+                        elif dispensed_meds:
+                            message = f'Partial success: {", ".join(dispensed_meds)}. Errors: {"; ".join(error_msgs)}'
                         else:
-                            message = '; '.join(error_msgs) if error_msgs else f'No medications {message_prefix.lower()}.'
+                            message = '; '.join(error_msgs) or f'No medications {message_prefix.lower()}.'
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-        return render_template_string(DISPENSE_TEMPLATE, tx_list=tx_list, nav_links=get_nav_links(), message=message, start_date=start_date, end_date=end_date, search=search, tx_data=tx_data)
+
+        return render_template_string(
+            DISPENSE_TEMPLATE,
+            tx_list=tx_list,
+            tx_groups=tx_groups,
+            nav_links=get_nav_links(),
+            message=message,
+            start_date=start_date,
+            end_date=end_date,
+            search=search,
+            tx_data=tx_data
+        )
     except ServerSelectionTimeoutError:
-        return render_template_string(DISPENSE_TEMPLATE, tx_list=[], nav_links=get_nav_links(), message="Database connection failed. Please try again later.", start_date='', end_date='', search='', tx_data=None), 500
-    finally:
-        client.close()
+        return render_template_string(
+            DISPENSE_TEMPLATE,
+            tx_list=[], tx_groups=[],
+            nav_links=get_nav_links(),
+            message="Database connection failed. Please try again later.",
+            start_date='', end_date='', search='', tx_data=None
+        ), 500
+
+
 @app.route('/receive', methods=['GET', 'POST'])
 @login_required
 def receive():
@@ -2651,7 +1725,7 @@ def receive():
         end_date = request.values.get('end_date')
         search = request.values.get('search')
         current_user = session['user']['name']
-        # Build query for tx_list
+
         base_query = {'type': 'receive'}
         date_query = {}
         if start_date:
@@ -2662,83 +1736,74 @@ def receive():
         if date_query:
             base_query['timestamp'] = date_query
         if search:
-            or_query = [
-                {'med_name': {'$regex': search, '$options': 'i'}},
-                {'batch': {'$regex': search, '$options': 'i'}},
-                {'supplier': {'$regex': search, '$options': 'i'}},
+            base_query['$or'] = [
+                {'med_name':       {'$regex': search, '$options': 'i'}},
+                {'batch':          {'$regex': search, '$options': 'i'}},
+                {'supplier':       {'$regex': search, '$options': 'i'}},
                 {'stock_receiver': {'$regex': search, '$options': 'i'}},
-                {'order_number': {'$regex': search, '$options': 'i'}},
+                {'order_number':   {'$regex': search, '$options': 'i'}},
                 {'invoice_number': {'$regex': search, '$options': 'i'}},
-                {'expiry_date': {'$regex': search, '$options': 'i'}},
+                {'expiry_date':    {'$regex': search, '$options': 'i'}},
             ]
-            base_query['$or'] = or_query
+
         tx_list = list(transactions.find(base_query).sort('timestamp', -1))
+
+        # FIX (Bug): the original GET-based edit path used {'_id': edit_id} (a raw
+        # string) which never matched a MongoDB ObjectId and always returned None.
+        # The edit-receive route handles this properly, so the receive route now
+        # simply never tries to load rx_data inline — editing always goes via
+        # /edit-receive/<id>.
         rx_data = None
-        edit_id = request.args.get('edit')
-        if edit_id and edit_id != 'new':
-            rx = transactions.find_one({'_id': edit_id, 'type': 'receive'})
-            if rx:
-                rx_data = rx
-                rx_data['receive_id'] = str(rx['_id'])
-        if request.method == 'POST' and not rx_data:
+
+        if request.method == 'POST':
             try:
-                med_name = request.form['med_name']
-                quantity = int(request.form['quantity'])
-                batch = request.form['batch']
-                price = float(request.form['price'])
-                expiry_date = request.form['expiry_date']
-                schedule = request.form['schedule']
+                med_name       = request.form['med_name']
+                quantity       = int(request.form['quantity'])
+                batch          = request.form['batch']
+                price          = float(request.form['price'])
+                expiry_date    = request.form['expiry_date']
+                schedule       = request.form['schedule']
                 stock_receiver = request.form['stock_receiver']
-                order_number = request.form['order_number']
-                supplier = request.form['supplier']
+                order_number   = request.form['order_number']
+                supplier       = request.form['supplier']
                 invoice_number = request.form['invoice_number']
+
                 medications.update_one(
                     {'name': med_name},
                     {'$inc': {'balance': quantity},
                      '$set': {
-                         'batch': batch,
-                         'price': price,
-                         'expiry_date': expiry_date,
-                         'schedule': schedule,
-                         'stock_receiver': stock_receiver,
-                         'order_number': order_number,
-                         'supplier': supplier,
+                         'batch': batch, 'price': price, 'expiry_date': expiry_date,
+                         'schedule': schedule, 'stock_receiver': stock_receiver,
+                         'order_number': order_number, 'supplier': supplier,
                          'invoice_number': invoice_number
                      }},
                     upsert=True
                 )
                 transactions.insert_one({
                     'type': 'receive',
-                    'med_name': med_name,
-                    'quantity': quantity,
-                    'batch': batch,
-                    'price': price,
-                    'expiry_date': expiry_date,
-                    'schedule': schedule,
-                    'stock_receiver': stock_receiver,
-                    'order_number': order_number,
-                    'supplier': supplier,
-                    'invoice_number': invoice_number,
-                    'user': current_user,
-                    'timestamp': datetime.utcnow()
+                    'med_name': med_name, 'quantity': quantity, 'batch': batch,
+                    'price': price, 'expiry_date': expiry_date, 'schedule': schedule,
+                    'stock_receiver': stock_receiver, 'order_number': order_number,
+                    'supplier': supplier, 'invoice_number': invoice_number,
+                    'user': current_user, 'timestamp': datetime.utcnow()
                 })
                 message = 'Received successfully!'
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
+
         return render_template_string(
             RECEIVE_TEMPLATE,
-            tx_list=tx_list,
-            nav_links=get_nav_links(),
-            message=message,
-            start_date=start_date,
-            end_date=end_date,
-            search=search,
-            rx_data=rx_data
+            tx_list=tx_list, nav_links=get_nav_links(),
+            message=message, start_date=start_date, end_date=end_date,
+            search=search, rx_data=rx_data
         )
     except ServerSelectionTimeoutError:
-        return render_template_string(RECEIVE_TEMPLATE, tx_list=[], nav_links=get_nav_links(), message="Database connection failed.", start_date='', end_date='', search=''), 500
-    finally:
-        client.close()
+        return render_template_string(
+            RECEIVE_TEMPLATE, tx_list=[], nav_links=get_nav_links(),
+            message="Database connection failed.", start_date='', end_date='', search='', rx_data=None
+        ), 500
+
+
 @app.route('/add-medication', methods=['GET', 'POST'])
 @login_required
 def add_medication():
@@ -2752,58 +1817,52 @@ def add_medication():
         transactions = db['transactions']
         message = None
         current_user = session['user']['name']
+
         if request.method == 'POST':
             try:
-                med_name = request.form['med_name']
-                initial_balance = int(request.form['initial_balance'])
-                batch = request.form['batch']
-                price = float(request.form['price'])
-                expiry_date = request.form['expiry_date']
-                schedule = request.form['schedule']
+                med_name       = request.form['med_name']
+                initial_balance= int(request.form['initial_balance'])
+                batch          = request.form['batch']
+                price          = float(request.form['price'])
+                expiry_date    = request.form['expiry_date']
+                schedule       = request.form['schedule']
                 stock_receiver = request.form['stock_receiver']
-                order_number = request.form['order_number']
-                supplier = request.form['supplier']
+                order_number   = request.form['order_number']
+                supplier       = request.form['supplier']
                 invoice_number = request.form['invoice_number']
+
                 if medications.find_one({'name': med_name}):
                     message = f'Medication "{med_name}" already exists. Use Receiving to add stock.'
                     return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
+
                 medications.insert_one({
-                    'name': med_name,
-                    'balance': initial_balance,
-                    'batch': batch,
-                    'price': price,
-                    'expiry_date': expiry_date,
-                    'schedule': schedule,
-                    'stock_receiver': stock_receiver,
-                    'order_number': order_number,
-                    'supplier': supplier,
-                    'invoice_number': invoice_number
+                    'name': med_name, 'balance': initial_balance, 'batch': batch,
+                    'price': price, 'expiry_date': expiry_date, 'schedule': schedule,
+                    'stock_receiver': stock_receiver, 'order_number': order_number,
+                    'supplier': supplier, 'invoice_number': invoice_number
                 })
                 transactions.insert_one({
-                    'type': 'receive',
-                    'med_name': med_name,
-                    'quantity': initial_balance,
-                    'batch': batch,
-                    'price': price,
-                    'expiry_date': expiry_date,
-                    'schedule': schedule,
-                    'stock_receiver': stock_receiver,
-                    'order_number': order_number,
-                    'supplier': supplier,
+                    'type': 'receive', 'med_name': med_name, 'quantity': initial_balance,
+                    'batch': batch, 'price': price, 'expiry_date': expiry_date,
+                    'schedule': schedule, 'stock_receiver': stock_receiver,
+                    'order_number': order_number, 'supplier': supplier,
                     'invoice_number': invoice_number,
-                    'user': current_user,
-                    'timestamp': datetime.utcnow()
+                    'user': current_user, 'timestamp': datetime.utcnow()
                 })
                 message = 'Medication added successfully!'
                 return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
                 return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
+
         return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
     except ServerSelectionTimeoutError:
-        return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message="Database connection failed. Please try again later."), 500
-    finally:
-        client.close()
+        return render_template_string(
+            ADD_MED_TEMPLATE, nav_links=get_nav_links(),
+            message="Database connection failed. Please try again later."
+        ), 500
+
+
 @app.route('/edit-medication/<med_name>', methods=['GET', 'POST'])
 @login_required
 def edit_medication(med_name):
@@ -2815,45 +1874,43 @@ def edit_medication(med_name):
         db = client['pharmacy_db']
         medications = db['medications']
         message = None
-        med_data = None
-        # URL decode med_name if necessary
+
         med_name = requests.utils.unquote(med_name)
         med = medications.find_one({'name': med_name})
         if not med:
             message = f'Medication "{med_name}" not found.'
-            return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=None, med_name=med_name)
+            return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                                          message=message, med_data=None, med_name=med_name)
+
         med_data = med
         if request.method == 'POST':
             try:
-                balance = int(request.form['balance'])
-                batch = request.form['batch']
-                price = float(request.form['price'])
+                balance     = int(request.form['balance'])
+                batch       = request.form['batch']
+                price       = float(request.form['price'])
                 expiry_date = request.form['expiry_date']
-                schedule = request.form['schedule']
-                # Update the medication
+                schedule    = request.form['schedule']
                 medications.update_one(
                     {'name': med_name},
-                    {'$set': {
-                        'balance': balance,
-                        'batch': batch,
-                        'price': price,
-                        'expiry_date': expiry_date,
-                        'schedule': schedule
-                    }}
+                    {'$set': {'balance': balance, 'batch': batch, 'price': price,
+                              'expiry_date': expiry_date, 'schedule': schedule}}
                 )
                 message = 'Medication updated successfully!'
-                # Refresh med_data after update
                 med_data = medications.find_one({'name': med_name})
-                return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=med_data, med_name=med_name)
+                return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                                              message=message, med_data=med_data, med_name=med_name)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-                return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=med_data, med_name=med_name)
-        return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=med_data, med_name=med_name)
+                return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                                              message=message, med_data=med_data, med_name=med_name)
+
+        return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                                      message=message, med_data=med_data, med_name=med_name)
     except ServerSelectionTimeoutError:
-        message = "Database connection failed. Please try again later."
-        return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(), message=message, med_data=None, med_name=med_name), 500
-    finally:
-        client.close()
+        return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                                      message="Database connection failed.", med_data=None, med_name=med_name), 500
+
+
 @app.route('/delete-medication', methods=['POST'])
 @login_required
 def delete_medication():
@@ -2879,9 +1936,9 @@ def delete_medication():
             session['message'] = f'Failed to delete "{med_name}".'
     except Exception as e:
         session['message'] = f'Error deleting medication: {str(e)}'
-    finally:
-        client.close()
     return redirect('/reports')
+
+
 @app.route('/reports', methods=['GET', 'POST'])
 @login_required
 def reports():
@@ -2891,6 +1948,7 @@ def reports():
         db = client['pharmacy_db']
         medications = db['medications']
         transactions = db['transactions']
+
         report_data = []
         receive_list = []
         stock_data = []
@@ -2904,373 +1962,268 @@ def reports():
         report_title = None
         start_dt = None
         end_dt = None
+
         def matches_search(tx, search_str):
             if not search_str:
                 return True
-            search_lower = search_str.lower()
-            check_fields = ['patient', 'med_name', 'company', 'position', 'prescriber', 'dispenser', 'stock_receiver', 'order_number', 'supplier', 'invoice_number', 'batch', 'user']
-            for field in check_fields:
-                val = tx.get(field, '')
-                val_str = str(val).lower()
-                if search_lower in val_str:
+            sl = search_str.lower()
+            for field in ['patient', 'med_name', 'company', 'position', 'prescriber',
+                          'dispenser', 'stock_receiver', 'order_number', 'supplier',
+                          'invoice_number', 'batch', 'user']:
+                if sl in str(tx.get(field, '')).lower():
                     return True
-            # Handle diagnoses
             diagnoses = tx.get('diagnoses', [])
             if isinstance(diagnoses, list):
-                diag_str = ' '.join(str(d).lower() for d in diagnoses)
-                if search_lower in diag_str:
+                if sl in ' '.join(str(d).lower() for d in diagnoses):
                     return True
             return False
+
         stock_report_types = ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list']
+
         if request.method == 'POST':
             report_type = request.form.get('report_type')
-            start_date = request.form.get('start_date')
-            end_date = request.form.get('end_date')
-            search = request.form.get('search')
+            start_date  = request.form.get('start_date')
+            end_date    = request.form.get('end_date')
+            search      = request.form.get('search')
+
             if report_type:
                 try:
-                    # Parse dates if provided
                     if start_date:
                         start_dt = datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
                     if end_date:
-                        end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc) + timedelta(days=1) - timedelta(seconds=1)
-                    # now process the report
+                        end_dt = (datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                                  + timedelta(days=1) - timedelta(seconds=1))
+
                     if report_type in stock_report_types:
                         if not end_date:
                             raise ValueError('End date is required for this report type.')
-                        report_date = datetime.strptime(end_date, '%Y-%m-%d').date()
-                        threshold_date = report_date + timedelta(days=30)
-                        now_dt = datetime.now(timezone.utc)
-                        med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
-                        all_meds = list(medications.find(med_filter, {'_id': 0}).sort('name', 1))
-                        stock_data = []
+                        report_date     = datetime.strptime(end_date, '%Y-%m-%d').date()
+                        threshold_date  = report_date + timedelta(days=30)
+                        now_dt          = datetime.now(timezone.utc)
+                        med_filter      = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
+                        all_meds        = list(medications.find(med_filter, {'_id': 0}).sort('name', 1))
+                        stock_data      = []
                         for med in all_meds:
                             med_name = med['name']
                             current_balance = med.get('balance', 0)
                             try:
-                                # Period transactions after the report date (from end_dt+ to now)
                                 period_pipeline = [
-                                    {'$match': {
-                                        'med_name': med_name,
-                                        'timestamp': {'$gt': end_dt, '$lte': now_dt}
-                                    }},
-                                    {'$group': {
-                                        '_id': None,
-                                        'dispensed': {
-                                            '$sum': {
-                                                '$cond': [
-                                                    {'$eq': ['$type', 'dispense']},
-                                                    '$quantity',
-                                                    0
-                                                ]
-                                            }
-                                        },
-                                        'received': {
-                                            '$sum': {
-                                                '$cond': [
-                                                    {'$eq': ['$type', 'receive']},
-                                                    '$quantity',
-                                                    0
-                                                ]
-                                            }
-                                        }
-                                    }}
+                                    {'$match': {'med_name': med_name, 'timestamp': {'$gt': end_dt, '$lte': now_dt}}},
+                                    {'$group': {'_id': None,
+                                                'dispensed': {'$sum': {'$cond': [{'$eq': ['$type','dispense']}, '$quantity', 0]}},
+                                                'received':  {'$sum': {'$cond': [{'$eq': ['$type','receive']},  '$quantity', 0]}}}}
                                 ]
-                                period_result = list(transactions.aggregate(period_pipeline))
-                                dispensed_after = period_result[0].get('dispensed', 0) if period_result else 0
-                                received_after = period_result[0].get('received', 0) if period_result else 0
-                                balance_at_date = current_balance - received_after + dispensed_after
-                                balance_at_date = max(0, balance_at_date)
-                            except Exception as query_err:
-                                app.logger.error(f"Query failed for med {med_name}: {query_err}")
-                                # Fallback to current balance
+                                pr = list(transactions.aggregate(period_pipeline))
+                                dispensed_after = pr[0].get('dispensed', 0) if pr else 0
+                                received_after  = pr[0].get('received',  0) if pr else 0
+                                balance_at_date = max(0, current_balance - received_after + dispensed_after)
+                            except Exception as qe:
+                                app.logger.error(f"Query failed for med {med_name}: {qe}")
                                 balance_at_date = current_balance
+
                             expiry_str = med.get('expiry_date')
                             expiry_dt = None
                             if expiry_str:
                                 try:
-                                    if 'T' in expiry_str:
-                                        # Full ISO datetime: Extract date part only
-                                        date_part = expiry_str.split('T')[0]
-                                        expiry_dt = datetime.strptime(date_part, '%Y-%m-%d').date()
-                                    else:
-                                        # Date-only string
-                                        expiry_dt = datetime.strptime(expiry_str, '%Y-%m-%d').date()
+                                    date_part = expiry_str.split('T')[0]
+                                    expiry_dt = datetime.strptime(date_part, '%Y-%m-%d').date()
                                 except ValueError as e:
-                                    app.logger.warning(f"Invalid expiry_date '{expiry_str}' for med '{med.get('name', 'unknown')}': {e} - Treating as no expiry.")
-                                    expiry_dt = None
-                            # Handle missing or empty batch: set to 'N/A'
-                            batch_val = med.get('batch')
-                            if not batch_val: # Covers None, empty string, or falsy
+                                    app.logger.warning(f"Invalid expiry_date '{expiry_str}' for '{med_name}': {e}")
+
+                            if not med.get('batch'):
                                 med['batch'] = 'N/A'
+
                             if balance_at_date == 0:
                                 status = 'out-of-stock'
+                            elif expiry_dt is None:
+                                status = 'normal'
+                            elif expiry_dt < report_date:
+                                status = 'expired'
+                            elif expiry_dt <= threshold_date:
+                                status = 'close-to-expire'
                             else:
-                                if expiry_dt is None:
-                                    status = 'normal' # Include even without expiry
-                                elif expiry_dt < report_date:
-                                    status = 'expired'
-                                elif expiry_dt <= threshold_date:
-                                    status = 'close-to-expire'
-                                else:
-                                    status = 'normal'
+                                status = 'normal'
+
                             med_copy = med.copy()
                             med_copy['balance'] = balance_at_date
-                            med_copy['status'] = status
+                            med_copy['status']  = status
                             stock_data.append(med_copy)
-                        date_str = end_date # Use the input string for title
+
                         if report_type == 'stock_on_hand':
-                            report_title = f'Stock on Hand as of {date_str}'
+                            report_title = f'Stock on Hand as of {end_date}'
                         elif report_type == 'expired_list':
-                            stock_data = [m for m in stock_data if m['status'] == 'expired']
-                            report_title = f'Expired Drugs List as of {date_str}'
+                            stock_data   = [m for m in stock_data if m['status'] == 'expired']
+                            report_title = f'Expired Drugs List as of {end_date}'
                         elif report_type == 'near_expired_list':
-                            stock_data = [m for m in stock_data if m['status'] == 'close-to-expire']
-                            report_title = f'Near Expired Drug List as of {date_str}'
+                            stock_data   = [m for m in stock_data if m['status'] == 'close-to-expire']
+                            report_title = f'Near Expired Drug List as of {end_date}'
                         elif report_type == 'out_of_stock_list':
-                            stock_data = [m for m in stock_data if m['status'] == 'out-of-stock']
-                            report_title = f'Out of Stock List as of {date_str}'
+                            stock_data   = [m for m in stock_data if m['status'] == 'out-of-stock']
+                            report_title = f'Out of Stock List as of {end_date}'
+
                     elif report_type == 'inventory':
                         if not start_date or not end_date:
                             raise ValueError('Start and end dates are required for this report type.')
-                        med_filter = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
-                        meds = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1).limit(300)) # Temp limit for testing
-                        start_date_obj = start_dt.date()
-                        end_date_obj = end_dt.date()
-                        days_in_period = max(1, (end_date_obj - start_date_obj).days + 1)
+                        med_filter   = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
+                        meds         = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1).limit(300))
+                        days_in_period = max(1, (end_dt.date() - start_dt.date()).days + 1)
                         for med in meds:
                             med_name = med['name']
                             try:
-                                # Period transactions (simple $cond per type)
-                                period_pipeline = [
-                                    {'$match': {
-                                        'med_name': med_name,
-                                        'timestamp': {'$gte': start_dt, '$lte': end_dt}
-                                    }},
-                                    {'$group': {
-                                        '_id': None,
-                                        'dispensed': {
-                                            '$sum': {
-                                                '$cond': [
-                                                    {'$eq': ['$type', 'dispense']},
-                                                    '$quantity',
-                                                    0
-                                                ]
-                                            }
-                                        },
-                                        'received': {
-                                            '$sum': {
-                                                '$cond': [
-                                                    {'$eq': ['$type', 'receive']},
-                                                    '$quantity',
-                                                    0
-                                                ]
-                                            }
-                                        }
-                                    }}
+                                pp = [
+                                    {'$match': {'med_name': med_name, 'timestamp': {'$gte': start_dt, '$lte': end_dt}}},
+                                    {'$group': {'_id': None,
+                                                'dispensed': {'$sum': {'$cond': [{'$eq': ['$type','dispense']}, '$quantity', 0]}},
+                                                'received':  {'$sum': {'$cond': [{'$eq': ['$type','receive']},  '$quantity', 0]}}}}
                                 ]
-                                period_result = list(transactions.aggregate(period_pipeline))
-                                dispensed = period_result[0].get('dispensed', 0) if period_result else 0
-                                received = period_result[0].get('received', 0) if period_result else 0
-                                current_balance = med.get('balance', 0)
-                                beginning_balance = current_balance - received + dispensed
-                                beginning_balance = max(0, beginning_balance)
-                                average_daily = dispensed / days_in_period
-                                average_monthly = average_daily * 30
-                                lead_time_stock = average_daily * 60
-                                amount_to_order = max(0, average_monthly - current_balance + lead_time_stock)
+                                pr = list(transactions.aggregate(pp))
+                                dispensed = pr[0].get('dispensed', 0) if pr else 0
+                                received  = pr[0].get('received',  0) if pr else 0
+                                current_balance   = med.get('balance', 0)
+                                beginning_balance = max(0, current_balance - received + dispensed)
+                                avg_daily         = dispensed / days_in_period
+                                avg_monthly       = avg_daily * 30
+                                lead_time_stock   = avg_daily * 60
+                                amount_to_order   = max(0, avg_monthly - current_balance + lead_time_stock)
                                 report_data.append({
                                     'med_name': med_name,
                                     'beginning_balance': beginning_balance,
-                                    'dispensed': dispensed,
-                                    'received': received,
+                                    'dispensed': dispensed, 'received': received,
                                     'current_balance': current_balance,
-                                    'amount_to_order': int(amount_to_order) if amount_to_order.is_integer() else round(amount_to_order, 2)
+                                    'amount_to_order': int(amount_to_order) if isinstance(amount_to_order, float) and amount_to_order.is_integer() else round(amount_to_order, 2)
                                 })
-                            except Exception as query_err:
-                                app.logger.error(f"Query failed for med {med_name}: {query_err}")
-                                # Fallback to 0s to avoid crashing the whole report
-                                current_balance = med.get('balance', 0)
-                                report_data.append({
-                                    'med_name': med_name,
-                                    'beginning_balance': current_balance,
-                                    'dispensed': 0,
-                                    'received': 0,
-                                    'current_balance': current_balance,
-                                    'amount_to_order': 0
-                                })
+                            except Exception as qe:
+                                app.logger.error(f"Query failed for med {med_name}: {qe}")
+                                cb = med.get('balance', 0)
+                                report_data.append({'med_name': med_name, 'beginning_balance': cb,
+                                                    'dispensed': 0, 'received': 0,
+                                                    'current_balance': cb, 'amount_to_order': 0})
+
                     elif report_type == 'receive_list':
                         base_query = {'type': 'receive'}
                         if start_date and end_date:
                             base_query['timestamp'] = {'$gte': start_dt, '$lte': end_dt}
                         if search:
-                            or_query = [
-                                {'med_name': {'$regex': search, '$options': 'i'}},
-                                {'batch': {'$regex': search, '$options': 'i'}},
-                                {'supplier': {'$regex': search, '$options': 'i'}},
+                            base_query['$or'] = [
+                                {'med_name':       {'$regex': search, '$options': 'i'}},
+                                {'batch':          {'$regex': search, '$options': 'i'}},
+                                {'supplier':       {'$regex': search, '$options': 'i'}},
                                 {'stock_receiver': {'$regex': search, '$options': 'i'}},
-                                {'order_number': {'$regex': search, '$options': 'i'}},
+                                {'order_number':   {'$regex': search, '$options': 'i'}},
                                 {'invoice_number': {'$regex': search, '$options': 'i'}},
-                                {'expiry_date': {'$regex': search, '$options': 'i'}},
+                                {'expiry_date':    {'$regex': search, '$options': 'i'}},
                             ]
-                            base_query['$or'] = or_query
-                        # Add limit
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
+
                     elif report_type == 'controlled_drug_register':
                         if not start_date or not end_date:
                             raise ValueError('Start and end dates are required for this report type.')
-                        controlled_meds_cursor = medications.find({'schedule': 'controlled'}, {'_id': 0, 'name': 1})
-                        controlled_meds = [m['name'] for m in controlled_meds_cursor]
+                        controlled_meds = [m['name'] for m in medications.find({'schedule': 'controlled'}, {'_id': 0, 'name': 1})]
                         if controlled_meds:
-                            # Fetch all relevant transactions in period with limit
-                            period_query = {
+                            all_tx = list(transactions.find({
                                 'med_name': {'$in': controlled_meds},
                                 'type': {'$in': ['receive', 'dispense']},
                                 'timestamp': {'$gte': start_dt, '$lte': end_dt}
-                            }
-                            all_tx = list(transactions.find(period_query).sort('timestamp', 1).limit(10000))
+                            }).sort('timestamp', 1).limit(10000))
+
                             tx_by_med = defaultdict(list)
                             for tx in all_tx:
                                 tx_by_med[tx['med_name']].append(tx)
+
                             for med_name in sorted(controlled_meds):
                                 med = medications.find_one({'name': med_name})
                                 if not med:
                                     continue
-                                current_balance = med.get('balance', 0)
                                 try:
-                                    med_txs = tx_by_med[med_name]
-                                    received_in_period = sum(tx['quantity'] for tx in med_txs if tx['type'] == 'receive')
-                                    dispensed_in_period = sum(tx['quantity'] for tx in med_txs if tx['type'] == 'dispense')
-                                    beginning_balance = current_balance - received_in_period + dispensed_in_period
-                                    beginning_balance = max(0, beginning_balance)
-                                    ending_balance = current_balance
-                                    # Compute running balances
-                                    running_current_balance = beginning_balance
-                                    running_entries = []
+                                    current_balance    = med.get('balance', 0)
+                                    med_txs            = tx_by_med[med_name]
+                                    received_in_period = sum(t['quantity'] for t in med_txs if t['type'] == 'receive')
+                                    dispensed_in_period= sum(t['quantity'] for t in med_txs if t['type'] == 'dispense')
+                                    beginning_balance  = max(0, current_balance - received_in_period + dispensed_in_period)
+                                    running_bal        = beginning_balance
+                                    running_entries    = []
                                     for tx in med_txs:
-                                        qty = tx['quantity']
-                                        if tx['type'] == 'receive':
-                                            running_current_balance += qty
-                                        else:
-                                            running_current_balance -= qty
+                                        running_bal += tx['quantity'] if tx['type'] == 'receive' else -tx['quantity']
                                         tx_copy = tx.copy()
-                                        tx_copy['balance_after'] = running_current_balance
+                                        tx_copy['balance_after'] = running_bal
                                         running_entries.append(tx_copy)
-                                    # Filter transactions
-                                    filtered_entries = [e for e in running_entries if matches_search(e, search)]
                                     controlled_register.append({
                                         'med_name': med_name,
                                         'beginning_balance': beginning_balance,
-                                        'ending_balance': ending_balance,
+                                        'ending_balance': current_balance,
                                         'received': received_in_period,
                                         'dispensed': dispensed_in_period,
-                                        'transactions': filtered_entries
+                                        'transactions': [e for e in running_entries if matches_search(e, search)]
                                     })
-                                except Exception as query_err:
-                                    app.logger.error(f"Query failed for controlled med {med_name}: {query_err}")
-                                    # Skip this med to avoid crashing
+                                except Exception as qe:
+                                    app.logger.error(f"Query failed for controlled med {med_name}: {qe}")
                                     continue
+
                 except ValueError as e:
-                    message = f'Invalid input: {str(e)}'
-                    report_type = None
-                    start_date = None
-                    end_date = None
-                    search = None
-                    report_data = []
-                    receive_list = []
-                    stock_data = []
-                    controlled_register = []
-                    total_transactions = 0
+                    message      = f'Invalid input: {str(e)}'
+                    report_type  = None
+                    start_date   = end_date = search = None
+                    report_data  = receive_list = stock_data = controlled_register = []
                     report_title = None
             else:
                 message = 'Please select a report type.'
-                report_type = None
-                start_date = None
-                end_date = None
-                search = None
-                report_data = []
-                receive_list = []
-                stock_data = []
-                controlled_register = []
-                total_transactions = 0
-                report_title = None
+
         return render_template_string(
             REPORTS_TEMPLATE,
-            report_type=report_type,
-            report_data=report_data,
-            receive_list=receive_list,
-            stock_data=stock_data,
+            report_type=report_type, report_data=report_data,
+            receive_list=receive_list, stock_data=stock_data,
             controlled_register=controlled_register,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=start_date, end_date=end_date,
             total_transactions=total_transactions,
-            nav_links=get_nav_links(),
-            message=message,
-            search=search,
-            report_title=report_title,
-            is_admin=is_admin
+            nav_links=get_nav_links(), message=message,
+            search=search, report_title=report_title, is_admin=is_admin
         )
     except ServerSelectionTimeoutError:
         return render_template_string(
-            REPORTS_TEMPLATE,
-            nav_links=get_nav_links(),
+            REPORTS_TEMPLATE, nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
-            report_type=None,
-            report_data=[],
-            receive_list=[],
-            stock_data=[],
-            controlled_register=[],
-            start_date=None,
-            end_date=None,
-            total_transactions=0,
-            search=None,
-            report_title=None,
-            is_admin=is_admin
+            report_type=None, report_data=[], receive_list=[], stock_data=[],
+            controlled_register=[], start_date=None, end_date=None,
+            total_transactions=0, search=None, report_title=None, is_admin=is_admin
         ), 500
-    finally:
-        client.close()
-# 2. NEW ROUTE – delete a dispense transaction
-# -------------------------------------------------
+
+
 @app.route('/delete-dispense', methods=['POST'])
 @login_required
 def delete_dispense():
     if session['user'].get('role') != 'admin':
         flash('Only admins can delete dispense transactions.', 'error')
         return redirect(url_for('dispense'))
+
     tx_id = request.form.get('transaction_id')
     if not tx_id:
         flash('No transaction selected.', 'error')
         return redirect(url_for('dispense'))
+
     try:
         client = get_mongo_client()
         db = client['pharmacy_db']
         transactions = db['transactions']
-        medications = db['medications']
-        # 1. Get every medication line for this transaction
+        medications  = db['medications']
+
         tx_rows = list(transactions.find({'transaction_id': tx_id, 'type': 'dispense'}))
         if not tx_rows:
             flash('Transaction not found.', 'error')
             return redirect(url_for('dispense'))
-        # 2. Return stock
+
         for row in tx_rows:
-            med_name = row['med_name']
-            qty = row['quantity']
-            medications.update_one(
-                {'name': med_name},
-                {'$inc': {'balance': qty}}
-            )
-        # 3. Delete all rows belonging to the transaction
+            medications.update_one({'name': row['med_name']}, {'$inc': {'balance': row['quantity']}})
         transactions.delete_many({'transaction_id': tx_id})
         flash('Dispense transaction deleted – stock restored.', 'success')
     except Exception as e:
         flash(f'Delete failed: {str(e)}', 'error')
-    finally:
-        client.close()
-    # Preserve any filters the user had
+
     return redirect(url_for('dispense',
                             start_date=request.form.get('start_date'),
                             end_date=request.form.get('end_date'),
                             search=request.form.get('search')))
+
+
 @app.route('/edit-receive/<receive_id>', methods=['GET', 'POST'])
 @login_required
 def edit_receive(receive_id):
@@ -3278,16 +2231,13 @@ def edit_receive(receive_id):
         client = get_mongo_client()
         db = client['pharmacy_db']
         transactions = db['transactions']
-        medications = db['medications']
-       
-        # Get filter params (from query on GET, form on POST)
-        start_date = request.values.get('start_date') if request.method == 'GET' else request.form.get('start_date')
-        end_date = request.values.get('end_date') if request.method == 'GET' else request.form.get('end_date')
-        search = request.values.get('search') if request.method == 'GET' else request.form.get('search')
-       
+        medications  = db['medications']
+
+        start_date = request.values.get('start_date')
+        end_date   = request.values.get('end_date')
+        search     = request.values.get('search')
         current_user = session['user']['name']
-       
-        # Build tx_list for table (same logic as receive route)
+
         base_query = {'type': 'receive'}
         date_query = {}
         if start_date:
@@ -3298,123 +2248,84 @@ def edit_receive(receive_id):
         if date_query:
             base_query['timestamp'] = date_query
         if search:
-            or_query = [
-                {'med_name': {'$regex': search, '$options': 'i'}},
-                {'batch': {'$regex': search, '$options': 'i'}},
-                {'supplier': {'$regex': search, '$options': 'i'}},
+            base_query['$or'] = [
+                {'med_name':       {'$regex': search, '$options': 'i'}},
+                {'batch':          {'$regex': search, '$options': 'i'}},
+                {'supplier':       {'$regex': search, '$options': 'i'}},
                 {'stock_receiver': {'$regex': search, '$options': 'i'}},
-                {'order_number': {'$regex': search, '$options': 'i'}},
+                {'order_number':   {'$regex': search, '$options': 'i'}},
                 {'invoice_number': {'$regex': search, '$options': 'i'}},
-                {'expiry_date': {'$regex': search, '$options': 'i'}},
+                {'expiry_date':    {'$regex': search, '$options': 'i'}},
             ]
-            base_query['$or'] = or_query
         tx_list = list(transactions.find(base_query).sort('timestamp', -1))
-       
-        # Fetch existing rx_data (only for valid receive_id)
+
         rx_data = None
         message = None
         try:
             oid = ObjectId(receive_id)
-            rx = transactions.find_one({'_id': oid, 'type': 'receive'})
+            rx  = transactions.find_one({'_id': oid, 'type': 'receive'})
             if rx:
                 rx_data = rx
                 rx_data['receive_id'] = str(rx['_id'])
             else:
-                # Invalid ID: redirect back to receive with filters
-                return redirect(url_for('receive', 
-                                        start_date=start_date or '',
-                                        end_date=end_date or '',
-                                        search=search or ''))
+                return redirect(url_for('receive', start_date=start_date or '',
+                                        end_date=end_date or '', search=search or ''))
         except (InvalidId, TypeError):
-            # Bad ObjectId format: redirect back
-            return redirect(url_for('receive', 
-                                    start_date=start_date or '',
-                                    end_date=end_date or '',
-                                    search=search or ''))
-       
-        if request.method == 'POST' and rx_data:  # Only process if rx_data exists
+            return redirect(url_for('receive', start_date=start_date or '',
+                                    end_date=end_date or '', search=search or ''))
+
+        if request.method == 'POST' and rx_data:
             try:
-                oid = ObjectId(receive_id)
+                oid    = ObjectId(receive_id)
                 old_rx = transactions.find_one({'_id': oid})
                 if not old_rx or old_rx['type'] != 'receive':
                     message = "Transaction not found."
                 else:
-                    # Rollback old quantity from old med
-                    medications.update_one(
-                        {'name': old_rx['med_name']},
-                        {'$inc': {'balance': -old_rx['quantity']}}
-                    )
-                    
-                    # Parse new values (unchanged)
-                    med_name = request.form['med_name']
-                    quantity = int(request.form['quantity'])
-                    batch = request.form['batch']
-                    price = float(request.form['price'])
-                    expiry_date = request.form['expiry_date']
-                    schedule = request.form['schedule']
+                    medications.update_one({'name': old_rx['med_name']},
+                                           {'$inc': {'balance': -old_rx['quantity']}})
+                    med_name       = request.form['med_name']
+                    quantity       = int(request.form['quantity'])
+                    batch          = request.form['batch']
+                    price          = float(request.form['price'])
+                    expiry_date    = request.form['expiry_date']
+                    schedule       = request.form['schedule']
                     stock_receiver = request.form['stock_receiver']
-                    order_number = request.form['order_number']
-                    supplier = request.form['supplier']
+                    order_number   = request.form['order_number']
+                    supplier       = request.form['supplier']
                     invoice_number = request.form['invoice_number']
-                    
-                    # Update/add new med stock (unchanged, but note: transaction fields on med doc?)
+
                     medications.update_one(
                         {'name': med_name},
                         {'$inc': {'balance': quantity},
-                         '$set': {
-                             'batch': batch,
-                             'price': price,
-                             'expiry_date': expiry_date,
-                             'schedule': schedule,
-                             'stock_receiver': stock_receiver,
-                             'order_number': order_number,
-                             'supplier': supplier,
-                             'invoice_number': invoice_number
-                         }},
+                         '$set': {'batch': batch, 'price': price, 'expiry_date': expiry_date,
+                                  'schedule': schedule, 'stock_receiver': stock_receiver,
+                                  'order_number': order_number, 'supplier': supplier,
+                                  'invoice_number': invoice_number}},
                         upsert=True
                     )
-                    
-                    # Update transaction
                     transactions.update_one(
                         {'_id': oid},
-                        {'$set': {
-                            'med_name': med_name,
-                            'quantity': quantity,
-                            'batch': batch,
-                            'price': price,
-                            'expiry_date': expiry_date,
-                            'schedule': schedule,
-                            'stock_receiver': stock_receiver,
-                            'order_number': order_number,
-                            'supplier': supplier,
-                            'invoice_number': invoice_number,
-                            'user': current_user,
-                            'timestamp': datetime.utcnow()
-                        }}
+                        {'$set': {'med_name': med_name, 'quantity': quantity, 'batch': batch,
+                                  'price': price, 'expiry_date': expiry_date, 'schedule': schedule,
+                                  'stock_receiver': stock_receiver, 'order_number': order_number,
+                                  'supplier': supplier, 'invoice_number': invoice_number,
+                                  'user': current_user, 'timestamp': datetime.utcnow()}}
                     )
-                    
-                    # Success: redirect to avoid resubmit, preserve filters
-                    return redirect(url_for('receive', 
-                                            start_date=start_date or '',
-                                            end_date=end_date or '',
-                                            search=search or ''))
+                    return redirect(url_for('receive', start_date=start_date or '',
+                                            end_date=end_date or '', search=search or ''))
             except Exception as e:
                 message = f"Update failed: {str(e)}"
-        
+
         return render_template_string(
             RECEIVE_TEMPLATE,
-            tx_list=tx_list,
-            nav_links=get_nav_links(),
-            message=message,
-            start_date=start_date,
-            end_date=end_date,
-            search=search,
-            rx_data=rx_data
+            tx_list=tx_list, nav_links=get_nav_links(),
+            message=message, start_date=start_date, end_date=end_date,
+            search=search, rx_data=rx_data
         )
     except ServerSelectionTimeoutError:
         return "Database connection failed.", 500
-    finally:
-        client.close()
+
+
 @app.route('/delete-receive', methods=['POST'])
 @login_required
 def delete_receive():
@@ -3428,7 +2339,7 @@ def delete_receive():
         return redirect(url_for('receive'))
 
     try:
-        oid = ObjectId(receive_id)   # <-- THIS WAS MISSING
+        oid = ObjectId(receive_id)
     except InvalidId:
         flash('Invalid receive ID.', 'error')
         return redirect(url_for('receive'))
@@ -3437,36 +2348,155 @@ def delete_receive():
         client = get_mongo_client()
         db = client['pharmacy_db']
         transactions = db['transactions']
-        medications = db['medications']
+        medications  = db['medications']
 
         rx = transactions.find_one({'_id': oid, 'type': 'receive'})
         if not rx:
             flash('Transaction not found.', 'error')
             return redirect(url_for('receive'))
 
-        # Reduce stock
-        medications.update_one(
-            {'name': rx['med_name']},
-            {'$inc': {'balance': -rx['quantity']}}
-        )
-        # Delete transaction
+        medications.update_one({'name': rx['med_name']}, {'$inc': {'balance': -rx['quantity']}})
         transactions.delete_one({'_id': oid})
         flash('Receive transaction deleted – stock reduced.', 'success')
     except Exception as e:
         flash(f'Delete failed: {str(e)}', 'error')
-    finally:
-        client.close()
 
     return redirect(url_for('receive',
                             start_date=request.form.get('start_date'),
                             end_date=request.form.get('end_date'),
                             search=request.form.get('search')))
+
+
+# -----------------------------------------------------------------------
+# API endpoints
+# -----------------------------------------------------------------------
+
 @app.route('/api/diagnoses', methods=['GET'])
 @login_required
 def get_diagnosis_suggestions():
     query = request.args.get('query', '').lower()
     matching = [d for d in DIAGNOSES_OPTIONS if query in d.lower()][:10]
     return jsonify(matching)
+
+
+# FIX (Performance): new endpoint that replaces the three copies of the
+# medication list that were previously inlined in HTML templates.
+MEDICATION_OPTIONS = [
+    "Acetylsalisylic Acid, 100 mg", "Acetylsalisylic Acid, 300 mg",
+    "Activated Charcoal, 050 g", "Actrapid, 100 IU",
+    "Acyclovir Cre 5 Perc, 010 mg", "Acyclovir Tab, 200 mg", "Acyclovir, 800 mg",
+    "Adalat, 030 mg", "Adalat, 060 mg", "Adcodol, 500 mg", "Adcorectic, 050 mg",
+    "Adenosine, 006 mg", "Adrenalin Hcl Inj, 001 mg",
+    "Alcophyllin Syrup, 100 ml", "Alcophyllex Syrup, 100 ml",
+    "Allopurinol, 100 mg", "Aminophyllin Injection, 250 mg", "Aminophyllin, 100 mg",
+    "Amiodarone, 006 mg", "Amitryptyline, 025 mg", "Amlodipine, 010 mg",
+    "Amoxycillin Cap, 250 mg", "Amoxyclav Injection, 1200 mg", "Amoxyclav, 625 mg",
+    "Ampicillin Caps, 250 mg", "Ampiclox Caps, 500 mg", "Ampjicillin Injection, 500 mg",
+    "Anti Haemorrhoidal Suppositories, 100 mg", "Anti Snake Bite Serum, 010 ml",
+    "Antirubbies, 2.5 IU", "Anusol Ointment, 2500 mg", "Arachis Oil, 020 ml",
+    "Atorvastatin, 010 mg", "Atorvastatin, 020 mg",
+    "Asccorbic Acid Tab - Chewable, 250 mg",
+    "Atenolol, 050 mg", "Atenolol, 100 mg", "Atropine Injection, 0.5 mg",
+    "Azithromycin, 500 mg", "Baclofen, 010 mg", "Beclomethasone Inhaler, 200 MID",
+    "Benzathine Pen, 2.4 MU", "Benzoic Salicylic Ointment (Whitfield), 500 g",
+    "Benzyl Benzoate, 100 ml", "Benzyl Pen Injection, 005 MU",
+    "Betamethasone Cream, 500 g", "Bisacodyl Tab, 005 mg",
+    "Calamine Lotion, 100 ml", "Calcium Gluconate Tabs, 300 mg",
+    "Captopril Tab, 050 mg", "Carbamazepine, 200 mg", "Carvedilol, 12.5mg",
+    "Cefotaxime Injection, 001 g", "Ceftriaxone Injection, 1000 mg",
+    "Ceftriaxone, 250 mg", "Celebrex, 200 mg", "Cetrizine, 010 mg",
+    "Chlopromazine, 025 mg", "Chloramphenicol Caps, 250 mg",
+    "Chloramphenicol Eye Drops, 010 ml", "Chloramphenicol Eye Oint, 005 g",
+    "Chlorhexide Mouth Wash, 100 ml", "Chloro Ear Drops, 020 ml",
+    "Chlorpheniramine Tabs, 004 mg", "Cimetidine Tabs, 200 mg",
+    "Cimetidine tabs, 400 mg", "Cimetidine Injection, 200 mg",
+    "Cipro Eye Drops, 010 ml", "Ciprofloxacin, 500 mg", "Clarythromycin, 500 mg",
+    "Cloxacillin Injection, 250 mg", "Clopidogrel, 075 mg",
+    "Clotrimazole Cre Vaginal, 010 mg", "Clotrimazole Pess, 100 mg",
+    "Clotrimazole Topical Cre 1%, 020 g", "Cloxacillin Caps, 250 mg",
+    "Colchicine Tabs, 0.5 mg", "Cotrimoxazole, 480 mg", "Cotrimoxazole, 960 mg",
+    "Cyproheptadine, 004 mg", "Deep Freeze Spray, 050 ml",
+    "Dexamethasone Eye Drops, 002 ml", "Dexamethasone Injection, 004 mg",
+    "Dextrose Injection, 050 %", "Diazepam Injection, 010 mg", "Diazepam Tabs, 005 mg",
+    "Diclofenac Injection, 075 mg", "Diclofenac Tab, 025 mg", "Diclofenac Tab, 050 mg",
+    "Diclofenac Gel, 050 g", "Digoxin, 0.250 mg", "Diphenhydramine Syrup, 100 ml",
+    "Dopamine Injection, 010 mg", "Doxycycline Tabs, 100 mg", "Dynexan Oral Gel, 010 mg",
+    "Emergency Pill, 002 mg", "Enalapril tabs, 005 mg", "Enalapril tabs, 010 mg",
+    "Enalapril tabs, 20 mg", "Ergometrine Injection, 0.5 mg /ml",
+    "Erythromycin tabs, 250 mg", "Fentanyl, 100 mcg", "Ferrous Sulphate Tabs, 200 mg",
+    "Fertomid, 050 mg", "Flagyl Injection, 400 mg", "Flu Stat, 200 mg",
+    "Fluconazole, 200 mg", "FluoxetineCaps, 020 mg", "Fml Neo Opd, 005 ml",
+    "Folic Acid Tabs, 005 mg", "Furosemide Injection, 020 mg", "Furosemide Tabs, 040 mg",
+    "Gabapentine, 100 mg", "Gentamycin Injection, 040 mg", "Glibenclamide Tabs, 005 mg",
+    "Gliclazide, 080 mg", "Glucose Powder, 500 g", "Glycerine Supp, 100 mg",
+    "Griseofulvin Tabs, 500 mg", "Guafenesin Xl 60, 100 ml", "Gv Paint, 020 ml",
+    "Haloperidol Injection, 002 mg", "Haloperidol Tabs, 1.5 mg", "Heparine, 1000 SIU",
+    "Histacon Caps, 200 mg", "Hydalazine Injection, 020 mg",
+    "Hydralazine Hcl Tabs, 010 mg", "Hydralazine Hcl Tabs, 050 mg",
+    "Hydrochlorothiazide Tabs, 025 mg", "Hydrocortisone Cream, 500 g",
+    "Hydrocortisone Injection, 100 mg", "Hyoscine Injection, 020 mg",
+    "Hyoscine Tabs, 010 mg", "Ibuprofen Tab, 200 mg", "Ibuprofen Tab, 400 mg",
+    "Ichthammol Ointment, 500 g", "Imipramine, 010 mg", "Indapamide Tabs, 0.5 mg",
+    "Indomethacin Caps, 025 mg", "Insulin Hm Injection, 100 U 10 Ml",
+    "Isosorbide Trinitrate, 005 mg", "Ketamine Injection, 050 mg (Ml)",
+    "Keteconazole, 200 mg Tabs", "Lactulose, 150 ml", "Lignocaine Injection, 002 %",
+    "Lignocaine Spray, 050 ml", "Liquid Paraffin, 100 ml", "Lisinopril, 020, mg",
+    "Loperamide Tabs, 002 mg", "Loratadine, 010 mg", "Losartan, 050 mg",
+    "Losartan, 100 mg", "Lubrucating Gel, 050 g", "Magasil Suspension, 100 ml",
+    "Magnesium Suphate injection, 010 mg", "Mannitol, 020 %",
+    "Mayogel suspension, 100 ml", "Mayogel suspension, 200 ml",
+    "Mebendazole, 100 mg Tabs", "Medigel Suspension, 100 ml", "Mefenamic Acid, 250 mg",
+    "Mepyramine Cream, 025 g", "Mercurochrome Paint, 020 ml",
+    "Metformin Tabs, 500 mg", "Metformin Tabs, 850 mg", "Methotrexate, 005 mg",
+    "Methylprednisone Injection, 040 mg", "Methylsal Ointment, 500 mg",
+    "Metoclopramide Injection, 010 mg", "Metoclopramide Tabs, 010 mg",
+    "Metronidazole tabs, 400 mg", "Miconazol Oral Gel, 030 g", "Miconazole Cream, 002 %",
+    "Midazolam, 010 mg", "Migril, 002 mg", "Mist Alba Susp, 100 ml", "Mmt, 250 mg",
+    "Morphine Injection, 010 mg", "Multivitamin Tabs, 0.25 mg", "Mybulen, 200 mg",
+    "Naloxone, 0.4 mg", "Nasal Drops- Oxymetazoline, 005 ml", "Neurobion Tabs, 200 mg",
+    "Nifedipine, 005 mg", "Nifedipine, 010 mg", "Nitrofurantoin, 100 mg",
+    "Nitrofurazone Ointment, 500 g", "Nitrolingual Spray, 020 ml",
+    "Methylcellulose Eye Drops, 010 ml", "Norflex Co Tabs, 375 mg",
+    "Nystatin Ointment, 020 g", "Nystatin Oral Susp, 1000 u",
+    "Nystatin Vaginal Pess, 100 mg", "Omeprazole Tabs, 020 mg",
+    "Oral Rehydration Salts, 002 g", "Osteoeze Gold, 200 mg",
+    "Oxytocin Injection, 010 mg", "Pain Relief Gel, 020 g", "PanaCod Tab, 500 mg",
+    "Paracetamol tabs, 500 mg", "Pen Vk Tab, 250 mg", "Pentaprazole Injection, 040 mg",
+    "Perfulgan, 001 g", "Pethedine Injection, 050 mg", "Pethedine Injection, 100 mg",
+    "Phenytoin Injection, 200 mg", "Phernobabitol tabs, 020 mg",
+    "Podophylline Paint, 020 ml", "Potassium Chloride tabs, 600 mg",
+    "Potassium Citrate, 100 ml", "Povidone Ointment, 500 mg",
+    "Pravastatin tabs, 020 mg", "Prednisone Tab, 005 mg", "Probanthine Tabs, 015 mg",
+    "Prochlorperazine Tabs, 005 mg", "Projchlorperazine Injection, 005 mg",
+    "Promethazine Injection, 050 mg", "Promethazine Tabs, 025 mg",
+    "Propranolol Tabs, 010 mg", "Propranolol Tabs, 040 mg", "Pyridoxine, 025 mg",
+    "Ranitidine, 150 mg", "Rocuronium injection, 010 mg",
+    "Salbutamol Inhaler, 200 MID", "Salbutamol, 004 mg Tablets",
+    "Selenium Tab, 100 mg", "Sildenafil, 050 mg", "Simvastatin, 020 mg",
+    "Sinucon Tab, 200 mg", "Sodium Bicarbonate, 050 ml", "Sodium Valproate, 200 mg",
+    "Spersallerg Opd, 010 ml", "Spironolactone tabs, 025 mg",
+    "Suppositories Indocid (Arthrexin), 100 mg", "Suxamethonium injection, 010 mg",
+    "Tetanus Toxoid Vaccine, 010 mg", "Tetracycline Ointment, 003 % 25G",
+    "Tetracycline Opthal Ointment, 020 g", "Throat Lozenges, 250 mg",
+    "Thymol Glycerine, 100 ml", "Tranexamic Acid Injection, 500 mg",
+    "Tramadol Injection, 100 mg", "Tramadol Tabs, 050 mg",
+    "Tranexamic Acid tabs, 500 mg", "Trifen Adult, 100 ml", "Tumsulosin, 0.5 mg",
+    "Urirex K, 050 mg", "Venteze Resp.Sol, 005 mg 20ml",
+    "Vitamin B Co Tablets, 001 mg", "Vitamin B12, 002 mg", "Vitamin E Cream, 500 g",
+    "Vitamin B Co Injection, 001 mg", "Vitamin K Injection (Konakion), 001 mg",
+    "Warfarin Tabs, 005 mg", "Water For Injection, 010 ml",
+    "Zinc Oxide Ointment, 030 mg", "Zinc Tablets, 020 mg", "Zuvamor, 040 mg",
+    "Amoxyl, 500 mg", "Labetolol, 5mg", "Morpine tabs, 10mg",
+]
+
+@app.route('/api/medications', methods=['GET'])
+@login_required
+def get_medication_options():
+    """Return the static medication autocomplete list as JSON.
+    Templates fetch this once and cache it in JS module scope."""
+    return jsonify(MEDICATION_OPTIONS)
+
+
 if __name__ == '__main__':
     try:
         from audit_logger import init_audit
