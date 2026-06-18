@@ -2741,10 +2741,19 @@ def get_medication_options():
     return jsonify(MEDICATION_OPTIONS)
 
 
+# FIX (Bug): init_audit() was only called inside `if __name__ == '__main__':`,
+# which never executes under gunicorn/uwsgi (they import the module and grab
+# `app` directly — they don't run app.py as a script). That meant the audit
+# decorators were never attached to dispense/receive/medication routes in
+# production, so nothing ever got written to audit_log despite edits/deletes
+# happening. Moving this to module level — same pattern as init_db_collections()
+# above — makes it run under `python app.py`, `flask run`, and gunicorn alike.
+try:
+    from audit_logger import init_audit
+    init_audit(app)
+except Exception as e:
+    app.logger.error(f"Failed to load audit logger: {e}")
+
+
 if __name__ == '__main__':
-    try:
-        from audit_logger import init_audit
-        init_audit(app)
-    except Exception as e:
-        app.logger.error(f"Failed to load audit logger: {e}")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
