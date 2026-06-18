@@ -111,7 +111,13 @@ def init_error_logging(flask_app):
         ) if hasattr(error, "__traceback__") else (None, None, None)
 
         # Log to file
-        _log_to_file(logger, (exc_type, exc_value, exc_tb))
+        # FIX: previously unguarded — if this threw (e.g. unusual request
+        # state), it would propagate and the Mongo write below would never
+        # even be attempted, with no trace of why.
+        try:
+            _log_to_file(logger, (exc_type, exc_value, exc_tb))
+        except Exception as file_log_err:
+            logger.warning(f"Failed to write error to file log: {file_log_err}")
 
         # Log to MongoDB (fire-and-forget)
         try:

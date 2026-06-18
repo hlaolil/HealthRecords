@@ -268,6 +268,21 @@ CSS_STYLE = """
         max-width: 900px;
         margin: 0 auto 20px;
     }
+    /* FIX (Bug): the generic `form` rule above applies to every <form> on
+       the page, including the tiny inline delete forms inside table action
+       cells (e.g. <form class="delete-btn" style="display:inline;">).
+       That gave each delete form a 20px padded card with its own shadow,
+       which is what rendered as an oversized red block around the Delete
+       button instead of a normal-sized button. Action-cell forms opt back
+       out of all of that card styling here. */
+    .action-buttons form {
+        background-color: transparent;
+        padding: 0;
+        border-radius: 0;
+        box-shadow: none;
+        max-width: none;
+        margin: 0;
+    }
     .dispense-form,
     .receive-form,
     .add-medication-form,
@@ -2447,6 +2462,24 @@ def audit_log():
             message="Database connection failed. Please try again later.",
             view=view, entries=[], start_date=start_date, end_date=end_date, search=search
         ), 500
+
+
+# NEW (Diagnostic): deliberately raises an unhandled exception so the error
+# logging pipeline can be verified end-to-end (handler -> file log -> Mongo
+# write -> /audit "Application Errors" view). Admin-only. Visit /audit
+# afterward to confirm the entry appears; check the server's /tmp/errors.log
+# for the same event. Safe to leave in place — it does nothing unless an
+# admin deliberately visits it.
+@app.route('/test-error-logging', methods=['GET'])
+@login_required
+def test_error_logging():
+    if session['user'].get('role') != 'admin':
+        flash('Access denied.', 'error')
+        return redirect('/reports')
+    raise RuntimeError(
+        "Deliberate test exception from /test-error-logging — "
+        "if you see this entry in /audit, error logging is working correctly."
+    )
 
 
 @app.route('/delete-dispense', methods=['POST'])
