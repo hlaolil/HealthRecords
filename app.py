@@ -356,7 +356,24 @@ CSS_STYLE = """
         box-shadow: 0 2px 4px rgba(0,0,0,0.15);
     }
     .action-buttons {
-        padding: 6px 10px;
+        /* FIX (UX): this class is applied to the <td> containing Edit/Delete.
+           It previously had no layout rules of its own, so the edit <a> and
+           the delete <form style="display:inline;"> sat flush against each
+           other with their buttons' margin/padding forced to 0 below —
+           making accidental delete clicks on a misaimed edit click likely,
+           especially on touch. Flex + gap gives consistent, deliberate
+           spacing regardless of markup (a/form/span mix). */
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+    .action-buttons a,
+    .action-buttons form {
+        display: inline-flex;
+    }
+    .action-buttons button {
+        padding: 6px 14px;
         border-radius: 4px;
         font-size: 13px;
         font-weight: 600;
@@ -372,8 +389,6 @@ CSS_STYLE = """
     .action-buttons .delete-btn {
         background-color: #dc3545;
         color: #fff;
-        margin: 0;
-        padding: 0;
     }
     .action-buttons .delete-btn:hover {
         background-color: #c82333;
@@ -394,14 +409,16 @@ CSS_STYLE = """
         background-color: #218838;
     }
     form button.delete-btn {
+        /* FIX (UX): no longer zeroes out margin/padding — that was the
+           direct cause of the delete button having no spacing buffer
+           around it. Sizing now comes from .action-buttons button above;
+           this rule only keeps delete's distinct red color/shadow. */
         background-color: #dc3545 !important;
         color: #fff !important;
-        padding: 0 !important;
         font-size: 13px !important;
-        border-radius: 2px !important;
+        border-radius: 4px !important;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
         transition: all 0.2s ease !important;
-        margin: 0 !important;
     }
     form button.delete-btn:hover {
         background-color: #c82333 !important;

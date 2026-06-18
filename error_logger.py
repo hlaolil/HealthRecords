@@ -11,6 +11,7 @@ That's it – every crash will now be recorded in errors.log **and** in MongoDB.
 """
 
 import logging
+import os
 import traceback
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
@@ -29,8 +30,16 @@ ERROR_COLLECTION = "error_logs"
 # Internal helpers
 # --------------------------------------------------------------------------- #
 def _get_mongo_client(app):
-    """Lazy MongoDB client – re-uses the same connection logic as the main app."""
-    uri = MONGO_URI or app.config.get("MONGODB_URI") or "mongodb://localhost:27017/"
+    """Lazy MongoDB client – re-uses the same connection logic as the main app.
+
+    FIX (Bug): this previously read app.config.get("MONGODB_URI"), but app.py
+    never sets that Flask config key — it only reads os.getenv('MONGODB_URI').
+    That meant this always fell through to the localhost fallback in
+    production, silently failed with ServerSelectionTimeoutError against a
+    Mongo that doesn't exist there, and error_logs never got written despite
+    audit_log working fine (audit_logger.py reads the env var directly).
+    """
+    uri = MONGO_URI or os.getenv("MONGODB_URI") or "mongodb://localhost:27017/"
     return MongoClient(uri, serverSelectionTimeoutMS=36000)
 
 def _log_to_file(logger, exc_info):
@@ -109,8 +118,12 @@ def init_error_logging(flask_app):
             client = _get_mongo_client(flask_app)
             db = client["pharmacy_db"]
             _log_to_mongo(db, (exc_type, exc_value, exc_tb))
-        except ServerSelectionTimeoutError:
-            logger.warning("MongoDB unavailable while logging error.")
+        except Exception as mongo_log_err:
+            # FIX: previously only caught ServerSelectionTimeoutError, so any
+            # other Mongo failure (auth, wrong db, network) would propagate
+            # and potentially mask the original exception. Now any failure
+            # here is caught and recorded in the file log so it's visible.
+            logger.warning(f"Failed to write error to MongoDB: {mongo_log_err}")
         finally:
             try:
                 client.close()
