@@ -45,6 +45,67 @@ def get_mongo_client():
         _mongo_client = MongoClient(mongouri, serverSelectionTimeoutMS=120000)
     return _mongo_client
 
+
+# -----------------------------------------------------------------------
+# NEW: Explicit collection + index initialization.
+#
+# Previously audit_log (written by audit_logger.py) and error_logs (written
+# by error_logger.py) were only created implicitly on first insert. That
+# meant: (a) the /audit page couldn't distinguish "nothing happened yet"
+# from "collection doesn't exist", and (b) there were no indexes, so
+# sort('timestamp', -1) would do a full collection scan as these grow.
+#
+# This runs once at process startup (module import time + again defensively
+# in __main__) and is safe to call repeatedly — create_collection raises
+# CollectionInvalid if it already exists, which we just swallow, and
+# create_index is idempotent by definition.
+# -----------------------------------------------------------------------
+def init_db_collections():
+    try:
+        client = get_mongo_client()
+        db = client['pharmacy_db']
+        existing = db.list_collection_names()
+
+        if 'audit_log' not in existing:
+            db.create_collection('audit_log')
+        if 'error_logs' not in existing:
+            db.create_collection('error_logs')
+
+        # audit_log: /audit page sorts by timestamp desc and filters by
+        # action/target_type/target_id/user via $or regex, plus an exact
+        # lookup pattern (target_type + target_id) for "history of this record".
+        db['audit_log'].create_index([('timestamp', -1)])
+        db['audit_log'].create_index([('action', 1)])
+        db['audit_log'].create_index([('target_type', 1), ('target_id', 1)])
+        db['audit_log'].create_index([('user', 1)])
+
+        # error_logs: /audit page sorts by timestamp desc and filters by
+        # path/endpoint/method.
+        db['error_logs'].create_index([('timestamp', -1)])
+        db['error_logs'].create_index([('endpoint', 1)])
+
+        # Also index the collections the rest of the app queries heavily,
+        # since dispense/receive/reports all filter or sort on these.
+        db['transactions'].create_index([('timestamp', -1)])
+        db['transactions'].create_index([('transaction_id', 1)])
+        db['transactions'].create_index([('type', 1), ('timestamp', -1)])
+        db['transactions'].create_index([('med_name', 1)])
+        db['medications'].create_index([('name', 1)], unique=True)
+
+        app.logger.info("DB collections and indexes initialized (audit_log, error_logs, transactions, medications)")
+        print("✅ DB collections and indexes initialized (audit_log, error_logs, transactions, medications)")
+    except Exception as e:
+        # Don't crash app startup over index creation — log and continue.
+        # Collections will still be created implicitly on first write if this
+        # fails (e.g. Mongo briefly unreachable at boot).
+        app.logger.warning(f"init_db_collections failed (will retry implicitly on first write): {e}")
+        print(f"⚠️  init_db_collections failed (will retry implicitly on first write): {e}")
+
+
+# Run at import time so this also applies under `flask run` / gunicorn,
+# not just `python app.py`.
+init_db_collections()
+
 # Diagnosis options
 DIAGNOSES_OPTIONS = [
     'ARDS', 'Abscess', 'Acne (Moderate to severe)', 'Acute Bronchitis', 'Acute Gastroenteritis (AGE)',
