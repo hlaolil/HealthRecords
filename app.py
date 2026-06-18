@@ -13,7 +13,7 @@ from markupsafe import escape  # FIX: used to prevent XSS in nav links
 
 load_dotenv()
 
-from error_logger import init_error_logging
+from error_logger import init_error_logging, write_app_warning
 from bson import ObjectId
 from bson.errors import InvalidId
 
@@ -70,6 +70,8 @@ def init_db_collections():
             db.create_collection('audit_log')
         if 'error_logs' not in existing:
             db.create_collection('error_logs')
+        if 'app_warnings' not in existing:
+            db.create_collection('app_warnings')
 
         # audit_log: /audit page sorts by timestamp desc and filters by
         # action/target_type/target_id/user via $or regex, plus an exact
@@ -84,6 +86,13 @@ def init_db_collections():
         db['error_logs'].create_index([('timestamp', -1)])
         db['error_logs'].create_index([('endpoint', 1)])
 
+        # app_warnings: handled business-logic issues (not found, insufficient
+        # stock, etc.) written by error_logger.write_app_warning(). /audit
+        # page sorts by timestamp desc and filters by warning_type/user.
+        db['app_warnings'].create_index([('timestamp', -1)])
+        db['app_warnings'].create_index([('warning_type', 1)])
+        db['app_warnings'].create_index([('user', 1)])
+
         # Also index the collections the rest of the app queries heavily,
         # since dispense/receive/reports all filter or sort on these.
         db['transactions'].create_index([('timestamp', -1)])
@@ -92,7 +101,7 @@ def init_db_collections():
         db['transactions'].create_index([('med_name', 1)])
         db['medications'].create_index([('name', 1)], unique=True)
 
-        app.logger.info("DB collections and indexes initialized (audit_log, error_logs, transactions, medications)")
+        app.logger.info("DB collections and indexes initialized (audit_log, error_logs, app_warnings, transactions, medications)")
         print("✅ DB collections and indexes initialized (audit_log, error_logs, transactions, medications)")
     except Exception as e:
         # Don't crash app startup over index creation — log and continue.
@@ -1509,6 +1518,7 @@ AUDIT_TEMPLATE = CSS_STYLE + """
             <label>View:</label>
             <select name="view">
                 <option value="changes" {% if view == 'changes' %}selected{% endif %}>Edits &amp; Deletes</option>
+                <option value="warnings" {% if view == 'warnings' %}selected{% endif %}>Business Warnings (Not Found / Insufficient Stock)</option>
                 <option value="errors" {% if view == 'errors' %}selected{% endif %}>Application Errors</option>
             </select>
         </div>
@@ -1558,6 +1568,35 @@ AUDIT_TEMPLATE = CSS_STYLE + """
         </tr>
     {% else %}
         <tr><td colspan="7">No edit or delete records found.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% elif view == 'warnings' %}
+<h2>Business Warnings ({{ entries|length }})</h2>
+<p>Handled conditions that are not bugs — a medication wasn't found, stock was insufficient, or a transaction no longer exists. These don't crash the app, but are worth reviewing.</p>
+<table>
+    <thead>
+        <tr>
+            <th>Timestamp</th>
+            <th>Type</th>
+            <th>Message</th>
+            <th>User</th>
+            <th>Path</th>
+            <th>Details</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for e in entries %}
+        <tr class="close-to-expire">
+            <td>{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            <td>{{ e.warning_type }}</td>
+            <td>{{ e.message }}</td>
+            <td>{{ e.user }}</td>
+            <td>{{ e.path }}</td>
+            <td><pre style="white-space: pre-wrap; margin: 0; font-size: 12px;">{{ e.context }}</pre></td>
+        </tr>
+    {% else %}
+        <tr><td colspan="6">No business warnings found.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -1858,8 +1897,21 @@ def dispense():
                             med = medications.find_one({'name': med_name})
                             if not med:
                                 error_msgs.append(f'Medication "{med_name}" not found.')
+                                write_app_warning(
+                                    'medication_not_found',
+                                    f'Medication "{med_name}" not found during dispense.',
+                                    {'med_name': med_name, 'requested_quantity': quantity,
+                                     'patient': patient, 'transaction_id': tx_id}
+                                )
                             elif med.get('balance', 0) < quantity:
                                 error_msgs.append(f'Insufficient stock for "{med_name}".')
+                                write_app_warning(
+                                    'insufficient_stock',
+                                    f'Insufficient stock for "{med_name}" during dispense.',
+                                    {'med_name': med_name, 'requested_quantity': quantity,
+                                     'available_quantity': med.get('balance', 0),
+                                     'patient': patient, 'transaction_id': tx_id}
+                                )
                             else:
                                 medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
                                 transactions.insert_one({
@@ -2079,6 +2131,11 @@ def edit_medication(med_name):
         med = medications.find_one({'name': med_name})
         if not med:
             message = f'Medication "{med_name}" not found.'
+            write_app_warning(
+                'medication_not_found',
+                f'Medication "{med_name}" not found when attempting to edit.',
+                {'med_name': med_name}
+            )
             return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
                                           message=message, med_data=None, med_name=med_name)
 
@@ -2128,6 +2185,11 @@ def delete_medication():
         med = medications.find_one({'name': med_name})
         if not med:
             session['message'] = f'Medication "{med_name}" not found.'
+            write_app_warning(
+                'medication_not_found',
+                f'Medication "{med_name}" not found when attempting to delete.',
+                {'med_name': med_name}
+            )
             return redirect('/reports')
         result = medications.delete_one({'name': med_name})
         if result.deleted_count > 0:
@@ -2429,6 +2491,20 @@ def audit_log():
             entries = list(
                 db['error_logs'].find(query).sort('timestamp', -1).limit(500)
             )
+        elif view == 'warnings':
+            query = {}
+            if date_query:
+                query['timestamp'] = date_query
+            if search:
+                query['$or'] = [
+                    {'warning_type': {'$regex': search, '$options': 'i'}},
+                    {'message':      {'$regex': search, '$options': 'i'}},
+                    {'user':         {'$regex': search, '$options': 'i'}},
+                    {'path':         {'$regex': search, '$options': 'i'}},
+                ]
+            entries = list(
+                db['app_warnings'].find(query).sort('timestamp', -1).limit(500)
+            )
         else:
             view = 'changes'  # normalize any unexpected value
             query = {}
@@ -2503,6 +2579,11 @@ def delete_dispense():
         tx_rows = list(transactions.find({'transaction_id': tx_id, 'type': 'dispense'}))
         if not tx_rows:
             flash('Transaction not found.', 'error')
+            write_app_warning(
+                'transaction_not_found',
+                f'Dispense transaction "{tx_id}" not found when attempting to delete.',
+                {'transaction_id': tx_id}
+            )
             return redirect(url_for('dispense'))
 
         for row in tx_rows:
@@ -2574,6 +2655,11 @@ def edit_receive(receive_id):
                 old_rx = transactions.find_one({'_id': oid})
                 if not old_rx or old_rx['type'] != 'receive':
                     message = "Transaction not found."
+                    write_app_warning(
+                        'transaction_not_found',
+                        f'Receive transaction "{receive_id}" not found when attempting to edit.',
+                        {'receive_id': receive_id}
+                    )
                 else:
                     medications.update_one({'name': old_rx['med_name']},
                                            {'$inc': {'balance': -old_rx['quantity']}})
@@ -2647,6 +2733,11 @@ def delete_receive():
         rx = transactions.find_one({'_id': oid, 'type': 'receive'})
         if not rx:
             flash('Transaction not found.', 'error')
+            write_app_warning(
+                'transaction_not_found',
+                f'Receive transaction "{receive_id}" not found when attempting to delete.',
+                {'receive_id': receive_id}
+            )
             return redirect(url_for('receive'))
 
         medications.update_one({'name': rx['med_name']}, {'$inc': {'balance': -rx['quantity']}})

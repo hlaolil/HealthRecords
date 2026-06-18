@@ -82,6 +82,79 @@ def _log_to_mongo(db, exc_info):
     except Exception as mongo_err:   # never let a logging error crash the app
         app.logger.warning(f"Failed to write error to MongoDB: {mongo_err}")
 
+
+# --------------------------------------------------------------------------- #
+# NEW: business-logic warnings (not found, insufficient stock, etc.)
+#
+# These are deliberately handled conditions, not crashes — nothing raises an
+# exception for "medication not found" or "insufficient stock", so they were
+# never visible to handle_uncaught_exception above by design. This is a
+# separate, explicit log path for exactly that category: things worth an
+# admin reviewing that are not bugs in the code.
+#
+# Call write_app_warning(...) directly from app.py at the point each
+# condition is detected (see usage in the dispense/receive/edit routes).
+# --------------------------------------------------------------------------- #
+WARNING_COLLECTION = "app_warnings"
+
+def write_app_warning(warning_type, message, context=None):
+    """Log a handled business-logic issue (not found, insufficient stock,
+    invalid input, etc.) to both the file log and MongoDB.
+
+    warning_type: short machine-readable category, e.g. 'medication_not_found',
+                  'insufficient_stock', 'transaction_not_found'.
+    message: human-readable description (what's normally shown to the user).
+    context: optional dict of extra structured detail (med_name, requested
+             qty, available qty, transaction_id, etc.) — kept separate from
+             `message` so the audit view can show both the friendly text and
+             the precise data behind it.
+    """
+    user = None
+    try:
+        from flask import session as flask_session
+        user = flask_session.get('user', {}).get('name', 'unknown')
+    except Exception:
+        user = 'unknown'
+
+    doc = {
+        "timestamp": datetime.utcnow(),
+        "warning_type": warning_type,
+        "message": message,
+        "context": context or {},
+        "user": user,
+        "method": getattr(request, "method", None),
+        "path": getattr(request, "path", None),
+        "endpoint": getattr(request, "endpoint", None),
+        "remote_addr": getattr(request, "remote_addr", None),
+    }
+
+    # File log first (best-effort, never blocks the Mongo write below).
+    try:
+        logger = logging.getLogger("error_logger")
+        logger.warning(
+            "=== APP WARNING (%s) ===\nUser: %s\nPath: %s %s\nMessage: %s\nContext: %s",
+            warning_type, user, doc["method"], doc["path"], message, context or {}
+        )
+    except Exception:
+        pass
+
+    # Mongo write (best-effort — a logging failure must never break the
+    # actual user-facing request that triggered this call).
+    try:
+        uri = MONGO_URI or os.getenv("MONGODB_URI") or "mongodb://localhost:27017/"
+        client = MongoClient(uri, serverSelectionTimeoutMS=10000)
+        client["pharmacy_db"][WARNING_COLLECTION].insert_one(doc)
+    except Exception as e:
+        try:
+            logging.getLogger("error_logger").warning(f"Failed to write app warning to MongoDB: {e}")
+        except Exception:
+            pass
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
 # --------------------------------------------------------------------------- #
 # Flask error-handler registration
 # --------------------------------------------------------------------------- #
