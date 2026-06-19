@@ -13,7 +13,7 @@ from markupsafe import escape  # FIX: used to prevent XSS in nav links
 
 load_dotenv()
 
-from error_logger import init_error_logging, write_app_warning
+from error_logger import init_error_logging
 from bson import ObjectId
 from bson.errors import InvalidId
 
@@ -70,8 +70,6 @@ def init_db_collections():
             db.create_collection('audit_log')
         if 'error_logs' not in existing:
             db.create_collection('error_logs')
-        if 'app_warnings' not in existing:
-            db.create_collection('app_warnings')
 
         # audit_log: /audit page sorts by timestamp desc and filters by
         # action/target_type/target_id/user via $or regex, plus an exact
@@ -86,13 +84,6 @@ def init_db_collections():
         db['error_logs'].create_index([('timestamp', -1)])
         db['error_logs'].create_index([('endpoint', 1)])
 
-        # app_warnings: handled business-logic issues (not found, insufficient
-        # stock, etc.) written by error_logger.write_app_warning(). /audit
-        # page sorts by timestamp desc and filters by warning_type/user.
-        db['app_warnings'].create_index([('timestamp', -1)])
-        db['app_warnings'].create_index([('warning_type', 1)])
-        db['app_warnings'].create_index([('user', 1)])
-
         # Also index the collections the rest of the app queries heavily,
         # since dispense/receive/reports all filter or sort on these.
         db['transactions'].create_index([('timestamp', -1)])
@@ -101,7 +92,7 @@ def init_db_collections():
         db['transactions'].create_index([('med_name', 1)])
         db['medications'].create_index([('name', 1)], unique=True)
 
-        app.logger.info("DB collections and indexes initialized (audit_log, error_logs, app_warnings, transactions, medications)")
+        app.logger.info("DB collections and indexes initialized (audit_log, error_logs, transactions, medications)")
         print("✅ DB collections and indexes initialized (audit_log, error_logs, transactions, medications)")
     except Exception as e:
         # Don't crash app startup over index creation — log and continue.
@@ -277,21 +268,6 @@ CSS_STYLE = """
         max-width: 900px;
         margin: 0 auto 20px;
     }
-    /* FIX (Bug): the generic `form` rule above applies to every <form> on
-       the page, including the tiny inline delete forms inside table action
-       cells (e.g. <form class="delete-btn" style="display:inline;">).
-       That gave each delete form a 20px padded card with its own shadow,
-       which is what rendered as an oversized red block around the Delete
-       button instead of a normal-sized button. Action-cell forms opt back
-       out of all of that card styling here. */
-    .action-buttons form {
-        background-color: transparent;
-        padding: 0;
-        border-radius: 0;
-        box-shadow: none;
-        max-width: none;
-        margin: 0;
-    }
     .dispense-form,
     .receive-form,
     .add-medication-form,
@@ -380,24 +356,7 @@ CSS_STYLE = """
         box-shadow: 0 2px 4px rgba(0,0,0,0.15);
     }
     .action-buttons {
-        /* FIX (UX): this class is applied to the <td> containing Edit/Delete.
-           It previously had no layout rules of its own, so the edit <a> and
-           the delete <form style="display:inline;"> sat flush against each
-           other with their buttons' margin/padding forced to 0 below —
-           making accidental delete clicks on a misaimed edit click likely,
-           especially on touch. Flex + gap gives consistent, deliberate
-           spacing regardless of markup (a/form/span mix). */
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
-    }
-    .action-buttons a,
-    .action-buttons form {
-        display: inline-flex;
-    }
-    .action-buttons button {
-        padding: 6px 14px;
+        padding: 6px 10px;
         border-radius: 4px;
         font-size: 13px;
         font-weight: 600;
@@ -413,6 +372,8 @@ CSS_STYLE = """
     .action-buttons .delete-btn {
         background-color: #dc3545;
         color: #fff;
+        margin: 0;
+        padding: 0;
     }
     .action-buttons .delete-btn:hover {
         background-color: #c82333;
@@ -433,16 +394,14 @@ CSS_STYLE = """
         background-color: #218838;
     }
     form button.delete-btn {
-        /* FIX (UX): no longer zeroes out margin/padding — that was the
-           direct cause of the delete button having no spacing buffer
-           around it. Sizing now comes from .action-buttons button above;
-           this rule only keeps delete's distinct red color/shadow. */
         background-color: #dc3545 !important;
         color: #fff !important;
+        padding: 0 !important;
         font-size: 13px !important;
-        border-radius: 4px !important;
+        border-radius: 2px !important;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
         transition: all 0.2s ease !important;
+        margin: 0 !important;
     }
     form button.delete-btn:hover {
         background-color: #c82333 !important;
@@ -1298,7 +1257,7 @@ EDIT_MED_TEMPLATE = CSS_STYLE + """
     <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
 <h2>Edit {{ med_data.name if med_data else '' }}</h2>
-<form method="POST" action="{{ url_for('edit_medication', med_name=med_name) }}" class="edit-medication-form">
+<form method="POST" action="{{ url_for('edit_medication') }}" class="edit-medication-form">
     <div class="common-section">
         <div>
             <label>Medication Name:</label>
@@ -1391,7 +1350,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>${{ "%.2f"|format(med.price) }}</td>
             <td class="action-buttons">
                 {% if is_admin %}
-                <a href="{{ url_for('edit_medication', med_name=med.name|urlencode) }}"><button class="edit-btn">Edit</button></a>
+                <a href="{{ url_for('edit_medication', med_name=med.name) }}"><button class="edit-btn">Edit</button></a>
                 <form class="delete-btn" method="POST" action="{{ url_for('delete_medication') }}" style="display: inline;">
                     <input type="hidden" name="med_name" value="{{ med.name }}">
                     <button type="submit" class="delete-btn" onclick="return confirm('Are you sure you want to delete {{ med.name }}?');">Delete</button>
@@ -1518,7 +1477,6 @@ AUDIT_TEMPLATE = CSS_STYLE + """
             <label>View:</label>
             <select name="view">
                 <option value="changes" {% if view == 'changes' %}selected{% endif %}>Edits &amp; Deletes</option>
-                <option value="warnings" {% if view == 'warnings' %}selected{% endif %}>Business Warnings (Not Found / Insufficient Stock)</option>
                 <option value="errors" {% if view == 'errors' %}selected{% endif %}>Application Errors</option>
             </select>
         </div>
@@ -1568,35 +1526,6 @@ AUDIT_TEMPLATE = CSS_STYLE + """
         </tr>
     {% else %}
         <tr><td colspan="7">No edit or delete records found.</td></tr>
-    {% endfor %}
-    </tbody>
-</table>
-{% elif view == 'warnings' %}
-<h2>Business Warnings ({{ entries|length }})</h2>
-<p>Handled conditions that are not bugs — a medication wasn't found, stock was insufficient, or a transaction no longer exists. These don't crash the app, but are worth reviewing.</p>
-<table>
-    <thead>
-        <tr>
-            <th>Timestamp</th>
-            <th>Type</th>
-            <th>Message</th>
-            <th>User</th>
-            <th>Path</th>
-            <th>Details</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for e in entries %}
-        <tr class="close-to-expire">
-            <td>{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-            <td>{{ e.warning_type }}</td>
-            <td>{{ e.message }}</td>
-            <td>{{ e.user }}</td>
-            <td>{{ e.path }}</td>
-            <td><pre style="white-space: pre-wrap; margin: 0; font-size: 12px;">{{ e.context }}</pre></td>
-        </tr>
-    {% else %}
-        <tr><td colspan="6">No business warnings found.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -1897,21 +1826,8 @@ def dispense():
                             med = medications.find_one({'name': med_name})
                             if not med:
                                 error_msgs.append(f'Medication "{med_name}" not found.')
-                                write_app_warning(
-                                    'medication_not_found',
-                                    f'Medication "{med_name}" not found during dispense.',
-                                    {'med_name': med_name, 'requested_quantity': quantity,
-                                     'patient': patient, 'transaction_id': tx_id}
-                                )
                             elif med.get('balance', 0) < quantity:
                                 error_msgs.append(f'Insufficient stock for "{med_name}".')
-                                write_app_warning(
-                                    'insufficient_stock',
-                                    f'Insufficient stock for "{med_name}" during dispense.',
-                                    {'med_name': med_name, 'requested_quantity': quantity,
-                                     'available_quantity': med.get('balance', 0),
-                                     'patient': patient, 'transaction_id': tx_id}
-                                )
                             else:
                                 medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
                                 transactions.insert_one({
@@ -2115,9 +2031,9 @@ def add_medication():
         ), 500
 
 
-@app.route('/edit-medication/<med_name>', methods=['GET', 'POST'])
+@app.route('/edit-medication', methods=['GET', 'POST'])
 @login_required
-def edit_medication(med_name):
+def edit_medication():
     if session['user'].get('role') != 'admin':
         flash('Access denied. Only admins can edit medications.')
         return redirect('/reports')
@@ -2127,15 +2043,32 @@ def edit_medication(med_name):
         medications = db['medications']
         message = None
 
-        med_name = requests.utils.unquote(med_name)
+        # FIX (Bug): med_name used to be a URL path segment
+        # (/edit-medication/<med_name>). Path segments containing spaces,
+        # commas, etc. require percent-encoding, and different hosting
+        # platforms decode that path differently before Werkzeug's router
+        # ever sees it — this worked on Render (which passes the raw request
+        # straight through to gunicorn/Werkzeug) but broke on Vercel (whose
+        # Python runtime sits a proxy/adapter in front that normalizes the
+        # path inconsistently, leaving a stray layer of %-encoding no matter
+        # how the link was built). Query string values and form POST bodies
+        # don't go through that same path-segment handling, so they decode
+        # identically everywhere. GET now reads med_name from ?med_name=...,
+        # POST reads it from the form body (already used a hidden/readonly
+        # input for this, so no template change needed there).
+        if request.method == 'POST':
+            med_name = request.form.get('med_name')
+        else:
+            med_name = request.args.get('med_name')
+
+        if not med_name:
+            message = 'No medication specified.'
+            return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                                          message=message, med_data=None, med_name=None)
+
         med = medications.find_one({'name': med_name})
         if not med:
             message = f'Medication "{med_name}" not found.'
-            write_app_warning(
-                'medication_not_found',
-                f'Medication "{med_name}" not found when attempting to edit.',
-                {'med_name': med_name}
-            )
             return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
                                           message=message, med_data=None, med_name=med_name)
 
@@ -2164,8 +2097,13 @@ def edit_medication(med_name):
         return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
                                       message=message, med_data=med_data, med_name=med_name)
     except ServerSelectionTimeoutError:
+        # FIX: med_name may not be assigned yet if get_mongo_client() itself
+        # raised this before reaching that line — read it defensively here
+        # rather than risk an UnboundLocalError masking the real DB error.
+        fallback_med_name = (request.form.get('med_name') if request.method == 'POST'
+                             else request.args.get('med_name'))
         return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
-                                      message="Database connection failed.", med_data=None, med_name=med_name), 500
+                                      message="Database connection failed.", med_data=None, med_name=fallback_med_name), 500
 
 
 @app.route('/delete-medication', methods=['POST'])
@@ -2185,11 +2123,6 @@ def delete_medication():
         med = medications.find_one({'name': med_name})
         if not med:
             session['message'] = f'Medication "{med_name}" not found.'
-            write_app_warning(
-                'medication_not_found',
-                f'Medication "{med_name}" not found when attempting to delete.',
-                {'med_name': med_name}
-            )
             return redirect('/reports')
         result = medications.delete_one({'name': med_name})
         if result.deleted_count > 0:
@@ -2491,20 +2424,6 @@ def audit_log():
             entries = list(
                 db['error_logs'].find(query).sort('timestamp', -1).limit(500)
             )
-        elif view == 'warnings':
-            query = {}
-            if date_query:
-                query['timestamp'] = date_query
-            if search:
-                query['$or'] = [
-                    {'warning_type': {'$regex': search, '$options': 'i'}},
-                    {'message':      {'$regex': search, '$options': 'i'}},
-                    {'user':         {'$regex': search, '$options': 'i'}},
-                    {'path':         {'$regex': search, '$options': 'i'}},
-                ]
-            entries = list(
-                db['app_warnings'].find(query).sort('timestamp', -1).limit(500)
-            )
         else:
             view = 'changes'  # normalize any unexpected value
             query = {}
@@ -2540,24 +2459,6 @@ def audit_log():
         ), 500
 
 
-# NEW (Diagnostic): deliberately raises an unhandled exception so the error
-# logging pipeline can be verified end-to-end (handler -> file log -> Mongo
-# write -> /audit "Application Errors" view). Admin-only. Visit /audit
-# afterward to confirm the entry appears; check the server's /tmp/errors.log
-# for the same event. Safe to leave in place — it does nothing unless an
-# admin deliberately visits it.
-@app.route('/test-error-logging', methods=['GET'])
-@login_required
-def test_error_logging():
-    if session['user'].get('role') != 'admin':
-        flash('Access denied.', 'error')
-        return redirect('/reports')
-    raise RuntimeError(
-        "Deliberate test exception from /test-error-logging — "
-        "if you see this entry in /audit, error logging is working correctly."
-    )
-
-
 @app.route('/delete-dispense', methods=['POST'])
 @login_required
 def delete_dispense():
@@ -2579,11 +2480,6 @@ def delete_dispense():
         tx_rows = list(transactions.find({'transaction_id': tx_id, 'type': 'dispense'}))
         if not tx_rows:
             flash('Transaction not found.', 'error')
-            write_app_warning(
-                'transaction_not_found',
-                f'Dispense transaction "{tx_id}" not found when attempting to delete.',
-                {'transaction_id': tx_id}
-            )
             return redirect(url_for('dispense'))
 
         for row in tx_rows:
@@ -2655,11 +2551,6 @@ def edit_receive(receive_id):
                 old_rx = transactions.find_one({'_id': oid})
                 if not old_rx or old_rx['type'] != 'receive':
                     message = "Transaction not found."
-                    write_app_warning(
-                        'transaction_not_found',
-                        f'Receive transaction "{receive_id}" not found when attempting to edit.',
-                        {'receive_id': receive_id}
-                    )
                 else:
                     medications.update_one({'name': old_rx['med_name']},
                                            {'$inc': {'balance': -old_rx['quantity']}})
@@ -2733,11 +2624,6 @@ def delete_receive():
         rx = transactions.find_one({'_id': oid, 'type': 'receive'})
         if not rx:
             flash('Transaction not found.', 'error')
-            write_app_warning(
-                'transaction_not_found',
-                f'Receive transaction "{receive_id}" not found when attempting to delete.',
-                {'receive_id': receive_id}
-            )
             return redirect(url_for('receive'))
 
         medications.update_one({'name': rx['med_name']}, {'$inc': {'balance': -rx['quantity']}})
@@ -2882,19 +2768,10 @@ def get_medication_options():
     return jsonify(MEDICATION_OPTIONS)
 
 
-# FIX (Bug): init_audit() was only called inside `if __name__ == '__main__':`,
-# which never executes under gunicorn/uwsgi (they import the module and grab
-# `app` directly — they don't run app.py as a script). That meant the audit
-# decorators were never attached to dispense/receive/medication routes in
-# production, so nothing ever got written to audit_log despite edits/deletes
-# happening. Moving this to module level — same pattern as init_db_collections()
-# above — makes it run under `python app.py`, `flask run`, and gunicorn alike.
-try:
-    from audit_logger import init_audit
-    init_audit(app)
-except Exception as e:
-    app.logger.error(f"Failed to load audit logger: {e}")
-
-
 if __name__ == '__main__':
+    try:
+        from audit_logger import init_audit
+        init_audit(app)
+    except Exception as e:
+        app.logger.error(f"Failed to load audit logger: {e}")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

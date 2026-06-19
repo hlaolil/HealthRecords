@@ -186,7 +186,14 @@ def audit_receive_edit(original_func):
 def audit_medication_edit(original_func):
     @wraps(original_func)
     def wrapper(*args, **kwargs):
-        med_name = kwargs.get('med_name') or (args[0] if args else None)
+        # FIX: med_name used to arrive as a URL path converter, so Flask
+        # passed it as a kwarg to the view function. edit_medication() no
+        # longer takes any arguments — med_name is read inside it from
+        # request.form (POST) / request.args (GET) instead, as part of the
+        # fix for path-segment encoding being handled inconsistently across
+        # hosting platforms (worked on Render, broke on Vercel). Read it the
+        # same way here so audit logging doesn't silently stop working.
+        med_name = request.form.get('med_name') if request.method == 'POST' else request.args.get('med_name')
         old_med = None
         if request.method == 'POST' and med_name:
             try:
