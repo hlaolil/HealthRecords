@@ -32,6 +32,27 @@ if not app.secret_key:
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
 
 # -----------------------------------------------------------------------
+# NEW: 30-minute inactivity session timeout.
+#
+# PERMANENT_SESSION_LIFETIME sets the ceiling for how long a "permanent"
+# session cookie is valid. We mark sessions permanent at login (see
+# login() below) and refresh the expiry on every request via the
+# before_request hook further down, so the 30 minutes counts from the
+# user's LAST activity, not from login time — true inactivity timeout,
+# not a fixed session length.
+# -----------------------------------------------------------------------
+SESSION_TIMEOUT_MINUTES = 30
+app.permanent_session_lifetime = timedelta(minutes=SESSION_TIMEOUT_MINUTES)
+
+# NEW: passwords expire after this many days; checked at login time.
+PASSWORD_MAX_AGE_DAYS = 365
+
+# NEW: accounts expire after this many days (~2 years) and must be
+# re-registered by an admin; checked at login time, before the password
+# expiry check.
+ACCOUNT_MAX_AGE_DAYS = 730
+
+# -----------------------------------------------------------------------
 # FIX (Performance): MongoDB module-level client with connection pooling.
 # Previously a new MongoClient was created and closed on every request,
 # which is slow and defeats PyMongo's built-in connection pool.
@@ -193,6 +214,46 @@ def login_required(f):
             return redirect('/login')
         return f(*args, **kwargs)
     return decorated_function
+
+
+# NEW: enforce the 30-minute inactivity timeout on every request, before
+# any route handler runs. This has to be a before_request hook rather than
+# logic inside login_required, because it needs to actively clear an expired
+# session (not just check membership) — otherwise a stale 'user' key would
+# still satisfy login_required's `if 'user' not in session` check even
+# though the user has been inactive well past the timeout.
+@app.before_request
+def enforce_session_timeout():
+    if 'user' not in session:
+        return  # not logged in, nothing to enforce
+
+    now = datetime.now(timezone.utc)
+    last_active_str = session.get('last_active')
+
+    if last_active_str:
+        try:
+            last_active = datetime.fromisoformat(last_active_str)
+        except ValueError:
+            last_active = None
+        if last_active and (now - last_active) > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
+            session.clear()
+            flash('You were logged out due to 30 minutes of inactivity. Please log in again.', 'error')
+            return redirect('/login')
+
+    # Still within the window (or this is the first request after login) —
+    # refresh the activity timestamp and make sure the cookie is marked
+    # permanent so permanent_session_lifetime actually applies to it.
+    session['last_active'] = now.isoformat()
+    session.permanent = True
+
+    # NEW: if this user's password has expired, block every route except
+    # the change-password page itself and logout — otherwise a user could
+    # just type /dispense into the address bar and skip the requirement
+    # entirely, since they're still a normally-authenticated session.
+    if session.get('must_change_password') and request.endpoint not in (
+        'change_expired_password', 'logout', 'static'
+    ):
+        return redirect('/change-expired-password')
 
 # FIX (Security/XSS): escape user-controlled values before inserting into nav HTML.
 # Previously the user's display name came straight from the DB and was rendered
@@ -1646,6 +1707,28 @@ LOGIN_TEMPLATE = CSS_STYLE + """
 </div>
 """
 
+# NEW: forced password-change page, shown when a user's password is older
+# than PASSWORD_MAX_AGE_DAYS (or has no recorded set-date at all). The user
+# is already authenticated at this point (they just entered the correct
+# current password to get here) but is blocked from everything else in the
+# app until they set a new one — enforced via before_request below.
+CHANGE_EXPIRED_PASSWORD_TEMPLATE = CSS_STYLE + """
+<h1>Password Expired</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
+<div class="login-form">
+    <h2>Set a New Password</h2>
+    <p>Your password is over a year old and must be changed before you can continue.</p>
+    {% if error %}<p class="message error">{{ error }}</p>{% endif %}
+    <form method="POST">
+        <label>Current Password:</label><input type="password" name="current_password" required><br>
+        <label>New Password:</label><input type="password" name="new_password" required><br>
+        <label>Confirm New Password:</label><input type="password" name="confirm_password" required><br>
+        <input type="submit" value="Change Password">
+    </form>
+    <p><a href="/logout">Log out instead</a></p>
+</div>
+"""
+
 REGISTER_PASSWORD_TEMPLATE = CSS_STYLE + """
 <h1>Pharmacy App Registration</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
@@ -1707,11 +1790,68 @@ def login():
             users = db['users']
             user_doc = users.find_one({'username': username})
             if user_doc and check_password_hash(user_doc['password_hash'], password):
+                # NEW: account expiry check (2 years). This runs before the
+                # password expiry check and before any session is created —
+                # an expired account is blocked from logging in entirely,
+                # not given a session that then gets redirected somewhere.
+                # Same grandfathering approach as password_set_at: existing
+                # users without a recorded account_created_at get it backfilled
+                # to now rather than being retroactively expired on day one.
+                account_created_at = user_doc.get('account_created_at')
+                if not account_created_at:
+                    account_created_at = datetime.now(timezone.utc)
+                    users.update_one(
+                        {'username': username},
+                        {'$set': {'account_created_at': account_created_at}}
+                    )
+                    account_expired = False
+                else:
+                    if account_created_at.tzinfo is None:
+                        account_created_at = account_created_at.replace(tzinfo=timezone.utc)
+                    account_age = datetime.now(timezone.utc) - account_created_at
+                    account_expired = account_age > timedelta(days=ACCOUNT_MAX_AGE_DAYS)
+
+                if account_expired:
+                    session['error'] = (
+                        'Your account has expired and must be re-registered by an admin. '
+                        'Please contact your administrator.'
+                    )
+                    return redirect('/login')
+
+                # NEW: password expiry check. Existing users created before
+                # this feature won't have a password_set_at field. Rather
+                # than mass-expiring every existing account the moment this
+                # ships, grandfather them in: backfill password_set_at to
+                # now on this first login, so their year starts counting
+                # from today. Only accounts with a recorded date older than
+                # PASSWORD_MAX_AGE_DAYS are treated as expired going forward.
+                password_set_at = user_doc.get('password_set_at')
+                if not password_set_at:
+                    password_set_at = datetime.now(timezone.utc)
+                    users.update_one(
+                        {'username': username},
+                        {'$set': {'password_set_at': password_set_at}}
+                    )
+                    password_expired = False
+                else:
+                    if password_set_at.tzinfo is None:
+                        password_set_at = password_set_at.replace(tzinfo=timezone.utc)
+                    age = datetime.now(timezone.utc) - password_set_at
+                    password_expired = age > timedelta(days=PASSWORD_MAX_AGE_DAYS)
+
                 session['user'] = {
                     'login': username,
                     'name': user_doc.get('name', username),
                     'role': user_doc.get('role', 'employee')
                 }
+                session.permanent = True
+                session['last_active'] = datetime.now(timezone.utc).isoformat()
+
+                if password_expired:
+                    session['must_change_password'] = True
+                    flash('Your password has expired and must be changed before continuing.', 'error')
+                    return redirect('/change-expired-password')
+
                 return redirect('/dispense')
             else:
                 session['error'] = 'Invalid username or password.'
@@ -1721,6 +1861,58 @@ def login():
 
     error = session.pop('error', None)
     return render_template_string(LOGIN_TEMPLATE, error=error)
+
+
+@app.route('/change-expired-password', methods=['GET', 'POST'])
+@login_required
+def change_expired_password():
+    # If a user reaches this page without actually having an expired
+    # password (e.g. they bookmarked it, or navigated back after already
+    # changing it), just send them on to the app rather than show a
+    # confusing forced form with nothing to enforce.
+    if not session.get('must_change_password'):
+        return redirect('/dispense')
+
+    error = None
+    if request.method == 'POST':
+        current_password = request.form.get('current_password')
+        new_password = request.form.get('new_password')
+        confirm_password = request.form.get('confirm_password')
+
+        if not current_password or not new_password or not confirm_password:
+            error = 'All fields are required.'
+        elif new_password != confirm_password:
+            error = 'New password and confirmation do not match.'
+        elif len(new_password) < 8:
+            error = 'New password must be at least 8 characters.'
+        elif new_password == current_password:
+            error = 'New password must be different from your current password.'
+        else:
+            try:
+                client = get_mongo_client()
+                db = client['pharmacy_db']
+                users = db['users']
+                username = session['user']['login']
+                user_doc = users.find_one({'username': username})
+
+                if not user_doc or not check_password_hash(user_doc['password_hash'], current_password):
+                    error = 'Current password is incorrect.'
+                else:
+                    users.update_one(
+                        {'username': username},
+                        {'$set': {
+                            'password_hash': generate_password_hash(new_password),
+                            'password_set_at': datetime.now(timezone.utc),
+                        }}
+                    )
+                    session.pop('must_change_password', None)
+                    flash('Password changed successfully. Please log in again with your new password.', 'success')
+                    session.clear()
+                    return redirect('/login')
+            except ServerSelectionTimeoutError:
+                error = 'Database connection failed. Please try again later.'
+
+    return render_template_string(CHANGE_EXPIRED_PASSWORD_TEMPLATE, error=error)
 
 
 @app.route('/register', methods=['GET', 'POST'])
@@ -1751,15 +1943,72 @@ def register():
                 client = get_mongo_client()
                 db = client['pharmacy_db']
                 users = db['users']
-                if users.find_one({'username': username}):
-                    session['error'] = 'Username already exists.'
-                    return redirect('/register')
+                existing = users.find_one({'username': username})
+
+                if existing:
+                    # NEW: allow re-registration ONLY if this existing
+                    # account has actually expired (2+ years old). This is
+                    # the admin-driven re-registration flow for expired
+                    # accounts — re-registering replaces the password and
+                    # resets both the account and password clocks. Active
+                    # accounts are still protected from being silently
+                    # overwritten by reusing their username.
+                    created_at = existing.get('account_created_at')
+                    is_expired = False
+                    if created_at:
+                        if created_at.tzinfo is None:
+                            created_at = created_at.replace(tzinfo=timezone.utc)
+                        is_expired = (datetime.now(timezone.utc) - created_at) > timedelta(days=ACCOUNT_MAX_AGE_DAYS)
+
+                    if not is_expired:
+                        session['error'] = 'Username already exists.'
+                        return redirect('/register')
+
+                    now = datetime.now(timezone.utc)
+                    users.update_one(
+                        {'username': username},
+                        {'$set': {
+                            'password_hash': generate_password_hash(password),
+                            'name': name,
+                            'role': role,
+                            'account_created_at': now,
+                            'password_set_at': now,
+                        }}
+                    )
+                    # NEW: log re-registration of an expired account. register()
+                    # has no @login_required and no session['user'] to attribute
+                    # this to (it's gated by the shared ADMIN_PASSWORD, not a
+                    # per-admin login), so this is written directly here rather
+                    # than via audit_logger.py's usual decorator pattern.
+                    db['audit_log'].insert_one({
+                        'audit_id': str(uuid4()),
+                        'timestamp': now,
+                        'action': 'UPDATE',
+                        'target_type': 'user_account',
+                        'target_id': username,
+                        'changes': {
+                            'reason': 'expired account re-registered',
+                            'old_account_created_at': str(created_at),
+                            'new_name': name,
+                            'new_role': role,
+                        },
+                        'user': 'admin (via /register admin password)',
+                        'ip': request.remote_addr,
+                        'user_agent': request.headers.get('User-Agent'),
+                    })
+                    session['message'] = f'Account "{username}" re-registered successfully! Please login.'
+                    session.pop('admin_access', None)
+                    return redirect('/login')
+
+                now = datetime.now(timezone.utc)
                 password_hash = generate_password_hash(password)
                 users.insert_one({
                     'username': username,
                     'password_hash': password_hash,
                     'name': name,
-                    'role': role
+                    'role': role,
+                    'account_created_at': now,
+                    'password_set_at': now,
                 })
                 session['message'] = 'Registration successful! Please login.'
                 session.pop('admin_access', None)
