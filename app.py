@@ -626,6 +626,54 @@ CSS_STYLE = """
         .filter-section { grid-template-columns: 1fr; }
     }
 </style>
+<script>
+// NEW: client-side inactivity auto-logout.
+//
+// The server already enforces a 30-minute inactivity timeout (see
+// enforce_session_timeout() / before_request in app.py), but that only
+// gets checked on the NEXT request the browser happens to make. If
+// someone leaves a form open and doesn't click anything for 30+ minutes,
+// nothing visibly happens until they finally submit — at which point
+// they're bounced to login and lose whatever they were typing.
+//
+// This timer runs entirely in the browser, independent of any server
+// request, and redirects to /login the moment 30 minutes of no mouse/
+// keyboard/touch activity has passed — so the redirect happens on its
+// own, before the user has invested time filling out a form that's
+// about to be thrown away.
+(function() {
+    // Skip entirely on the login page itself — nothing to time out.
+    if (window.location.pathname === '/login') return;
+
+    var TIMEOUT_MINUTES = 30;
+    var TIMEOUT_MS = TIMEOUT_MINUTES * 60 * 1000;
+    var timer = null;
+    var lastReset = 0;
+    var THROTTLE_MS = 1000; // ignore activity bursts within 1 second of each other
+
+    function goToLogin() {
+        window.location.href = '/login';
+    }
+
+    function resetTimer() {
+        var nowMs = Date.now();
+        if (nowMs - lastReset < THROTTLE_MS) return;
+        lastReset = nowMs;
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(goToLogin, TIMEOUT_MS);
+    }
+
+    // Any of these count as activity and push the timeout back out,
+    // matching how the server-side last_active timestamp is refreshed
+    // on every request.
+    ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart', 'click']
+        .forEach(function(evt) {
+            document.addEventListener(evt, resetTimer, { passive: true });
+        });
+
+    resetTimer();
+})();
+</script>
 """
 
 # FIX (Performance): medication options are now served from a single endpoint
