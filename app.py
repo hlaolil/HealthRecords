@@ -749,7 +749,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
         </div>
         <div>
             <label>Prescriber (Doctor):</label>
-            {% set prescribers = ['Dr. T. Khothatso', 'Locum', 'Malesoetsa Leohla', 'Mamosa Seetsa', 'Mamosaase Nqosa', 'Mapalo Mapesela', 'Mathuto Kutoane', 'Thapelo Mphole'] %}
+            {% set prescribers = ['Dr. T. Khothatso', 'Locum Doctor', 'Locum Nurse', 'Malesoetsa Leohla', 'Mamosa Seetsa', 'Mamosaase Nqosa', 'Mapalo Mapesela', 'Mathuto Kutoane', 'Thapelo Mphole'] %}
             <select name="prescriber" {% if not tx_data %}required{% endif %}>
                 <option value="">-- Select Doctor --</option>
                 {% for p in prescribers %}
@@ -759,7 +759,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
         </div>
         <div>
             <label>Dispenser (Issuer):</label>
-            {% set dispensers = ['Letlotlo Hlaoli', 'Locum', 'Malesoetsa Leohla', 'Mamosa Seetsa', 'Mamosaase Nqosa', 'Mapalo Mapesela', 'Mathuto Kutoane', 'Thapelo Mphole'] %}
+            {% set dispensers = ['Letlotlo Hlaoli', 'Locum Nurse', 'Malesoetsa Leohla', 'Mamosa Seetsa', 'Mamosaase Nqosa', 'Mapalo Mapesela', 'Mathuto Kutoane', 'Thapelo Mphole'] %}
             <select name="dispenser" {% if not tx_data %}required{% endif %}>
                 <option value="">-- Select Issuer --</option>
                 {% for d in dispensers %}
