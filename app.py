@@ -41,7 +41,7 @@ ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
 # user's LAST activity, not from login time — true inactivity timeout,
 # not a fixed session length.
 # -----------------------------------------------------------------------
-SESSION_TIMEOUT_MINUTES = 30
+SESSION_TIMEOUT_MINUTES = 60
 app.permanent_session_lifetime = timedelta(minutes=SESSION_TIMEOUT_MINUTES)
 
 # NEW: passwords expire after this many days; checked at login time.
