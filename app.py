@@ -2,8 +2,8 @@ import os
 import requests
 from flask import Flask, request, render_template_string, jsonify, redirect, url_for, session, flash, get_flashed_messages
 from functools import wraps
-from pymongo import MongoClient
-from pymongo.errors import ServerSelectionTimeoutError
+from pymongo import MongoClient, ReturnDocument
+from pymongo.errors import ServerSelectionTimeoutError, DuplicateKeyError
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from collections import defaultdict
@@ -93,6 +93,14 @@ def init_db_collections():
             db.create_collection('error_logs')
         if 'app_warnings' not in existing:
             db.create_collection('app_warnings')
+        # NEW (Stock Take): a stock take is a long-running session that stays
+        # open across days while the admin counts items whenever convenient.
+        # stock_takes holds the session header; stock_take_counts holds one
+        # document per counted line.
+        if 'stock_takes' not in existing:
+            db.create_collection('stock_takes')
+        if 'stock_take_counts' not in existing:
+            db.create_collection('stock_take_counts')
 
         # audit_log: /audit page sorts by timestamp desc and filters by
         # action/target_type/target_id/user via $or regex, plus an exact
@@ -121,6 +129,16 @@ def init_db_collections():
         db['transactions'].create_index([('type', 1), ('timestamp', -1)])
         db['transactions'].create_index([('med_name', 1)])
         db['medications'].create_index([('name', 1)], unique=True)
+
+        # NEW (Stock Take): the stock-take page lists open sessions first and
+        # sorts by start time; the audit view sorts counts by timestamp desc
+        # and filters by med_name/user/discrepancy_type.
+        db['stock_takes'].create_index([('status', 1), ('started_at', -1)])
+        db['stock_takes'].create_index([('reference', 1)], unique=True)
+        db['stock_take_counts'].create_index([('timestamp', -1)])
+        db['stock_take_counts'].create_index([('stock_take_id', 1), ('timestamp', -1)])
+        db['stock_take_counts'].create_index([('med_name', 1)])
+        db['stock_take_counts'].create_index([('discrepancy_type', 1)])
 
         app.logger.info("DB collections and indexes initialized (audit_log, error_logs, app_warnings, transactions, medications)")
         print("✅ DB collections and indexes initialized (audit_log, error_logs, app_warnings, transactions, medications)")
@@ -267,12 +285,15 @@ def get_nav_links():
         name = escape(user.get('name', user.get('login', 'User')))
         add_med_link = '<a href="/add-medication">Add Medication</a> | ' if is_admin else ''
         audit_link = '<a href="/audit">Audit Log</a> | ' if is_admin else ''
+        # NEW (Stock Take): admin-only physical count page.
+        stock_take_link = '<a href="/stock-take">Stock Take</a> | ' if is_admin else ''
         return f"""
         <p class="nav-links"><strong>Navigate:</strong>
             <a href="/dispense">Dispensing</a> |
             <a href="/receive">Receiving</a> |
             {add_med_link}
             <a href="/reports">Reports</a> |
+            {stock_take_link}
             {audit_link}
             <span>Welcome, {name}! <a href="/logout">Logout</a></span>
         </p>
@@ -1526,18 +1547,40 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     </div>
 </form>
 <h2>Inventory Report for {{ start_date }} to {{ end_date }}</h2>
+{% if is_admin %}
+<p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed + Adjustment = Current</strong>.
+Adjustment is the net of any physical-count corrections made during the period —
+see Audit &rarr; Stock Take Discrepancies for the detail behind it.
+AMC is average monthly consumption over the selected period.</p>
+{% else %}
+<p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed = Current</strong>.
+AMC is average monthly consumption over the selected period.</p>
+{% endif %}
 <table>
     <thead>
-        <tr><th>Medication</th><th>Beginning Balance</th><th>Dispensed</th><th>Received</th><th>Current Balance</th><th>Amount to Order</th></tr>
+        {# NEW: the Adjustment column is admin-only. Non-admins see a row that
+           still adds up, because dispensed_effective has the adjustment folded
+           into it — see the comment in the reports() route for why that is the
+           honest place to put it. #}
+        <tr><th>Medication</th><th>Beginning Balance</th><th>Received</th><th>Dispensed</th>
+            {% if is_admin %}<th>Adjustment</th>{% endif %}
+            <th>Current Balance</th><th>AMC</th><th>Amount to Order</th></tr>
     </thead>
     <tbody>
     {% for row in report_data %}
         <tr>
-            <td>{{ row.med_name }}</td><td>{{ row.beginning_balance }}</td><td>{{ row.dispensed }}</td>
-            <td>{{ row.received }}</td><td>{{ row.current_balance }}</td><td>{{ row.amount_to_order }}</td>
+            <td>{{ row.med_name }}</td><td>{{ row.beginning_balance }}</td>
+            <td>{{ row.received }}</td>
+            {% if is_admin %}
+            <td>{{ row.dispensed }}</td>
+            <td>{% if row.adjustment %}{{ '%+d'|format(row.adjustment) }}{% else %}0{% endif %}</td>
+            {% else %}
+            <td>{{ row.dispensed_effective }}</td>
+            {% endif %}
+            <td>{{ row.current_balance }}</td><td>{{ row.amc }}</td><td>{{ row.amount_to_order }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="6">No data for this period.</td></tr>
+        <tr><td colspan="{{ 8 if is_admin else 7 }}">No data for this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -1610,6 +1653,136 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 {% endif %}
 """
 
+# NEW (Stock Take): admin-only physical count. Two views share one template —
+# the session list (no active session selected) and the counting sheet.
+#
+# Counting is BLIND: the entry form deliberately never shows the system
+# balance for the item being counted. The system figure and the variance are
+# revealed only AFTER the count has been committed, in the counted-lines table
+# below the form. This is why the form and the table are separate — an admin
+# cannot see what they are "supposed" to find before they write down what they
+# actually found.
+STOCK_TAKE_TEMPLATE = CSS_STYLE + """
+<h1>Stock Take</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
+{{ nav_links|safe }}
+{% if message %}
+    <p class="message {% if 'success' in message|lower or 'recorded' in message|lower or 'closed' in message|lower or 'opened' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+
+{% if not active %}
+<h2>Start a Stock Take</h2>
+<p>A stock take stays open until you close it. Count as many or as few items as
+you like in one sitting, come back later, and carry on where you left off.
+Each item's balance is corrected the moment you record its count.</p>
+<form method="POST" action="{{ url_for('stock_take') }}">
+    <input type="hidden" name="action" value="open">
+    <label>Description (optional):</label>
+    <input name="note" type="text" placeholder="e.g. Quarterly count, August 2026">
+    <input type="submit" value="Open New Stock Take">
+</form>
+
+<h2>Stock Takes ({{ sessions|length }})</h2>
+<table>
+    <thead>
+        <tr><th>Reference</th><th>Description</th><th>Status</th><th>Opened</th><th>Opened By</th>
+            <th>Items Counted</th><th>Discrepancies</th><th>Closed</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+    {% for s in sessions %}
+        <tr class="{% if s.status == 'open' %}close-to-expire{% else %}normal{% endif %}">
+            <td>{{ s.reference }}</td>
+            <td>{{ s.note or '-' }}</td>
+            <td>{{ s.status|upper }}</td>
+            <td>{{ s.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ s.started_by }}</td>
+            <td>{{ s.counted_lines }}</td>
+            <td>{{ s.discrepancy_lines }}</td>
+            <td>{% if s.closed_at %}{{ s.closed_at.strftime('%Y-%m-%d %H:%M') }}{% else %}-{% endif %}</td>
+            <td class="action-buttons">
+                <a href="{{ url_for('stock_take', stock_take_id=s._id|string) }}"><button class="edit-btn">{% if s.status == 'open' %}Continue{% else %}View{% endif %}</button></a>
+            </td>
+        </tr>
+    {% else %}
+        <tr><td colspan="9">No stock takes yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+{% else %}
+<h2>{{ active.reference }}{% if active.note %} — {{ active.note }}{% endif %}</h2>
+<p><strong>Status:</strong> {{ active.status|upper }} &nbsp;|&nbsp;
+   <strong>Opened:</strong> {{ active.started_at.strftime('%Y-%m-%d %H:%M') }} by {{ active.started_by }}
+   {% if active.closed_at %}&nbsp;|&nbsp; <strong>Closed:</strong> {{ active.closed_at.strftime('%Y-%m-%d %H:%M') }} by {{ active.closed_by }}{% endif %}
+</p>
+<p><a href="{{ url_for('stock_take') }}">&larr; All stock takes</a></p>
+
+{% if active.status == 'open' %}
+<h3>Record a Physical Count</h3>
+<p>Enter what you actually counted on the shelf. The system figure is hidden
+until after you save, so the count is not influenced by what the app expects.</p>
+<form method="POST" action="{{ url_for('stock_take') }}" class="dispense-form">
+    <input type="hidden" name="action" value="count">
+    <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
+    <div class="common-section">
+        <div>
+            <label>Medication:</label>
+            <input name="med_name" id="st_med_name" list="st_med_suggestions" required autocomplete="off">
+            <datalist id="st_med_suggestions">
+            {% for m in med_names %}<option value="{{ m }}"></option>{% endfor %}
+            </datalist>
+        </div>
+        <div>
+            <label>Physical Count:</label>
+            <input name="counted" type="number" min="0" required>
+        </div>
+        <div>
+            <label>Note (optional):</label>
+            <input name="note" type="text" placeholder="Shelf, remarks...">
+        </div>
+    </div>
+    <div class="form-buttons">
+        <input type="submit" value="Record Count">
+    </div>
+</form>
+
+<form method="POST" action="{{ url_for('stock_take') }}" style="margin-top:20px;">
+    <input type="hidden" name="action" value="close">
+    <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
+    <button type="submit" class="delete-btn" onclick="return confirm('Close {{ active.reference }}? No further counts can be added to it.');">Close This Stock Take</button>
+</form>
+{% endif %}
+
+<h3>Counted Items ({{ counts|length }})</h3>
+<p>Counted: {{ counts|length }} &nbsp;|&nbsp; Agreed: {{ agreed_count }} &nbsp;|&nbsp;
+   Issued not recorded: {{ issued_not_recorded }} &nbsp;|&nbsp;
+   Recorded not issued: {{ recorded_not_issued }}</p>
+<table>
+    <thead>
+        <tr><th>Counted At</th><th>Medication</th><th>System Balance</th><th>Physical Count</th>
+            <th>Variance</th><th>Discrepancy Type</th><th>Counted By</th><th>Note</th></tr>
+    </thead>
+    <tbody>
+    {% for c in counts %}
+        <tr class="{% if c.variance == 0 %}normal{% elif c.variance < 0 %}expired{% else %}close-to-expire{% endif %}">
+            <td>{{ c.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ c.med_name }}</td>
+            <td>{{ c.system_balance }}</td>
+            <td>{{ c.counted }}</td>
+            <td>{{ '%+d'|format(c.variance) }}</td>
+            <td>{{ c.discrepancy_label }}</td>
+            <td>{{ c.counted_by }}</td>
+            <td>{{ c.note or '-' }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="8">Nothing counted yet in this stock take.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+"""
+
+
 # NEW: admin-only audit trail viewer. Surfaces every CREATE/UPDATE/DELETE
 # recorded by audit_logger.py (audit_log collection) and every unhandled
 # exception recorded by error_logger.py (error_logs collection) in one place.
@@ -1627,6 +1800,7 @@ AUDIT_TEMPLATE = CSS_STYLE + """
             <label>View:</label>
             <select name="view">
                 <option value="changes" {% if view == 'changes' %}selected{% endif %}>Edits &amp; Deletes</option>
+                <option value="stocktake" {% if view == 'stocktake' %}selected{% endif %}>Stock Take Discrepancies</option>
                 <option value="warnings" {% if view == 'warnings' %}selected{% endif %}>Business Warnings (Not Found / Insufficient Stock)</option>
                 <option value="errors" {% if view == 'errors' %}selected{% endif %}>Application Errors</option>
             </select>
@@ -1677,6 +1851,50 @@ AUDIT_TEMPLATE = CSS_STYLE + """
         </tr>
     {% else %}
         <tr><td colspan="7">No edit or delete records found.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% elif view == 'stocktake' %}
+<h2>Stock Take Discrepancies ({{ entries|length }})</h2>
+<p>Every physical count recorded against a stock take, and the correction it
+produced. A discrepancy is always one of two things: stock that left without
+being recorded, or an issue that was recorded but never actually left the
+shelf. Each non-zero variance was posted to the transaction ledger as a signed
+<em>adjustment</em>, so the inventory report reconciles:
+Beginning + Received &minus; Dispensed &plusmn; Adjustment = Current.</p>
+<p>
+    <a href="{{ url_for('audit_log', view='stocktake', start_date=start_date, end_date=end_date, search=search) }}">All counts</a> |
+    <a href="{{ url_for('audit_log', view='stocktake', start_date=start_date, end_date=end_date, search=search, only='discrepancies') }}">Discrepancies only</a>
+</p>
+<table>
+    <thead>
+        <tr>
+            <th>Timestamp</th>
+            <th>Stock Take</th>
+            <th>Medication</th>
+            <th>System</th>
+            <th>Counted</th>
+            <th>Variance</th>
+            <th>Discrepancy Type</th>
+            <th>Counted By</th>
+            <th>Note</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for e in entries %}
+        <tr class="{% if e.variance == 0 %}normal{% elif e.variance < 0 %}expired{% else %}close-to-expire{% endif %}">
+            <td>{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            <td>{{ e.reference }}</td>
+            <td>{{ e.med_name }}</td>
+            <td>{{ e.system_balance }}</td>
+            <td>{{ e.counted }}</td>
+            <td>{{ '%+d'|format(e.variance) }}</td>
+            <td>{{ e.discrepancy_label }}</td>
+            <td>{{ e.counted_by }}</td>
+            <td>{{ e.note or '-' }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="9">No stock take counts found.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -2604,16 +2822,22 @@ def reports():
                             med_name = med['name']
                             current_balance = med.get('balance', 0)
                             try:
+                                # NEW (Stock Take): 'adjustment' transactions are
+                                # signed and must be unwound too, or a count taken
+                                # after the report date would distort the balance
+                                # reported as at that date.
                                 period_pipeline = [
                                     {'$match': {'med_name': med_name, 'timestamp': {'$gt': end_dt, '$lte': now_dt}}},
                                     {'$group': {'_id': None,
                                                 'dispensed': {'$sum': {'$cond': [{'$eq': ['$type','dispense']}, '$quantity', 0]}},
-                                                'received':  {'$sum': {'$cond': [{'$eq': ['$type','receive']},  '$quantity', 0]}}}}
+                                                'received':  {'$sum': {'$cond': [{'$eq': ['$type','receive']},  '$quantity', 0]}},
+                                                'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type','adjustment']}, '$quantity', 0]}}}}
                                 ]
                                 pr = list(transactions.aggregate(period_pipeline))
                                 dispensed_after = pr[0].get('dispensed', 0) if pr else 0
                                 received_after  = pr[0].get('received',  0) if pr else 0
-                                balance_at_date = max(0, current_balance - received_after + dispensed_after)
+                                adjusted_after  = pr[0].get('adjusted',  0) if pr else 0
+                                balance_at_date = max(0, current_balance - received_after + dispensed_after - adjusted_after)
                             except Exception as qe:
                                 app.logger.error(f"Query failed for med {med_name}: {qe}")
                                 balance_at_date = current_balance
@@ -2671,30 +2895,60 @@ def reports():
                                     {'$match': {'med_name': med_name, 'timestamp': {'$gte': start_dt, '$lte': end_dt}}},
                                     {'$group': {'_id': None,
                                                 'dispensed': {'$sum': {'$cond': [{'$eq': ['$type','dispense']}, '$quantity', 0]}},
-                                                'received':  {'$sum': {'$cond': [{'$eq': ['$type','receive']},  '$quantity', 0]}}}}
+                                                'received':  {'$sum': {'$cond': [{'$eq': ['$type','receive']},  '$quantity', 0]}},
+                                                'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type','adjustment']}, '$quantity', 0]}}}}
                                 ]
                                 pr = list(transactions.aggregate(pp))
                                 dispensed = pr[0].get('dispensed', 0) if pr else 0
                                 received  = pr[0].get('received',  0) if pr else 0
+                                # NEW (Stock Take): signed net of every physical-count
+                                # correction posted in the period. Unwinding it here is
+                                # what keeps the row internally consistent:
+                                #   Beginning + Received - Dispensed + Adjustment = Current
+                                adjustment        = pr[0].get('adjusted', 0) if pr else 0
                                 current_balance   = med.get('balance', 0)
-                                beginning_balance = max(0, current_balance - received + dispensed)
+                                beginning_balance = max(0, current_balance - received + dispensed - adjustment)
                                 avg_daily         = dispensed / days_in_period
-                                avg_monthly       = avg_daily * 30
+                                # AMC (Average Monthly Consumption): consumption in the
+                                # period scaled to a 30-day month, so the figure stays
+                                # comparable whatever period length is selected.
+                                amc               = avg_daily * 30
                                 lead_time_stock   = avg_daily * 60
-                                amount_to_order   = max(0, avg_monthly - current_balance + lead_time_stock)
+                                amount_to_order   = max(0, amc - current_balance + lead_time_stock)
+
+                                def _tidy(v):
+                                    return int(v) if isinstance(v, float) and v.is_integer() else round(v, 2)
+
                                 report_data.append({
                                     'med_name': med_name,
                                     'beginning_balance': beginning_balance,
                                     'dispensed': dispensed, 'received': received,
+                                    'adjustment': adjustment,
+                                    # NEW: non-admins don't see the Adjustment column,
+                                    # so their Dispensed figure has to absorb it or the
+                                    # row won't add up. Folding it in here isn't a fudge
+                                    # — it is literally what the two discrepancy types
+                                    # mean. A shortfall (negative adjustment) is stock
+                                    # that WAS issued but never recorded, so it belongs
+                                    # in Dispensed. A surplus (positive adjustment) is
+                                    # an issue that was recorded but never happened, so
+                                    # it comes back out of Dispensed. Beginning balance
+                                    # stays truthful either way, and
+                                    #   Beginning + Received - Dispensed = Current
+                                    # holds for the non-admin view.
+                                    'dispensed_effective': dispensed - adjustment,
                                     'current_balance': current_balance,
-                                    'amount_to_order': int(amount_to_order) if isinstance(amount_to_order, float) and amount_to_order.is_integer() else round(amount_to_order, 2)
+                                    'amc': _tidy(amc),
+                                    'amount_to_order': _tidy(amount_to_order)
                                 })
                             except Exception as qe:
                                 app.logger.error(f"Query failed for med {med_name}: {qe}")
                                 cb = med.get('balance', 0)
                                 report_data.append({'med_name': med_name, 'beginning_balance': cb,
-                                                    'dispensed': 0, 'received': 0,
-                                                    'current_balance': cb, 'amount_to_order': 0})
+                                                    'dispensed': 0, 'received': 0, 'adjustment': 0,
+                                                    'dispensed_effective': 0,
+                                                    'current_balance': cb, 'amc': 0,
+                                                    'amount_to_order': 0})
 
                     elif report_type == 'receive_list':
                         base_query = {'type': 'receive'}
@@ -2717,9 +2971,12 @@ def reports():
                             raise ValueError('Start and end dates are required for this report type.')
                         controlled_meds = [m['name'] for m in medications.find({'schedule': 'controlled'}, {'_id': 0, 'name': 1})]
                         if controlled_meds:
+                            # NEW (Stock Take): adjustments are included so the
+                            # register's running balance still lands on the
+                            # current balance after a physical count.
                             all_tx = list(transactions.find({
                                 'med_name': {'$in': controlled_meds},
-                                'type': {'$in': ['receive', 'dispense']},
+                                'type': {'$in': ['receive', 'dispense', 'adjustment']},
                                 'timestamp': {'$gte': start_dt, '$lte': end_dt}
                             }).sort('timestamp', 1).limit(10000))
 
@@ -2736,11 +2993,18 @@ def reports():
                                     med_txs            = tx_by_med[med_name]
                                     received_in_period = sum(t['quantity'] for t in med_txs if t['type'] == 'receive')
                                     dispensed_in_period= sum(t['quantity'] for t in med_txs if t['type'] == 'dispense')
-                                    beginning_balance  = max(0, current_balance - received_in_period + dispensed_in_period)
+                                    adjusted_in_period = sum(t['quantity'] for t in med_txs if t['type'] == 'adjustment')
+                                    beginning_balance  = max(0, current_balance - received_in_period
+                                                             + dispensed_in_period - adjusted_in_period)
                                     running_bal        = beginning_balance
                                     running_entries    = []
                                     for tx in med_txs:
-                                        running_bal += tx['quantity'] if tx['type'] == 'receive' else -tx['quantity']
+                                        if tx['type'] == 'receive':
+                                            running_bal += tx['quantity']
+                                        elif tx['type'] == 'dispense':
+                                            running_bal -= tx['quantity']
+                                        else:  # adjustment — already signed
+                                            running_bal += tx['quantity']
                                         tx_copy = tx.copy()
                                         tx_copy['balance_after'] = running_bal
                                         running_entries.append(tx_copy)
@@ -2788,6 +3052,275 @@ def reports():
 # NEW: admin-only audit trail. Gives admins visibility into every edit/delete
 # (from audit_logger.py's audit_log collection) and every unhandled exception
 # (from error_logger.py's error_logs collection) across the whole app.
+# -----------------------------------------------------------------------
+# NEW (Stock Take): physical count with immediate, per-item correction.
+#
+# A discrepancy between the shelf and the system is always one of exactly two
+# things, and the sign of the variance tells you which:
+#
+#   counted < system  -> stock left the shelf but was never recorded
+#                        ("issued, not recorded")
+#   counted > system  -> an issue was recorded that never actually happened
+#                        ("recorded, not issued")
+#
+# so the type is derived, never asked for.
+# -----------------------------------------------------------------------
+DISCREPANCY_ISSUED_NOT_RECORDED = 'issued_not_recorded'
+DISCREPANCY_RECORDED_NOT_ISSUED = 'recorded_not_issued'
+DISCREPANCY_NONE = 'none'
+
+DISCREPANCY_LABELS = {
+    DISCREPANCY_ISSUED_NOT_RECORDED: 'Issued, not recorded',
+    DISCREPANCY_RECORDED_NOT_ISSUED: 'Recorded, not issued',
+    DISCREPANCY_NONE: 'Agrees',
+}
+
+
+def classify_variance(variance):
+    """variance = physical count - system balance."""
+    if variance < 0:
+        return DISCREPANCY_ISSUED_NOT_RECORDED
+    if variance > 0:
+        return DISCREPANCY_RECORDED_NOT_ISSUED
+    return DISCREPANCY_NONE
+
+
+def write_audit_entry(action, target_type, target_id, changes):
+    """Write straight to audit_log in the shape AUDIT_TEMPLATE renders.
+
+    audit_logger.py's decorators only wrap the dispense/receive/medication
+    routes, so stock-take corrections would otherwise never appear under
+    'Edits & Deletes' even though they change a balance. Best-effort: an audit
+    write must never be the reason a count fails to save.
+    """
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        db['audit_log'].insert_one({
+            'timestamp': datetime.utcnow(),
+            'action': action,
+            'target_type': target_type,
+            'target_id': target_id,
+            'user': session.get('user', {}).get('name', 'unknown'),
+            'ip': request.remote_addr,
+            'changes': changes,
+        })
+    except Exception as e:
+        app.logger.warning(f"Failed to write audit entry for {target_type}/{target_id}: {e}")
+
+
+@app.route('/stock-take', methods=['GET', 'POST'])
+@login_required
+def stock_take():
+    if session['user'].get('role') != 'admin':
+        flash('Access denied. Only admins can perform a stock take.')
+        return redirect('/reports')
+
+    current_user = session['user']['name']
+    flashed = get_flashed_messages()
+    message = flashed[0] if flashed else None
+
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        medications  = db['medications']
+        transactions = db['transactions']
+        stock_takes  = db['stock_takes']
+        counts_col   = db['stock_take_counts']
+
+        stock_take_id = request.values.get('stock_take_id')
+
+        if request.method == 'POST':
+            action = request.form.get('action')
+
+            # --- Open a new stock take -----------------------------------
+            if action == 'open':
+                if stock_takes.find_one({'status': 'open'}):
+                    flash('A stock take is already open. Continue or close it first.')
+                    return redirect(url_for('stock_take'))
+                reference = f"ST-{datetime.utcnow().strftime('%Y%m%d')}-{uuid4().hex[:4].upper()}"
+                try:
+                    new_id = stock_takes.insert_one({
+                        'reference': reference,
+                        'status': 'open',
+                        'note': (request.form.get('note') or '').strip(),
+                        'started_by': current_user,
+                        'started_at': datetime.utcnow(),
+                        'closed_by': None,
+                        'closed_at': None,
+                    }).inserted_id
+                except DuplicateKeyError:
+                    flash('Could not generate a unique reference. Please try again.')
+                    return redirect(url_for('stock_take'))
+                write_audit_entry('CREATE', 'stock_take', reference,
+                                  f"Stock take {reference} opened by {current_user}")
+                flash(f'Stock take {reference} opened.')
+                return redirect(url_for('stock_take', stock_take_id=str(new_id)))
+
+            # --- Record one physical count -------------------------------
+            if action == 'count':
+                st = _load_stock_take(stock_takes, request.form.get('stock_take_id'))
+                if not st:
+                    flash('Stock take not found.')
+                    return redirect(url_for('stock_take'))
+                if st['status'] != 'open':
+                    flash(f"Stock take {st['reference']} is closed. No further counts can be added.")
+                    return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+
+                med_name = (request.form.get('med_name') or '').strip()
+                try:
+                    counted = int(request.form.get('counted', ''))
+                except (TypeError, ValueError):
+                    flash('Physical count must be a whole number.')
+                    return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+                if counted < 0:
+                    flash('Physical count cannot be negative.')
+                    return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+
+                # Read the system balance and write the corrected one in a
+                # single atomic operation. Reading first and updating after
+                # would leave a window in which a dispense could land between
+                # the two and be silently overwritten by the count.
+                before = medications.find_one_and_update(
+                    {'name': med_name},
+                    {'$set': {'balance': counted}},
+                    return_document=ReturnDocument.BEFORE
+                )
+                if not before:
+                    write_app_warning(
+                        'medication_not_found',
+                        f'Medication "{med_name}" not found during stock take {st["reference"]}.',
+                        {'med_name': med_name, 'stock_take': st['reference']}
+                    )
+                    flash(f'Medication "{med_name}" not found. Add it first, then count it.')
+                    return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+
+                system_balance   = before.get('balance', 0)
+                variance         = counted - system_balance
+                discrepancy_type = classify_variance(variance)
+                now              = datetime.utcnow()
+
+                # The correction is posted to the transaction ledger as its own
+                # signed type. Every report in this app back-calculates a
+                # beginning balance from the current balance and the movements
+                # in between; a balance corrected without a matching ledger
+                # entry would break that arithmetic for every period containing
+                # the count.
+                if variance != 0:
+                    transactions.insert_one({
+                        'type': 'adjustment',
+                        'med_name': med_name,
+                        'quantity': variance,          # signed
+                        'batch': before.get('batch'),
+                        'price': before.get('price'),
+                        'expiry_date': before.get('expiry_date'),
+                        'schedule': before.get('schedule'),
+                        'system_balance': system_balance,
+                        'counted': counted,
+                        'discrepancy_type': discrepancy_type,
+                        'stock_take_id': str(st['_id']),
+                        'stock_take_reference': st['reference'],
+                        'user': current_user,
+                        'timestamp': now,
+                    })
+
+                counts_col.insert_one({
+                    'stock_take_id': str(st['_id']),
+                    'reference': st['reference'],
+                    'med_name': med_name,
+                    'system_balance': system_balance,
+                    'counted': counted,
+                    'variance': variance,
+                    'discrepancy_type': discrepancy_type,
+                    'note': (request.form.get('note') or '').strip(),
+                    'counted_by': current_user,
+                    'timestamp': now,
+                })
+
+                write_audit_entry(
+                    'UPDATE', 'stock_take_count', f"{st['reference']} / {med_name}",
+                    f"balance: {system_balance} -> {counted} (variance {variance:+d}, "
+                    f"{DISCREPANCY_LABELS[discrepancy_type].lower()})"
+                )
+
+                if variance == 0:
+                    flash(f'{med_name}: counted {counted}. Agrees with the system.')
+                else:
+                    flash(f'{med_name}: counted {counted}, system had {system_balance} '
+                          f'({variance:+d}). Recorded as "{DISCREPANCY_LABELS[discrepancy_type]}" '
+                          f'and the balance is now {counted}.')
+                return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+
+            # --- Close a stock take --------------------------------------
+            if action == 'close':
+                st = _load_stock_take(stock_takes, request.form.get('stock_take_id'))
+                if not st:
+                    flash('Stock take not found.')
+                    return redirect(url_for('stock_take'))
+                if st['status'] != 'open':
+                    flash(f"Stock take {st['reference']} is already closed.")
+                    return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+                stock_takes.update_one(
+                    {'_id': st['_id'], 'status': 'open'},
+                    {'$set': {'status': 'closed', 'closed_by': current_user,
+                              'closed_at': datetime.utcnow()}}
+                )
+                write_audit_entry('UPDATE', 'stock_take', st['reference'],
+                                  f"Stock take {st['reference']} closed by {current_user}")
+                flash(f"Stock take {st['reference']} closed.")
+                return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+
+            flash('Unknown stock take action.')
+            return redirect(url_for('stock_take'))
+
+        # ----- GET ------------------------------------------------------
+        active = _load_stock_take(stock_takes, stock_take_id) if stock_take_id else None
+
+        if active:
+            counts = list(counts_col.find({'stock_take_id': str(active['_id'])})
+                          .sort('timestamp', -1).limit(2000))
+            for c in counts:
+                c['discrepancy_label'] = DISCREPANCY_LABELS.get(c.get('discrepancy_type'), '-')
+            # Only the names are sent to the counting sheet — never the
+            # balances. The count has to be blind.
+            med_names = [m['name'] for m in medications.find({}, {'_id': 0, 'name': 1}).sort('name', 1)]
+            return render_template_string(
+                STOCK_TAKE_TEMPLATE, nav_links=get_nav_links(), message=message,
+                active=active, counts=counts, med_names=med_names, sessions=[],
+                agreed_count=sum(1 for c in counts if c['variance'] == 0),
+                issued_not_recorded=sum(1 for c in counts if c['variance'] < 0),
+                recorded_not_issued=sum(1 for c in counts if c['variance'] > 0),
+            )
+
+        sessions = list(stock_takes.find().sort([('status', 1), ('started_at', -1)]).limit(200))
+        for s in sessions:
+            sid = str(s['_id'])
+            s['counted_lines']     = counts_col.count_documents({'stock_take_id': sid})
+            s['discrepancy_lines'] = counts_col.count_documents(
+                {'stock_take_id': sid, 'variance': {'$ne': 0}})
+        return render_template_string(
+            STOCK_TAKE_TEMPLATE, nav_links=get_nav_links(), message=message,
+            active=None, sessions=sessions, counts=[], med_names=[],
+            agreed_count=0, issued_not_recorded=0, recorded_not_issued=0,
+        )
+
+    except ServerSelectionTimeoutError:
+        return render_template_string(
+            STOCK_TAKE_TEMPLATE, nav_links=get_nav_links(),
+            message="Database connection failed. Please try again later.",
+            active=None, sessions=[], counts=[], med_names=[],
+            agreed_count=0, issued_not_recorded=0, recorded_not_issued=0,
+        ), 500
+
+
+def _load_stock_take(stock_takes, raw_id):
+    """Resolve a stock take by its string _id, tolerating a malformed value."""
+    if not raw_id:
+        return None
+    try:
+        return stock_takes.find_one({'_id': ObjectId(raw_id)})
+    except (InvalidId, TypeError):
+        return None
+
+
 @app.route('/audit', methods=['GET'])
 @login_required
 def audit_log():
@@ -2831,6 +3364,27 @@ def audit_log():
             entries = list(
                 db['error_logs'].find(query).sort('timestamp', -1).limit(500)
             )
+        elif view == 'stocktake':
+            # NEW (Stock Take): every physical count and the correction it
+            # produced. ?only=discrepancies hides the lines that agreed.
+            query = {}
+            if date_query:
+                query['timestamp'] = date_query
+            if request.args.get('only') == 'discrepancies':
+                query['variance'] = {'$ne': 0}
+            if search:
+                query['$or'] = [
+                    {'med_name':         {'$regex': search, '$options': 'i'}},
+                    {'reference':        {'$regex': search, '$options': 'i'}},
+                    {'counted_by':       {'$regex': search, '$options': 'i'}},
+                    {'discrepancy_type': {'$regex': search, '$options': 'i'}},
+                    {'note':             {'$regex': search, '$options': 'i'}},
+                ]
+            entries = list(
+                db['stock_take_counts'].find(query).sort('timestamp', -1).limit(500)
+            )
+            for e in entries:
+                e['discrepancy_label'] = DISCREPANCY_LABELS.get(e.get('discrepancy_type'), '-')
         elif view == 'warnings':
             query = {}
             if date_query:
