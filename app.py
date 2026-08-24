@@ -1719,23 +1719,42 @@ DASHBOARD_TEMPLATE = CSS_STYLE + """
 {% endfor %}
 </div>
 
-<h2>Total Movement by Month</h2>
+<h2>Activity by Month</h2>
 <table>
     <thead>
-        <tr><th>Movement</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}</tr>
+        <tr><th>Measure</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}</tr>
     </thead>
     <tbody>
-        <tr><td><strong>Dispensed</strong></td>{% for v in totals.dispensed %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Received</strong></td>{% for v in totals.received %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Dispensing visits</strong></td>{% for v in act.visits %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Items dispensed</strong></td>{% for v in act.lines %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Items per visit</strong></td>{% for v in act.per_visit %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Patients seen</strong></td>{% for v in act.patients %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Value dispensed</strong></td>{% for v in totals.val_dispensed %}<td>${{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Stock receipts</strong></td>{% for v in act.receipts %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Deliveries</strong></td>{% for v in act.deliveries %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Value received</strong></td>{% for v in totals.val_received %}<td>${{ v }}</td>{% endfor %}</tr>
         {% if is_admin %}
-        <tr><td><strong>Stock take adjustments</strong></td>
-            {% for v in totals.adjusted %}<td>{% if v %}{{ '%+d'|format(v) }}{% else %}0{% endif %}</td>{% endfor %}</tr>
+        <tr><td><strong>Items adjusted at stock take</strong></td>
+            {% for v in act.adjusted_lines %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Value of adjustments</strong></td>
+            {% for v in totals.val_adjusted %}<td>${{ v }}</td>{% endfor %}</tr>
         {% endif %}
     </tbody>
 </table>
-<p style="font-size:13px;">The final column is the current month to date, so it is
-always a part-month and will read low. AMC is calculated from the completed
-months only.</p>
+<p style="font-size:13px;">
+A dispensing visit is one patient encounter; an item is one medication line
+within it, so a visit with three medicines counts as one visit and three items.
+<strong>Patients seen</strong> counts distinct patient names in the month, so a
+patient returning twice is counted once.
+Quantities are deliberately not totalled across medications here — adding
+tablets to vials to millilitres gives a number that means nothing. Value is
+used instead, since money is comparable across dosage forms. Per-medication
+quantities are in the table below, where they do mean something.
+Value is calculated at each item's current unit price, so it is indicative
+rather than an accounting figure.
+The final column is the current month to date, so it is always a part-month and
+will read low. AMC is calculated from the completed months only.
+</p>
 
 <h2>Consumption by Month &amp; AMC ({{ rows|length }} of {{ total_items }} items)</h2>
 <p style="font-size:13px;">
@@ -3386,6 +3405,74 @@ def _movement_by_med(transactions, time_filter, med_names=None):
         return out
 
 
+def _activity_by_month(transactions, window_start):
+    """(year, month) -> counts of dispensing/receiving ACTIVITY, not units.
+
+    Summing `quantity` across different medications adds tablets to vials to
+    millilitres — arithmetically valid, semantically empty. These are the
+    countable events instead: how many visits, how many prescription items,
+    how many patients, how many deliveries.
+
+    A dispense writes one document per medication line, all sharing a
+    transaction_id for the visit, so lines and visits are different numbers
+    and both are worth knowing.
+    """
+    buckets = defaultdict(lambda: {'visits': set(), 'lines': 0, 'patients': set(),
+                                   'receipts': 0, 'deliveries': set(), 'adjusted_lines': 0})
+    pipeline = [
+        {'$match': {'timestamp': {'$gte': window_start},
+                    'type': {'$in': ['dispense', 'receive', 'adjustment']}}},
+        {'$group': {
+            '_id': {'y': {'$year': '$timestamp'}, 'm': {'$month': '$timestamp'}, 't': '$type'},
+            'lines': {'$sum': 1},
+            'visits': {'$addToSet': '$transaction_id'},
+            'patients': {'$addToSet': '$patient'},
+            'orders': {'$addToSet': '$order_number'},
+        }}
+    ]
+
+    def _clean(vals):
+        return {v for v in (vals or []) if v not in (None, '', 'N/A')}
+
+    try:
+        rows = list(transactions.aggregate(pipeline))
+        for r in rows:
+            k = r['_id']
+            b = buckets[(k['y'], k['m'])]
+            if k['t'] == 'dispense':
+                b['lines'] += r.get('lines', 0)
+                b['visits'] |= _clean(r.get('visits'))
+                b['patients'] |= _clean(r.get('patients'))
+            elif k['t'] == 'receive':
+                b['receipts'] += r.get('lines', 0)
+                b['deliveries'] |= _clean(r.get('orders'))
+            else:
+                b['adjusted_lines'] += r.get('lines', 0)
+        return buckets
+    except Exception as e:
+        app.logger.warning(f"Activity aggregation unavailable, falling back: {e}")
+        cursor = transactions.find(
+            {'timestamp': {'$gte': window_start},
+             'type': {'$in': ['dispense', 'receive', 'adjustment']}},
+            {'_id': 0, 'type': 1, 'timestamp': 1, 'transaction_id': 1,
+             'patient': 1, 'order_number': 1})
+        for tx in cursor:
+            ts = tx.get('timestamp')
+            if not isinstance(ts, datetime):
+                continue
+            b = buckets[(ts.year, ts.month)]
+            if tx.get('type') == 'dispense':
+                b['lines'] += 1
+                b['visits'] |= _clean([tx.get('transaction_id')])
+                b['patients'] |= _clean([tx.get('patient')])
+            elif tx.get('type') == 'receive':
+                b['receipts'] += 1
+                b['deliveries'] |= _clean([tx.get('order_number')])
+            else:
+                b['adjusted_lines'] += 1
+        return buckets
+
+
 def _parse_expiry(raw):
     if not raw:
         return None
@@ -3440,8 +3527,12 @@ def dashboard():
     # AMC down. It is still shown as a column, just excluded from the average.
     amc_months    = [ym for ym in months if ym != current_ym] or months
 
-    empty = {'dispensed': [0] * len(months), 'received': [0] * len(months),
-             'adjusted': [0] * len(months)}
+    empty = {'val_dispensed': ['0'] * len(months), 'val_received': ['0'] * len(months),
+             'val_adjusted': ['0'] * len(months)}
+    act_empty = {'visits': [0] * len(months), 'lines': [0] * len(months),
+                 'per_visit': ['-'] * len(months), 'patients': [0] * len(months),
+                 'receipts': [0] * len(months), 'deliveries': [0] * len(months),
+                 'adjusted_lines': [0] * len(months)}
     st_empty = {'counted': [0] * len(months), 'agreed': [0] * len(months),
                 'short_units': [0] * len(months), 'over_units': [0] * len(months),
                 'accuracy': ['-'] * len(months)}
@@ -3452,8 +3543,13 @@ def dashboard():
         all_meds = list(db['medications'].find({}, {'_id': 0}).sort('name', 1))
 
         rows = []
-        totals = {'dispensed': [0] * len(months), 'received': [0] * len(months),
-                  'adjusted': [0] * len(months)}
+        # Units are only meaningful per medication, so the cross-medication
+        # totals are kept as VALUE (money adds up across dosage forms; units
+        # do not) plus the countable activity figures fetched below.
+        n_m = len(months)
+        totals = {'val_dispensed': [0.0] * n_m, 'val_received': [0.0] * n_m,
+                  'val_adjusted': [0.0] * n_m}
+        activity = _activity_by_month(db['transactions'], window_start)
 
         for med in all_meds:
             name    = med.get('name', '')
@@ -3461,9 +3557,13 @@ def dashboard():
             monthly  = [by_month.get(ym, {}).get('dispensed', 0) for ym in months]
             for i, ym in enumerate(months):
                 b = by_month.get(ym, {})
-                totals['dispensed'][i] += b.get('dispensed', 0)
-                totals['received'][i]  += b.get('received', 0)
-                totals['adjusted'][i]  += b.get('adjusted', 0)
+                # Valued at the medication's CURRENT unit price — transactions
+                # don't store a price at dispense time, so this is an
+                # approximation, and it is labelled as one on the page.
+                unit = med.get('price', 0) or 0
+                totals['val_dispensed'][i] += b.get('dispensed', 0) * unit
+                totals['val_received'][i]  += b.get('received', 0) * unit
+                totals['val_adjusted'][i]  += b.get('adjusted', 0) * unit
 
             complete = [by_month.get(ym, {}).get('dispensed', 0) for ym in amc_months]
             amc      = sum(complete) / len(complete) if complete else 0.0
@@ -3520,6 +3620,24 @@ def dashboard():
                 'expiry_raw': med.get('expiry_date') or '-',
                 'total_consumption': sum(monthly),
             })
+
+        # --- activity rows ------------------------------------------------
+        act = {'visits': [], 'lines': [], 'per_visit': [], 'patients': [],
+               'receipts': [], 'deliveries': [], 'adjusted_lines': []}
+        for ym in months:
+            b = activity.get(ym) or {'visits': set(), 'lines': 0, 'patients': set(),
+                                     'receipts': 0, 'deliveries': set(), 'adjusted_lines': 0}
+            visits = len(b['visits'])
+            act['visits'].append(visits)
+            act['lines'].append(b['lines'])
+            act['per_visit'].append(f"{b['lines'] / visits:.1f}" if visits else '-')
+            act['patients'].append(len(b['patients']))
+            act['receipts'].append(b['receipts'])
+            act['deliveries'].append(len(b['deliveries']))
+            act['adjusted_lines'].append(b['adjusted_lines'])
+        totals['val_dispensed'] = [f"{v:,.0f}" for v in totals['val_dispensed']]
+        totals['val_received']  = [f"{v:,.0f}" for v in totals['val_received']]
+        totals['val_adjusted']  = [f"{v:,.0f}" for v in totals['val_adjusted']]
 
         # --- tiles (whole pharmacy, never narrowed by the search box) ----
         out_of_stock = [r for r in rows if r['balance'] == 0]
@@ -3633,7 +3751,7 @@ def dashboard():
             DASHBOARD_TEMPLATE, nav_links=get_nav_links(), message=message,
             is_admin=is_admin, month_labels=month_labels, months_back=months_back,
             month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
-            search=search, tiles=tiles, totals=totals, rows=table_rows,
+            search=search, tiles=tiles, totals=totals, act=act, rows=table_rows,
             total_items=total_items, expiring=expiring, st_totals=st_totals,
             top_discrepancies=top_discrepancies, never_counted=never_counted,
         )
@@ -3644,7 +3762,7 @@ def dashboard():
             message="Database connection failed. Please try again later.",
             is_admin=is_admin, month_labels=month_labels, months_back=months_back,
             month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
-            search=search, tiles=[], totals=empty, rows=[], total_items=0,
+            search=search, tiles=[], totals=empty, act=act_empty, rows=[], total_items=0,
             expiring=[], st_totals=st_empty, top_discrepancies=[], never_counted=[],
         ), 500
 
