@@ -289,6 +289,7 @@ def get_nav_links():
         stock_take_link = '<a href="/stock-take">Stock Take</a> | ' if is_admin else ''
         return f"""
         <p class="nav-links"><strong>Navigate:</strong>
+            <a href="/dashboard">Dashboard</a> |
             <a href="/dispense">Dispensing</a> |
             <a href="/receive">Receiving</a> |
             {add_med_link}
@@ -1652,6 +1653,211 @@ AMC is average monthly consumption over the selected period.</p>
 <p>No controlled drugs found or no data for this period.</p>
 {% endif %}
 """
+
+# NEW (Dashboard): consumption trend and stock-health overview.
+#
+# Tiles and panels use inline styles rather than new CSS classes so the shared
+# CSS_STYLE block stays untouched — only the row status classes (.expired,
+# .close-to-expire, .normal) are reused, so colour meaning stays consistent
+# with the rest of the app: red = act now, amber = watch, plain = fine.
+DASHBOARD_TEMPLATE = CSS_STYLE + """
+<h1>Dashboard</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
+{{ nav_links|safe }}
+{% if message %}
+    <p class="message error">{{ message }}</p>
+{% endif %}
+
+<form method="GET" action="{{ url_for('dashboard') }}" class="filter-form">
+    <div class="filter-section">
+        <div>
+            <label>Period:</label>
+            <select name="months">
+                {% for c in month_choices %}
+                <option value="{{ c }}" {% if c == months_back %}selected{% endif %}>Last {{ c }} months</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Sort by:</label>
+            <select name="sort">
+                <option value="urgency" {% if sort_by == 'urgency' %}selected{% endif %}>Most urgent first</option>
+                <option value="amc" {% if sort_by == 'amc' %}selected{% endif %}>Highest AMC</option>
+                <option value="trend" {% if sort_by == 'trend' %}selected{% endif %}>Biggest change vs AMC</option>
+                <option value="name" {% if sort_by == 'name' %}selected{% endif %}>Medication name</option>
+            </select>
+        </div>
+        <div>
+            <label>Show:</label>
+            <select name="limit">
+                <option value="25" {% if limit == 25 %}selected{% endif %}>Top 25</option>
+                <option value="50" {% if limit == 50 %}selected{% endif %}>Top 50</option>
+                <option value="100" {% if limit == 100 %}selected{% endif %}>Top 100</option>
+                <option value="0" {% if limit == 0 %}selected{% endif %}>All items</option>
+            </select>
+        </div>
+        <div>
+            <label>Search Medication:</label>
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="Filter by name">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Apply">
+            <a href="{{ url_for('dashboard') }}">Reset</a>
+        </div>
+    </div>
+</form>
+
+<h2>Stock Health</h2>
+<div style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:20px;">
+{% for t in tiles %}
+    <div style="flex:1 1 150px; min-width:150px; border:1px solid #ccc; border-radius:6px; padding:12px;
+                background-color:{{ t.bg }}; color:{{ t.fg }};">
+        <div style="font-size:26px; font-weight:bold; line-height:1.1;">{{ t.value }}</div>
+        <div style="font-size:13px; margin-top:4px;">{{ t.label }}</div>
+        {% if t.sub %}<div style="font-size:11px; opacity:0.8; margin-top:2px;">{{ t.sub }}</div>{% endif %}
+    </div>
+{% endfor %}
+</div>
+
+<h2>Total Movement by Month</h2>
+<table>
+    <thead>
+        <tr><th>Movement</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}</tr>
+    </thead>
+    <tbody>
+        <tr><td><strong>Dispensed</strong></td>{% for v in totals.dispensed %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Received</strong></td>{% for v in totals.received %}<td>{{ v }}</td>{% endfor %}</tr>
+        {% if is_admin %}
+        <tr><td><strong>Stock take adjustments</strong></td>
+            {% for v in totals.adjusted %}<td>{% if v %}{{ '%+d'|format(v) }}{% else %}0{% endif %}</td>{% endfor %}</tr>
+        {% endif %}
+    </tbody>
+</table>
+<p style="font-size:13px;">The final column is the current month to date, so it is
+always a part-month and will read low. AMC is calculated from the completed
+months only.</p>
+
+<h2>Consumption by Month &amp; AMC ({{ rows|length }} of {{ total_items }} items)</h2>
+<p style="font-size:13px;">
+<strong>AMC</strong> is the average of the completed months shown.
+<strong>MOS</strong> is months of stock — current balance divided by AMC, i.e. how
+long today's stock lasts at the recent rate.
+<strong>Trend</strong> compares the last completed month against AMC.
+<strong>Pattern</strong> flags how steady demand has been: an erratic item needs more
+buffer than its AMC alone suggests.
+The peak month in each row is shown in bold.
+</p>
+<table>
+    <thead>
+        <tr>
+            <th>Medication</th>
+            {% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
+            <th>AMC</th><th>Trend</th><th>Pattern</th>
+            <th>Balance</th><th>MOS</th><th>Suggested Order</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for r in rows %}
+        <tr class="{{ r.status }}">
+            <td>{{ r.med_name }}</td>
+            {% for v in r.monthly %}
+            <td>{% if r.peak is not none and loop.index0 == r.peak and v %}<strong>{{ v }}</strong>{% else %}{{ v }}{% endif %}</td>
+            {% endfor %}
+            <td>{{ r.amc }}</td>
+            <td>{{ r.trend_label }}</td>
+            <td>{{ r.pattern }}</td>
+            <td>{{ r.balance }}</td>
+            <td>{{ r.mos_label }}</td>
+            <td>{{ r.suggested_order }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="{{ month_labels|length + 7 }}">No medications matching the criteria.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+<h2>Expiring Within 90 Days ({{ expiring|length }})</h2>
+<table>
+    <thead>
+        <tr><th>Medication</th><th>Expiry Date</th><th>Days Left</th><th>Balance</th>
+            <th>Value</th><th>AMC</th><th>Likely Unused</th></tr>
+    </thead>
+    <tbody>
+    {% for e in expiring %}
+        <tr class="{{ e.status }}">
+            <td>{{ e.med_name }}</td>
+            <td>{{ e.expiry_date }}</td>
+            <td>{{ e.days_left }}</td>
+            <td>{{ e.balance }}</td>
+            <td>${{ "%.2f"|format(e.value) }}</td>
+            <td>{{ e.amc }}</td>
+            <td>{{ e.likely_unused }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="7">Nothing expiring in the next 90 days.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+<p style="font-size:13px;">"Likely unused" projects how much will still be on the
+shelf at expiry if the item keeps moving at its AMC — that is the quantity at
+risk of being written off.</p>
+
+{% if is_admin %}
+<h2>Stock Take Discrepancies by Month</h2>
+<table>
+    <thead>
+        <tr><th>Measure</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}</tr>
+    </thead>
+    <tbody>
+        <tr><td><strong>Items counted</strong></td>{% for v in st_totals.counted %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Agreed</strong></td>{% for v in st_totals.agreed %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr class="expired"><td><strong>Issued, not recorded</strong> (units)</td>
+            {% for v in st_totals.short_units %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr class="close-to-expire"><td><strong>Recorded, not issued</strong> (units)</td>
+            {% for v in st_totals.over_units %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Accuracy</strong></td>{% for v in st_totals.accuracy %}<td>{{ v }}</td>{% endfor %}</tr>
+    </tbody>
+</table>
+<p style="font-size:13px;">Accuracy is the share of counted lines that agreed with
+the system. A falling accuracy rate is worth investigating before the next count.
+<a href="{{ url_for('audit_log', view='stocktake', only='discrepancies') }}">See every discrepancy &rarr;</a></p>
+
+<h3>Largest Discrepancies in the Period ({{ top_discrepancies|length }})</h3>
+<table>
+    <thead>
+        <tr><th>Medication</th><th>Net Variance</th><th>Counts</th><th>Type</th><th>Last Counted</th></tr>
+    </thead>
+    <tbody>
+    {% for d in top_discrepancies %}
+        <tr class="{% if d.net < 0 %}expired{% else %}close-to-expire{% endif %}">
+            <td>{{ d.med_name }}</td>
+            <td>{{ '%+d'|format(d.net) }}</td>
+            <td>{{ d.count }}</td>
+            <td>{{ d.label }}</td>
+            <td>{{ d.last_counted }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="5">No discrepancies recorded in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+<h3>Never Counted ({{ never_counted|length }})</h3>
+<p style="font-size:13px;">Items with stock on hand that have not appeared in any
+stock take. These are the shelves where a discrepancy would still be invisible.</p>
+<table>
+    <thead><tr><th>Medication</th><th>Balance</th><th>Value</th></tr></thead>
+    <tbody>
+    {% for n in never_counted %}
+        <tr><td>{{ n.med_name }}</td><td>{{ n.balance }}</td><td>${{ "%.2f"|format(n.value) }}</td></tr>
+    {% else %}
+        <tr><td colspan="3">Every item with stock has been counted at least once.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+"""
+
 
 # NEW (Stock Take): admin-only physical count. Two views share one template —
 # the session list (no active session selected) and the counting sheet.
@@ -3052,6 +3258,350 @@ def reports():
 # NEW: admin-only audit trail. Gives admins visibility into every edit/delete
 # (from audit_logger.py's audit_log collection) and every unhandled exception
 # (from error_logger.py's error_logs collection) across the whole app.
+# -----------------------------------------------------------------------
+# NEW (Dashboard): consumption trend and stock-health overview.
+#
+# PERFORMANCE NOTE: the reports() route queries transactions once per
+# medication in a Python loop, which is fine for one report but would be
+# ruinous here — this page needs every medication across several months at
+# once. Instead the whole window is fetched in ONE aggregation grouped by
+# medication and month, and everything else is computed in memory. Two DB
+# round trips total (three for admins), regardless of how many medications
+# exist.
+# -----------------------------------------------------------------------
+DASHBOARD_MONTH_CHOICES = [3, 6, 12]
+MONTH_ABBR = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+
+def _month_sequence(n):
+    """The last n calendar months as (year, month), oldest first."""
+    now = datetime.utcnow()
+    y, m = now.year, now.month
+    seq = []
+    for _ in range(n):
+        seq.append((y, m))
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+    seq.reverse()
+    return seq
+
+
+def _monthly_movement(transactions, window_start):
+    """med_name -> (year, month) -> {'dispensed','received','adjusted'}."""
+    movement = defaultdict(dict)
+    pipeline = [
+        {'$match': {'timestamp': {'$gte': window_start},
+                    'type': {'$in': ['dispense', 'receive', 'adjustment']}}},
+        {'$group': {
+            '_id': {'med': '$med_name',
+                    'y': {'$year': '$timestamp'},
+                    'm': {'$month': '$timestamp'}},
+            'dispensed': {'$sum': {'$cond': [{'$eq': ['$type', 'dispense']}, '$quantity', 0]}},
+            'received':  {'$sum': {'$cond': [{'$eq': ['$type', 'receive']},  '$quantity', 0]}},
+            'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type', 'adjustment']}, '$quantity', 0]}},
+        }}
+    ]
+    try:
+        for row in transactions.aggregate(pipeline):
+            k = row['_id']
+            movement[k['med']][(k['y'], k['m'])] = {
+                'dispensed': row.get('dispensed', 0) or 0,
+                'received':  row.get('received', 0) or 0,
+                'adjusted':  row.get('adjusted', 0) or 0,
+            }
+        return movement
+    except Exception as e:
+        # Fall back to a client-side pass rather than failing the page — the
+        # $year/$month grouping is standard, but this keeps the dashboard
+        # working on any backend that doesn't support it.
+        app.logger.warning(f"Dashboard aggregation unavailable, falling back: {e}")
+        movement = defaultdict(dict)
+        cursor = transactions.find(
+            {'timestamp': {'$gte': window_start},
+             'type': {'$in': ['dispense', 'receive', 'adjustment']}},
+            {'_id': 0, 'med_name': 1, 'type': 1, 'quantity': 1, 'timestamp': 1}
+        )
+        for tx in cursor:
+            ts = tx.get('timestamp')
+            if not isinstance(ts, datetime):
+                continue
+            bucket = movement[tx.get('med_name')].setdefault(
+                (ts.year, ts.month), {'dispensed': 0, 'received': 0, 'adjusted': 0})
+            qty = tx.get('quantity', 0) or 0
+            if tx.get('type') == 'dispense':
+                bucket['dispensed'] += qty
+            elif tx.get('type') == 'receive':
+                bucket['received'] += qty
+            else:
+                bucket['adjusted'] += qty
+        return movement
+
+
+def _parse_expiry(raw):
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(str(raw).split('T')[0], '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _stdev(values):
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    return (sum((v - mean) ** 2 for v in values) / len(values)) ** 0.5
+
+
+@app.route('/dashboard', methods=['GET'])
+@login_required
+def dashboard():
+    is_admin = session['user'].get('role') == 'admin'
+    message = None
+
+    # --- request options ------------------------------------------------
+    try:
+        months_back = int(request.args.get('months', 6))
+    except (TypeError, ValueError):
+        months_back = 6
+    if months_back not in DASHBOARD_MONTH_CHOICES:
+        months_back = 6
+
+    sort_by = request.args.get('sort', 'urgency')
+    if sort_by not in ('urgency', 'amc', 'trend', 'name'):
+        sort_by = 'urgency'
+
+    try:
+        limit = int(request.args.get('limit', 50))
+    except (TypeError, ValueError):
+        limit = 50
+    if limit not in (0, 25, 50, 100):
+        limit = 50
+
+    search = (request.args.get('search') or '').strip()
+
+    months        = _month_sequence(months_back)
+    month_labels  = [f"{MONTH_ABBR[m]} {y}" for y, m in months]
+    month_labels[-1] += ' (MTD)'
+    window_start  = datetime(months[0][0], months[0][1], 1)
+    now           = datetime.utcnow()
+    today         = now.date()
+    current_ym    = (now.year, now.month)
+    # The current month is only part-elapsed, so including it would drag every
+    # AMC down. It is still shown as a column, just excluded from the average.
+    amc_months    = [ym for ym in months if ym != current_ym] or months
+
+    empty = {'dispensed': [0] * len(months), 'received': [0] * len(months),
+             'adjusted': [0] * len(months)}
+    st_empty = {'counted': [0] * len(months), 'agreed': [0] * len(months),
+                'short_units': [0] * len(months), 'over_units': [0] * len(months),
+                'accuracy': ['-'] * len(months)}
+
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        movement = _monthly_movement(db['transactions'], window_start)
+        all_meds = list(db['medications'].find({}, {'_id': 0}).sort('name', 1))
+
+        rows = []
+        totals = {'dispensed': [0] * len(months), 'received': [0] * len(months),
+                  'adjusted': [0] * len(months)}
+
+        for med in all_meds:
+            name    = med.get('name', '')
+            by_month = movement.get(name, {})
+            monthly  = [by_month.get(ym, {}).get('dispensed', 0) for ym in months]
+            for i, ym in enumerate(months):
+                b = by_month.get(ym, {})
+                totals['dispensed'][i] += b.get('dispensed', 0)
+                totals['received'][i]  += b.get('received', 0)
+                totals['adjusted'][i]  += b.get('adjusted', 0)
+
+            complete = [by_month.get(ym, {}).get('dispensed', 0) for ym in amc_months]
+            amc      = sum(complete) / len(complete) if complete else 0.0
+            balance  = med.get('balance', 0) or 0
+            price    = med.get('price', 0) or 0
+
+            # Months of stock: how long today's balance lasts at the recent rate.
+            mos = (balance / amc) if amc > 0 else None
+            if balance == 0:
+                status, mos_label = 'expired', 'Out of stock'
+            elif mos is None:
+                status, mos_label = 'normal', 'No recent use'
+            elif mos < 1:
+                status, mos_label = 'expired', f'{mos:.1f}'
+            elif mos < 2:
+                status, mos_label = 'close-to-expire', f'{mos:.1f}'
+            else:
+                status, mos_label = 'normal', f'{mos:.1f}'
+
+            # Trend: last completed month against AMC.
+            last_complete = by_month.get(amc_months[-1], {}).get('dispensed', 0) if amc_months else 0
+            if amc <= 0:
+                trend_label = '-'
+            else:
+                pct = (last_complete - amc) / amc * 100
+                if abs(pct) < 10:
+                    trend_label = 'steady'
+                else:
+                    trend_label = f"{'up' if pct > 0 else 'down'} {abs(pct):.0f}%"
+
+            # Pattern: how erratic demand has been. An item with the same AMC
+            # but lumpy demand needs a bigger buffer, which AMC alone hides.
+            if amc > 0 and len(complete) >= 3:
+                cv = _stdev(complete) / amc
+                pattern = 'Steady' if cv < 0.25 else ('Variable' if cv < 0.75 else 'Erratic')
+            else:
+                pattern = '-'
+
+            # Same target as the inventory report: one month's cover plus two
+            # months' lead time.
+            suggested = max(0, amc * 3 - balance) if amc > 0 else 0
+            peak      = monthly.index(max(monthly)) if any(monthly) else None
+
+            rows.append({
+                'med_name': name, 'monthly': monthly,
+                'amc': round(amc, 1), 'amc_raw': amc,
+                'trend_label': trend_label,
+                'trend_abs': abs((last_complete - amc) / amc) if amc > 0 else -1,
+                'pattern': pattern, 'balance': balance,
+                'mos': mos, 'mos_label': mos_label, 'status': status,
+                'suggested_order': int(round(suggested)),
+                'peak': peak, 'value': balance * price,
+                'expiry': _parse_expiry(med.get('expiry_date')),
+                'expiry_raw': med.get('expiry_date') or '-',
+                'total_consumption': sum(monthly),
+            })
+
+        # --- tiles (whole pharmacy, never narrowed by the search box) ----
+        out_of_stock = [r for r in rows if r['balance'] == 0]
+        under_one    = [r for r in rows if r['balance'] > 0 and r['mos'] is not None and r['mos'] < 1]
+        expired_now  = [r for r in rows if r['expiry'] and r['expiry'] < today and r['balance'] > 0]
+        expiring_90  = [r for r in rows if r['expiry'] and today <= r['expiry'] <= today + timedelta(days=90)
+                        and r['balance'] > 0]
+        stock_value  = sum(r['value'] for r in rows)
+        at_risk      = sum(r['value'] for r in expiring_90)
+
+        tiles = [
+            {'label': 'Items tracked', 'value': len(rows), 'sub': '', 'bg': '#eef2f7', 'fg': '#1a3a5c'},
+            {'label': 'Out of stock', 'value': len(out_of_stock), 'sub': 'balance is zero',
+             'bg': '#f8d7da' if out_of_stock else '#eef2f7', 'fg': '#721c24' if out_of_stock else '#1a3a5c'},
+            {'label': 'Under 1 month of stock', 'value': len(under_one), 'sub': 'reorder now',
+             'bg': '#f8d7da' if under_one else '#eef2f7', 'fg': '#721c24' if under_one else '#1a3a5c'},
+            {'label': 'Expired on shelf', 'value': len(expired_now), 'sub': 'remove from stock',
+             'bg': '#f8d7da' if expired_now else '#eef2f7', 'fg': '#721c24' if expired_now else '#1a3a5c'},
+            {'label': 'Expiring in 90 days', 'value': len(expiring_90), 'sub': f'${at_risk:,.2f} at risk',
+             'bg': '#fff3cd' if expiring_90 else '#eef2f7', 'fg': '#856404' if expiring_90 else '#1a3a5c'},
+            {'label': 'Stock value', 'value': f'${stock_value:,.0f}', 'sub': 'balance x unit price',
+             'bg': '#eef2f7', 'fg': '#1a3a5c'},
+        ]
+
+        # --- expiring panel ---------------------------------------------
+        expiring = []
+        for r in sorted(expiring_90, key=lambda r: r['expiry']):
+            days_left = (r['expiry'] - today).days
+            # What will still be sitting there at expiry if it keeps moving
+            # at its AMC — the quantity actually at risk of write-off.
+            projected_use = r['amc_raw'] * (days_left / 30.0)
+            expiring.append({
+                'med_name': r['med_name'], 'expiry_date': r['expiry_raw'],
+                'days_left': days_left, 'balance': r['balance'], 'value': r['value'],
+                'amc': r['amc'], 'likely_unused': max(0, int(round(r['balance'] - projected_use))),
+                'status': 'expired' if days_left <= 30 else 'close-to-expire',
+            })
+
+        # --- table: search, sort, limit ---------------------------------
+        table_rows = rows
+        if search:
+            needle = search.lower()
+            table_rows = [r for r in table_rows if needle in r['med_name'].lower()]
+        total_items = len(table_rows)
+
+        if sort_by == 'name':
+            table_rows = sorted(table_rows, key=lambda r: r['med_name'].lower())
+        elif sort_by == 'amc':
+            table_rows = sorted(table_rows, key=lambda r: -r['amc_raw'])
+        elif sort_by == 'trend':
+            table_rows = sorted(table_rows, key=lambda r: -r['trend_abs'])
+        else:  # urgency — emptiest shelves first, items with no demand last
+            table_rows = sorted(
+                table_rows,
+                key=lambda r: (0 if r['balance'] == 0 else 1,
+                               r['mos'] if r['mos'] is not None else float('inf'),
+                               -r['amc_raw'])
+            )
+        if limit:
+            table_rows = table_rows[:limit]
+
+        # --- stock take panels (admin only) -----------------------------
+        st_totals, top_discrepancies, never_counted = st_empty, [], []
+        if is_admin:
+            counts = list(db['stock_take_counts'].find(
+                {'timestamp': {'$gte': window_start}},
+                {'_id': 0, 'med_name': 1, 'variance': 1, 'timestamp': 1}))
+            idx = {ym: i for i, ym in enumerate(months)}
+            st_totals = {'counted': [0] * len(months), 'agreed': [0] * len(months),
+                         'short_units': [0] * len(months), 'over_units': [0] * len(months),
+                         'accuracy': ['-'] * len(months)}
+            net_by_med = defaultdict(lambda: {'net': 0, 'count': 0, 'last': None})
+            for c in counts:
+                ts = c.get('timestamp')
+                v = c.get('variance', 0) or 0
+                if isinstance(ts, datetime) and (ts.year, ts.month) in idx:
+                    i = idx[(ts.year, ts.month)]
+                    st_totals['counted'][i] += 1
+                    if v == 0:
+                        st_totals['agreed'][i] += 1
+                    elif v < 0:
+                        st_totals['short_units'][i] += -v
+                    else:
+                        st_totals['over_units'][i] += v
+                if v != 0:
+                    e = net_by_med[c.get('med_name', '')]
+                    e['net'] += v
+                    e['count'] += 1
+                    if isinstance(ts, datetime) and (e['last'] is None or ts > e['last']):
+                        e['last'] = ts
+            for i in range(len(months)):
+                total = st_totals['counted'][i]
+                st_totals['accuracy'][i] = f"{st_totals['agreed'][i] / total * 100:.0f}%" if total else '-'
+
+            top_discrepancies = sorted(
+                ({'med_name': k, 'net': v['net'], 'count': v['count'],
+                  'label': DISCREPANCY_LABELS[classify_variance(v['net'])],
+                  'last_counted': v['last'].strftime('%Y-%m-%d') if v['last'] else '-'}
+                 for k, v in net_by_med.items() if v['net'] != 0),
+                key=lambda d: -abs(d['net'])
+            )[:15]
+
+            ever_counted = set(db['stock_take_counts'].distinct('med_name'))
+            never_counted = sorted(
+                ({'med_name': r['med_name'], 'balance': r['balance'], 'value': r['value']}
+                 for r in rows if r['balance'] > 0 and r['med_name'] not in ever_counted),
+                key=lambda n: -n['value']
+            )[:25]
+
+        return render_template_string(
+            DASHBOARD_TEMPLATE, nav_links=get_nav_links(), message=message,
+            is_admin=is_admin, month_labels=month_labels, months_back=months_back,
+            month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
+            search=search, tiles=tiles, totals=totals, rows=table_rows,
+            total_items=total_items, expiring=expiring, st_totals=st_totals,
+            top_discrepancies=top_discrepancies, never_counted=never_counted,
+        )
+
+    except ServerSelectionTimeoutError:
+        return render_template_string(
+            DASHBOARD_TEMPLATE, nav_links=get_nav_links(),
+            message="Database connection failed. Please try again later.",
+            is_admin=is_admin, month_labels=month_labels, months_back=months_back,
+            month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
+            search=search, tiles=[], totals=empty, rows=[], total_items=0,
+            expiring=[], st_totals=st_empty, top_discrepancies=[], never_counted=[],
+        ), 500
+
+
 # -----------------------------------------------------------------------
 # NEW (Stock Take): physical count with immediate, per-item correction.
 #
