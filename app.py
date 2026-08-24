@@ -3024,29 +3024,22 @@ def reports():
                         med_filter      = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
                         all_meds        = list(medications.find(med_filter, {'_id': 0}).sort('name', 1))
                         stock_data      = []
+                        # FIX (Performance): one aggregation for every medication
+                        # instead of one per medication. Scoped by name only when a
+                        # search has narrowed the set, so the $in list stays small.
+                        movement = _movement_by_med(
+                            transactions, {'$gt': end_dt, '$lte': now_dt},
+                            [m['name'] for m in all_meds] if search else None)
                         for med in all_meds:
                             med_name = med['name']
                             current_balance = med.get('balance', 0)
-                            try:
-                                # NEW (Stock Take): 'adjustment' transactions are
-                                # signed and must be unwound too, or a count taken
-                                # after the report date would distort the balance
-                                # reported as at that date.
-                                period_pipeline = [
-                                    {'$match': {'med_name': med_name, 'timestamp': {'$gt': end_dt, '$lte': now_dt}}},
-                                    {'$group': {'_id': None,
-                                                'dispensed': {'$sum': {'$cond': [{'$eq': ['$type','dispense']}, '$quantity', 0]}},
-                                                'received':  {'$sum': {'$cond': [{'$eq': ['$type','receive']},  '$quantity', 0]}},
-                                                'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type','adjustment']}, '$quantity', 0]}}}}
-                                ]
-                                pr = list(transactions.aggregate(period_pipeline))
-                                dispensed_after = pr[0].get('dispensed', 0) if pr else 0
-                                received_after  = pr[0].get('received',  0) if pr else 0
-                                adjusted_after  = pr[0].get('adjusted',  0) if pr else 0
-                                balance_at_date = max(0, current_balance - received_after + dispensed_after - adjusted_after)
-                            except Exception as qe:
-                                app.logger.error(f"Query failed for med {med_name}: {qe}")
-                                balance_at_date = current_balance
+                            # NEW (Stock Take): 'adjustment' transactions are
+                            # signed and must be unwound too, or a count taken
+                            # after the report date would distort the balance
+                            # reported as at that date.
+                            mv = movement.get(med_name, _ZERO_MOVEMENT)
+                            balance_at_date = max(0, current_balance - mv['received']
+                                                  + mv['dispensed'] - mv['adjusted'])
 
                             expiry_str = med.get('expiry_date')
                             expiry_dt = None
@@ -3092,69 +3085,64 @@ def reports():
                         if not start_date or not end_date:
                             raise ValueError('Start and end dates are required for this report type.')
                         med_filter   = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
-                        meds         = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1).limit(300))
+                        # FIX (Bug): the .limit(300) that used to be here silently
+                        # dropped every medication past the 300th from the report —
+                        # no message, no indication that anything was missing. It
+                        # only existed to bound the per-medication query loop below,
+                        # which no longer exists, so the cap goes with it.
+                        meds         = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1))
                         days_in_period = max(1, (end_dt.date() - start_dt.date()).days + 1)
+                        # FIX (Performance): one aggregation for the whole report
+                        # instead of one per medication.
+                        movement = _movement_by_med(
+                            transactions, {'$gte': start_dt, '$lte': end_dt},
+                            [m['name'] for m in meds] if search else None)
+
+                        def _tidy(v):
+                            return int(v) if isinstance(v, float) and v.is_integer() else round(v, 2)
+
                         for med in meds:
                             med_name = med['name']
-                            try:
-                                pp = [
-                                    {'$match': {'med_name': med_name, 'timestamp': {'$gte': start_dt, '$lte': end_dt}}},
-                                    {'$group': {'_id': None,
-                                                'dispensed': {'$sum': {'$cond': [{'$eq': ['$type','dispense']}, '$quantity', 0]}},
-                                                'received':  {'$sum': {'$cond': [{'$eq': ['$type','receive']},  '$quantity', 0]}},
-                                                'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type','adjustment']}, '$quantity', 0]}}}}
-                                ]
-                                pr = list(transactions.aggregate(pp))
-                                dispensed = pr[0].get('dispensed', 0) if pr else 0
-                                received  = pr[0].get('received',  0) if pr else 0
-                                # NEW (Stock Take): signed net of every physical-count
-                                # correction posted in the period. Unwinding it here is
-                                # what keeps the row internally consistent:
-                                #   Beginning + Received - Dispensed + Adjustment = Current
-                                adjustment        = pr[0].get('adjusted', 0) if pr else 0
-                                current_balance   = med.get('balance', 0)
-                                beginning_balance = max(0, current_balance - received + dispensed - adjustment)
-                                avg_daily         = dispensed / days_in_period
-                                # AMC (Average Monthly Consumption): consumption in the
-                                # period scaled to a 30-day month, so the figure stays
-                                # comparable whatever period length is selected.
-                                amc               = avg_daily * 30
-                                lead_time_stock   = avg_daily * 60
-                                amount_to_order   = max(0, amc - current_balance + lead_time_stock)
+                            mv = movement.get(med_name, _ZERO_MOVEMENT)
+                            dispensed = mv['dispensed']
+                            received  = mv['received']
+                            # NEW (Stock Take): signed net of every physical-count
+                            # correction posted in the period. Unwinding it here is
+                            # what keeps the row internally consistent:
+                            #   Beginning + Received - Dispensed + Adjustment = Current
+                            adjustment        = mv['adjusted']
+                            current_balance   = med.get('balance', 0)
+                            beginning_balance = max(0, current_balance - received + dispensed - adjustment)
+                            avg_daily         = dispensed / days_in_period
+                            # AMC (Average Monthly Consumption): consumption in the
+                            # period scaled to a 30-day month, so the figure stays
+                            # comparable whatever period length is selected.
+                            amc               = avg_daily * 30
+                            lead_time_stock   = avg_daily * 60
+                            amount_to_order   = max(0, amc - current_balance + lead_time_stock)
 
-                                def _tidy(v):
-                                    return int(v) if isinstance(v, float) and v.is_integer() else round(v, 2)
-
-                                report_data.append({
-                                    'med_name': med_name,
-                                    'beginning_balance': beginning_balance,
-                                    'dispensed': dispensed, 'received': received,
-                                    'adjustment': adjustment,
-                                    # NEW: non-admins don't see the Adjustment column,
-                                    # so their Dispensed figure has to absorb it or the
-                                    # row won't add up. Folding it in here isn't a fudge
-                                    # — it is literally what the two discrepancy types
-                                    # mean. A shortfall (negative adjustment) is stock
-                                    # that WAS issued but never recorded, so it belongs
-                                    # in Dispensed. A surplus (positive adjustment) is
-                                    # an issue that was recorded but never happened, so
-                                    # it comes back out of Dispensed. Beginning balance
-                                    # stays truthful either way, and
-                                    #   Beginning + Received - Dispensed = Current
-                                    # holds for the non-admin view.
-                                    'dispensed_effective': dispensed - adjustment,
-                                    'current_balance': current_balance,
-                                    'amc': _tidy(amc),
-                                    'amount_to_order': _tidy(amount_to_order)
-                                })
-                            except Exception as qe:
-                                app.logger.error(f"Query failed for med {med_name}: {qe}")
-                                cb = med.get('balance', 0)
-                                report_data.append({'med_name': med_name, 'beginning_balance': cb,
-                                                    'dispensed': 0, 'received': 0, 'adjustment': 0,
-                                                    'dispensed_effective': 0,
-                                                    'current_balance': cb, 'amc': 0,
-                                                    'amount_to_order': 0})
+                            report_data.append({
+                                'med_name': med_name,
+                                'beginning_balance': beginning_balance,
+                                'dispensed': dispensed, 'received': received,
+                                'adjustment': adjustment,
+                                # NEW: non-admins don't see the Adjustment column,
+                                # so their Dispensed figure has to absorb it or the
+                                # row won't add up. Folding it in here isn't a fudge
+                                # — it is literally what the two discrepancy types
+                                # mean. A shortfall (negative adjustment) is stock
+                                # that WAS issued but never recorded, so it belongs
+                                # in Dispensed. A surplus (positive adjustment) is
+                                # an issue that was recorded but never happened, so
+                                # it comes back out of Dispensed. Beginning balance
+                                # stays truthful either way, and
+                                #   Beginning + Received - Dispensed = Current
+                                # holds for the non-admin view.
+                                'dispensed_effective': dispensed - adjustment,
+                                'current_balance': current_balance,
+                                'amc': _tidy(amc),
+                                'amount_to_order': _tidy(amount_to_order)
+                            })
 
                     elif report_type == 'receive_list':
                         base_query = {'type': 'receive'}
@@ -3337,6 +3325,65 @@ def _monthly_movement(transactions, window_start):
             else:
                 bucket['adjusted'] += qty
         return movement
+
+
+# -----------------------------------------------------------------------
+# FIX (Performance): movement totals for a whole set of medications in ONE
+# aggregation, replacing the per-medication query loop that reports() used to
+# run.
+#
+# The old pattern issued two round trips per medication (a find plus an
+# aggregate), so an inventory report over a 260-item formulary meant roughly
+# 520 sequential round trips to Atlas — slow enough to risk a serverless
+# timeout, and unnecessary, since a single $group by med_name returns exactly
+# the same numbers.
+#
+# It was also a correctness problem: each of those queries sat in its own
+# try/except that fell back to zeros, so one flaky query produced a
+# plausible-looking row with fabricated figures in it. With a single query a
+# failure is visible instead of silent.
+# -----------------------------------------------------------------------
+_ZERO_MOVEMENT = {'dispensed': 0, 'received': 0, 'adjusted': 0}
+
+
+def _movement_by_med(transactions, time_filter, med_names=None):
+    """med_name -> {'dispensed', 'received', 'adjusted'} over a time window.
+
+    'adjusted' is the signed net of stock-take corrections; callers must
+    unwind it when back-calculating a balance, or a physical count will
+    silently distort every period that contains it.
+    """
+    match = {'timestamp': time_filter,
+             'type': {'$in': ['dispense', 'receive', 'adjustment']}}
+    if med_names is not None:
+        match['med_name'] = {'$in': med_names}
+    pipeline = [
+        {'$match': match},
+        {'$group': {
+            '_id': '$med_name',
+            'dispensed': {'$sum': {'$cond': [{'$eq': ['$type', 'dispense']}, '$quantity', 0]}},
+            'received':  {'$sum': {'$cond': [{'$eq': ['$type', 'receive']},  '$quantity', 0]}},
+            'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type', 'adjustment']}, '$quantity', 0]}},
+        }}
+    ]
+    try:
+        return {r['_id']: {'dispensed': r.get('dispensed', 0) or 0,
+                           'received':  r.get('received', 0) or 0,
+                           'adjusted':  r.get('adjusted', 0) or 0}
+                for r in transactions.aggregate(pipeline)}
+    except Exception as e:
+        app.logger.warning(f"Movement aggregation unavailable, falling back: {e}")
+        out = {}
+        for tx in transactions.find(match, {'_id': 0, 'med_name': 1, 'type': 1, 'quantity': 1}):
+            b = out.setdefault(tx.get('med_name'), {'dispensed': 0, 'received': 0, 'adjusted': 0})
+            qty = tx.get('quantity', 0) or 0
+            if tx.get('type') == 'dispense':
+                b['dispensed'] += qty
+            elif tx.get('type') == 'receive':
+                b['received'] += qty
+            else:
+                b['adjusted'] += qty
+        return out
 
 
 def _parse_expiry(raw):
