@@ -1320,14 +1320,14 @@ priced singly, leave pack size as 1.</p>
             <input name="pack_price" type="number" step="0.01" min="0" required></div>
         <div><label>Batch:</label><input name="batch" required></div>
         <div><label>Expiry Date:</label><input name="expiry_date" type="date" required></div>
-        <div><label>Schedule:</label>
-            <select name="schedule" required>
-                <option value="">-- Select Schedule --</option>
-                {% for opt in ['controlled', 'not controlled'] %}
-                <option value="{{ opt }}">{{ opt|title }}</option>
-                {% endfor %}
-            </select></div>
     </div>
+    {# FIX (Bug): the schedule dropdown used to live here, and receiving wrote it
+       onto the medication. Picking the wrong option while receiving a controlled
+       drug silently RECLASSIFIED it as not controlled, and the item then
+       disappeared from the controlled drug register with nothing to show why.
+       Schedule is a property of the medication, not of a consignment, so it is
+       set once under Add Medication and inherited here. Batch, expiry, price and
+       pack size genuinely do vary per delivery and are still captured above. #}
     <datalist id="med_suggestions"></datalist>
     <div class="form-buttons"><input type="submit" value="Add Line"></div>
 </form>
@@ -1555,6 +1555,9 @@ ADD_MED_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
     <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
 <h2>Add Medication</h2>
+<p>Defines an item so it can be received and dispensed. Supplier, order and invoice
+details are no longer captured here &mdash; they belong to a delivery, on the
+Receiving page.</p>
 <form method="POST" action="/add-medication" class="add-medication-form">
     <div class="common-section">
         <div>
@@ -1562,20 +1565,12 @@ ADD_MED_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
             <input name="med_name" id="med_name" list="med_suggestions" required>
         </div>
         <div>
-            <label>Initial Balance:</label>
-            <input name="initial_balance" type="number" min="0" required>
+            <label>Pack Size (units per pack):</label>
+            <input name="pack_size" type="number" min="1" value="1" required>
         </div>
         <div>
-            <label>Batch:</label>
-            <input name="batch" required>
-        </div>
-        <div>
-            <label>Price per Unit:</label>
-            <input name="price" type="number" step="0.01" min="0" required>
-        </div>
-        <div>
-            <label>Expiry Date (YYYY-MM-DD):</label>
-            <input name="expiry_date" type="date" required>
+            <label>Price per Pack (R):</label>
+            <input name="pack_price" type="number" step="0.01" min="0" required>
         </div>
         <div>
             <label>Schedule:</label>
@@ -1585,21 +1580,30 @@ ADD_MED_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
                 <option value="not controlled">Not Controlled</option>
             </select>
         </div>
+    </div>
+
+    <h3>Opening Stock (optional)</h3>
+    <p style="font-size:13px;">Only for stock already on the shelf when this item is
+    first set up &mdash; typically at go-live, where there is no invoice to receive
+    it against. Leave the balance at 0 for a new item whose stock will arrive on a
+    delivery. An opening load is recorded as exactly that, so it is never mistaken
+    for a supplier delivery or a stock-take correction.</p>
+    <div class="common-section">
         <div>
-            <label>Stock Receiver:</label>
-            <input name="stock_receiver" required>
+            <label>Opening Balance (single units):</label>
+            <input name="initial_balance" type="number" min="0" value="0" required>
         </div>
         <div>
-            <label>Order Number:</label>
-            <input name="order_number" required>
+            <label>Batch:</label>
+            <input name="batch">
         </div>
         <div>
-            <label>Supplier:</label>
-            <input name="supplier" required>
+            <label>Expiry Date (YYYY-MM-DD):</label>
+            <input name="expiry_date" type="date">
         </div>
         <div>
-            <label>Invoice Number:</label>
-            <input name="invoice_number" required>
+            <label>Counted By:</label>
+            <input name="stock_receiver">
         </div>
     </div>
     <datalist id="med_suggestions"></datalist>
@@ -3186,7 +3190,6 @@ def receive():
                     pack_price  = float(request.form['pack_price'])
                     batch       = request.form['batch'].strip()
                     expiry_date = request.form['expiry_date']
-                    schedule    = request.form['schedule']
                     if quantity < 1:
                         raise ValueError('quantity must be at least 1')
                     if pack_size < 1:
@@ -3206,6 +3209,26 @@ def receive():
                 price      = _unit_price(pack_price, pack_size)
                 line_value = quantity * pack_price / pack_size
 
+                # FIX (Data integrity): this used to upsert, so a typo in the
+                # medication name silently CREATED a new medication and put the
+                # stock there, leaving the real item's balance untouched and
+                # nobody any the wiser. Receiving now refuses an item that has
+                # not been defined, exactly as the stock take does.
+                existing_med = medications.find_one({'name': med_name})
+                if not existing_med:
+                    write_app_warning(
+                        'medication_not_found',
+                        f'Medication "{med_name}" not found while receiving on '
+                        f'{d["reference"]}.',
+                        {'med_name': med_name, 'delivery': d['reference']})
+                    flash(f'Medication "{med_name}" is not on file. Add it under '
+                          f'Add Medication first, then receive it here.')
+                    return redirect(url_for('receive', delivery_id=str(d['_id'])))
+
+                # Classification comes from the medication record, never from
+                # the form — see the note on the add-line template.
+                schedule = existing_med.get('schedule', 'not controlled')
+
                 # Supplier / order / invoice are INHERITED from the delivery
                 # header — that is the whole point: they are typed once per
                 # delivery, not once per medication, so they cannot drift
@@ -3215,10 +3238,9 @@ def receive():
                     {'$inc': {'balance': quantity},
                      '$set': {'batch': batch, 'price': price, 'expiry_date': expiry_date,
                               'pack_size': pack_size, 'pack_price': pack_price,
-                              'schedule': schedule, 'stock_receiver': d['stock_receiver'],
+                              'stock_receiver': d['stock_receiver'],
                               'order_number': d['order_number'], 'supplier': d['supplier'],
-                              'invoice_number': d['invoice_number']}},
-                    upsert=True
+                              'invoice_number': d['invoice_number']}}
                 )
                 transactions.insert_one({
                     'type': 'receive',
@@ -3325,36 +3347,62 @@ def add_medication():
 
         if request.method == 'POST':
             try:
-                med_name       = request.form['med_name']
-                initial_balance= int(request.form['initial_balance'])
-                batch          = request.form['batch']
-                price          = float(request.form['price'])
-                expiry_date    = request.form['expiry_date']
+                med_name       = request.form['med_name'].strip()
+                # NEW (Pack pricing): the unit price is derived here too, so an
+                # item defined on this page values its stock correctly from the
+                # moment it is created rather than only after it is first
+                # received on a delivery.
+                pack_size      = int(request.form.get('pack_size') or 1)
+                pack_price     = float(request.form['pack_price'])
                 schedule       = request.form['schedule']
-                stock_receiver = request.form['stock_receiver']
-                order_number   = request.form['order_number']
-                supplier       = request.form['supplier']
-                invoice_number = request.form['invoice_number']
+                initial_balance= int(request.form.get('initial_balance') or 0)
+                batch          = (request.form.get('batch') or '').strip()
+                expiry_date    = (request.form.get('expiry_date') or '').strip()
+                stock_receiver = (request.form.get('stock_receiver') or '').strip()
+                if pack_size < 1:
+                    raise ValueError('pack size must be at least 1')
+                if pack_price < 0:
+                    raise ValueError('price cannot be negative')
+                if initial_balance < 0:
+                    raise ValueError('opening balance cannot be negative')
 
                 if medications.find_one({'name': med_name}):
                     message = f'Medication "{med_name}" already exists. Use Receiving to add stock.'
                     return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
 
+                price = _unit_price(pack_price, pack_size)
                 medications.insert_one({
                     'name': med_name, 'balance': initial_balance, 'batch': batch,
-                    'price': price, 'expiry_date': expiry_date, 'schedule': schedule,
-                    'stock_receiver': stock_receiver, 'order_number': order_number,
-                    'supplier': supplier, 'invoice_number': invoice_number
+                    'price': price, 'pack_size': pack_size, 'pack_price': pack_price,
+                    'expiry_date': expiry_date, 'schedule': schedule,
+                    'stock_receiver': stock_receiver,
                 })
-                transactions.insert_one({
-                    'type': 'receive', 'med_name': med_name, 'quantity': initial_balance,
-                    'batch': batch, 'price': price, 'expiry_date': expiry_date,
-                    'schedule': schedule, 'stock_receiver': stock_receiver,
-                    'order_number': order_number, 'supplier': supplier,
-                    'invoice_number': invoice_number,
-                    'user': current_user, 'timestamp': datetime.utcnow()
-                })
-                message = 'Medication added successfully!'
+
+                # An opening load is stock that was already on the shelf, not a
+                # supplier delivery. It is written as its own transaction type so
+                # that it can never be mistaken for one: it has no invoice to
+                # reconcile against, it must not appear in the receive list or
+                # the delivery totals, and it must not be read as a stock-take
+                # correction either. Reports that back-calculate balances treat
+                # it exactly like a receipt, which is what it is in stock terms.
+                if initial_balance > 0:
+                    transactions.insert_one({
+                        'type': 'opening_balance',
+                        'med_name': med_name, 'quantity': initial_balance,
+                        'batch': batch, 'price': price,
+                        'pack_size': pack_size, 'pack_price': pack_price,
+                        'line_value': initial_balance * pack_price / pack_size,
+                        'expiry_date': expiry_date, 'schedule': schedule,
+                        'stock_receiver': stock_receiver,
+                        'user': current_user, 'timestamp': datetime.utcnow(),
+                    })
+                    write_audit_entry('CREATE', 'opening_balance', med_name,
+                                      f'opening stock of {initial_balance} units '
+                                      f'recorded by {current_user}')
+                    message = (f'Medication added with an opening balance of '
+                               f'{initial_balance} units (unit price R{price:.4f}).')
+                else:
+                    message = 'Medication added successfully! Receive stock against a delivery.'
                 return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
@@ -3702,7 +3750,7 @@ def reports():
                             # current balance after a physical count.
                             all_tx = list(transactions.find({
                                 'med_name': {'$in': controlled_meds},
-                                'type': {'$in': ['receive', 'dispense', 'adjustment']},
+                                'type': {'$in': ['receive', 'dispense', 'adjustment', 'opening_balance']},
                                 'timestamp': {'$gte': start_dt, '$lte': end_dt}
                             }).sort('timestamp', 1).limit(10000))
 
@@ -3717,7 +3765,8 @@ def reports():
                                 try:
                                     current_balance    = med.get('balance', 0)
                                     med_txs            = tx_by_med[med_name]
-                                    received_in_period = sum(t['quantity'] for t in med_txs if t['type'] == 'receive')
+                                    received_in_period = sum(t['quantity'] for t in med_txs
+                                                             if t['type'] in ('receive', 'opening_balance'))
                                     dispensed_in_period= sum(t['quantity'] for t in med_txs if t['type'] == 'dispense')
                                     adjusted_in_period = sum(t['quantity'] for t in med_txs if t['type'] == 'adjustment')
                                     beginning_balance  = max(0, current_balance - received_in_period
@@ -3725,7 +3774,7 @@ def reports():
                                     running_bal        = beginning_balance
                                     running_entries    = []
                                     for tx in med_txs:
-                                        if tx['type'] == 'receive':
+                                        if tx['type'] in ('receive', 'opening_balance'):
                                             running_bal += tx['quantity']
                                         elif tx['type'] == 'dispense':
                                             running_bal -= tx['quantity']
@@ -3813,13 +3862,14 @@ def _monthly_movement(transactions, window_start):
     movement = defaultdict(dict)
     pipeline = [
         {'$match': {'timestamp': {'$gte': window_start},
-                    'type': {'$in': ['dispense', 'receive', 'adjustment']}}},
+                    'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance']}}},
         {'$group': {
             '_id': {'med': '$med_name',
                     'y': {'$year': '$timestamp'},
                     'm': {'$month': '$timestamp'}},
             'dispensed': {'$sum': {'$cond': [{'$eq': ['$type', 'dispense']}, '$quantity', 0]}},
-            'received':  {'$sum': {'$cond': [{'$eq': ['$type', 'receive']},  '$quantity', 0]}},
+            'received':  {'$sum': {'$cond': [{'$in': ['$type', ['receive', 'opening_balance']]},
+                                             '$quantity', 0]}},
             'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type', 'adjustment']}, '$quantity', 0]}},
         }}
     ]
@@ -3840,7 +3890,7 @@ def _monthly_movement(transactions, window_start):
         movement = defaultdict(dict)
         cursor = transactions.find(
             {'timestamp': {'$gte': window_start},
-             'type': {'$in': ['dispense', 'receive', 'adjustment']}},
+             'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance']}},
             {'_id': 0, 'med_name': 1, 'type': 1, 'quantity': 1, 'timestamp': 1}
         )
         for tx in cursor:
@@ -3852,7 +3902,7 @@ def _monthly_movement(transactions, window_start):
             qty = tx.get('quantity', 0) or 0
             if tx.get('type') == 'dispense':
                 bucket['dispensed'] += qty
-            elif tx.get('type') == 'receive':
+            elif tx.get('type') in ('receive', 'opening_balance'):
                 bucket['received'] += qty
             else:
                 bucket['adjusted'] += qty
@@ -3885,8 +3935,12 @@ def _movement_by_med(transactions, time_filter, med_names=None):
     unwind it when back-calculating a balance, or a physical count will
     silently distort every period that contains it.
     """
+    # NEW (Opening balances): an opening load is stock arriving, so every
+    # back-calculated beginning balance has to account for it exactly as it
+    # does a receipt. Omitting it would make every period containing a go-live
+    # load report a beginning balance that is too high.
     match = {'timestamp': time_filter,
-             'type': {'$in': ['dispense', 'receive', 'adjustment']}}
+             'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance']}}
     if med_names is not None:
         match['med_name'] = {'$in': med_names}
     pipeline = [
@@ -3894,7 +3948,8 @@ def _movement_by_med(transactions, time_filter, med_names=None):
         {'$group': {
             '_id': '$med_name',
             'dispensed': {'$sum': {'$cond': [{'$eq': ['$type', 'dispense']}, '$quantity', 0]}},
-            'received':  {'$sum': {'$cond': [{'$eq': ['$type', 'receive']},  '$quantity', 0]}},
+            'received':  {'$sum': {'$cond': [{'$in': ['$type', ['receive', 'opening_balance']]},
+                                             '$quantity', 0]}},
             'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type', 'adjustment']}, '$quantity', 0]}},
         }}
     ]
@@ -3911,7 +3966,7 @@ def _movement_by_med(transactions, time_filter, med_names=None):
             qty = tx.get('quantity', 0) or 0
             if tx.get('type') == 'dispense':
                 b['dispensed'] += qty
-            elif tx.get('type') == 'receive':
+            elif tx.get('type') in ('receive', 'opening_balance'):
                 b['received'] += qty
             else:
                 b['adjusted'] += qty
@@ -4837,8 +4892,11 @@ def edit_receive(receive_id):
                     medications.update_one(
                         {'name': med_name},
                         {'$inc': {'balance': quantity},
+                         # FIX (Bug): schedule deliberately excluded here too —
+                         # editing a receive line must not be able to reclassify
+                         # a controlled drug. Change it under Edit Medication.
                          '$set': {'batch': batch, 'price': price, 'expiry_date': expiry_date,
-                                  'schedule': schedule, 'stock_receiver': stock_receiver,
+                                  'stock_receiver': stock_receiver,
                                   'order_number': order_number, 'supplier': supplier,
                                   'invoice_number': invoice_number}},
                         upsert=True
