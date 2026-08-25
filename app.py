@@ -1717,6 +1717,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         <option value="stock_on_hand">Stock on Hand</option>
         <option value="expired_list">Expired Stock on Shelf (to action)</option>
         <option value="expiry_writeoffs">Expiry Write-Offs (removed stock)</option>
+        <option value="unmet_demand">Unmet Demand (stockouts)</option>
         <option value="near_expired_list">Near Expired Drug List</option>
         <option value="out_of_stock_list">Out of Stock List</option>
         <option value="inventory">Inventory Report</option>
@@ -1837,7 +1838,13 @@ Adjustment is the net of any physical-count corrections made during the period �
 see Audit &rarr; Stock Take Discrepancies for the detail behind it. Expired is
 stock written off the shelf. Both are shown signed.
 AMC is average monthly consumption over the selected period, and counts only
-recorded dispensing — write-offs and count corrections are excluded from it.</p>
+recorded dispensing — write-offs and count corrections are excluded from it.
+<strong>Unmet</strong> is demand that could not be filled because stock had run
+out; <strong>Adjusted AMC</strong> adds it back, so it reflects what was actually
+asked for rather than what happened to be on the shelf. Where the two differ, the
+plain AMC is understating demand — which is exactly what happens to an item that
+keeps running out. <strong>Fill rate</strong> is the share of demand that was
+met.</p>
 {% else %}
 <p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed = Current</strong>.
 AMC is average monthly consumption over the selected period.</p>
@@ -1850,7 +1857,8 @@ AMC is average monthly consumption over the selected period.</p>
            honest place to put it. #}
         <tr><th>Medication</th><th>Beginning Balance</th><th>Received</th><th>Dispensed</th>
             {% if is_admin %}<th>Adjustment</th><th>Expired</th>{% endif %}
-            <th>Current Balance</th><th>AMC</th><th>Amount to Order</th></tr>
+            <th>Current Balance</th><th>AMC</th><th>Unmet</th><th>Adjusted AMC</th>
+            <th>Fill Rate</th><th>Amount to Order</th></tr>
     </thead>
     <tbody>
     {% for row in report_data %}
@@ -1864,13 +1872,77 @@ AMC is average monthly consumption over the selected period.</p>
             {% else %}
             <td>{{ row.dispensed_effective }}</td>
             {% endif %}
-            <td>{{ row.current_balance }}</td><td>{{ row.amc }}</td><td>{{ row.amount_to_order }}</td>
+            <td>{{ row.current_balance }}</td><td>{{ row.amc }}</td>
+            <td>{% if row.unmet %}<strong>{{ row.unmet }}</strong>{% else %}0{% endif %}</td>
+            <td>{{ row.adjusted_amc }}</td>
+            <td>{% if row.fill_rate is not none %}{{ row.fill_rate }}%{% else %}&ndash;{% endif %}</td>
+            <td>{{ row.amount_to_order }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="{{ 9 if is_admin else 7 }}">No data for this period.</td></tr>
+        <tr><td colspan="{{ 12 if is_admin else 10 }}">No data for this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
+{% elif report_type == 'unmet_demand' %}
+<h2>Unmet Demand for {{ start_date }} to {{ end_date }}</h2>
+<p style="font-size:13px;">Every occasion a medication was asked for and could not
+be supplied in full. This is the demand that never reaches the dispensing figures,
+and the reason AMC alone understates what an item is really needed for &mdash; the
+more often something runs out, the less it appears to be used.</p>
+<table>
+    <thead>
+        <tr><th>Date</th><th>Medication</th><th>Requested</th><th>Given</th>
+            <th>Short</th><th>Value Short</th><th>Patient</th><th>Prescriber</th><th>User</th></tr>
+    </thead>
+    <tbody>
+    {% for u in unmet_list %}
+        <tr class="expired">
+            <td>{{ u.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ u.med_name }}</td><td>{{ u.requested }}</td><td>{{ u.given }}</td>
+            <td><strong>{{ u.shortfall }}</strong></td>
+            <td>R{{ "%.2f"|format(u.shortfall_value) }}</td>
+            <td>{{ u.patient }}</td><td>{{ u.prescriber or '-' }}</td><td>{{ u.user }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="9">Every request in this period was filled in full.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% if unmet_list %}
+<h3>By Medication</h3>
+<table>
+    <thead><tr><th>Medication</th><th>Occasions</th><th>Units Short</th>
+               <th>Units Dispensed</th><th>Fill Rate</th><th>Value Short</th></tr></thead>
+    <tbody>
+    {% for m in unmet_totals.by_med %}
+        <tr class="{% if m.fill_rate is not none and m.fill_rate < 90 %}expired{% elif m.fill_rate is not none and m.fill_rate < 98 %}close-to-expire{% else %}normal{% endif %}">
+            <td>{{ m.med_name }}</td><td>{{ m.count }}</td><td>{{ m.shortfall }}</td>
+            <td>{{ m.dispensed }}</td>
+            <td>{% if m.fill_rate is not none %}{{ m.fill_rate }}%{% else %}&ndash;{% endif %}</td>
+            <td>R{{ "%.2f"|format(m.value) }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+<h3>Summary</h3>
+<table>
+    <thead><tr><th>Occasions</th><th>Items Affected</th><th>Units Short</th>
+               <th>Overall Fill Rate</th><th>Value Short</th></tr></thead>
+    <tbody>
+        <tr><td>{{ unmet_list|length }}</td><td>{{ unmet_totals.item_count }}</td>
+            <td>{{ unmet_totals.shortfall }}</td>
+            <td>{% if unmet_totals.fill_rate is not none %}{{ unmet_totals.fill_rate }}%{% else %}&ndash;{% endif %}</td>
+            <td>R{{ "%.2f"|format(unmet_totals.value) }}</td></tr>
+    </tbody>
+</table>
+<p style="font-size:13px;">Fill rate is units supplied as a share of units
+requested. The Order Request already adds these shortfalls back when working out
+what to buy.</p>
+<div class="form-buttons">
+    <button type="button" onclick="window.print();">Print This Report</button>
+</div>
+{% endif %}
+
 {% elif report_type == 'expiry_writeoffs' %}
 <h2>Expiry Write-Offs for {{ start_date }} to {{ end_date }}</h2>
 <p style="font-size:13px;">Stock that was actually removed from the shelf as
@@ -2031,22 +2103,31 @@ across two months it is counted once, in the earlier month.</p>
 rounded <strong>up to whole packs</strong>, since that is how the supplier
 sells &mdash; the units column shows what you actually receive, which is
 usually a little more than the shortfall.
-Items with no recorded consumption are not included: without an AMC there is
+Items with no recorded demand are not included: without an AMC there is
 no basis for a quantity, and guessing one is worse than leaving it to your
-judgement.</p>
+judgement.<br>
+Quantities are worked out from <strong>demand</strong>, not consumption: where an
+item ran out, the units that were asked for and could not be supplied are added
+back. Ordering to consumption alone is how a stockout becomes permanent &mdash;
+you dispense less because you have less, so you order less.
+{% if order_request.demand_adjusted %}<strong>{{ order_request.demand_adjusted }}
+item(s) below were adjusted upward this way.</strong>{% endif %}</p>
 
 {% for group in order_request.groups %}
 <h3>{{ group.supplier }} &mdash; {{ group.lines|length }} item(s), R{{ "%.2f"|format(group.total) }}</h3>
 <table>
     <thead>
-        <tr><th>Medication</th><th>AMC</th><th>On Hand</th><th>Months Left</th>
+        <tr><th>Medication</th><th>AMC (consumption)</th><th>Unmet</th>
+            <th>AMC used</th><th>On Hand</th><th>Months Left</th>
             <th>Shortfall</th><th>Pack Size</th><th>Packs</th><th>Units</th>
             <th>Price/Pack</th><th>Line Cost</th></tr>
     </thead>
     <tbody>
     {% for l in group.lines %}
         <tr class="{{ l.status }}">
-            <td>{{ l.med_name }}</td><td>{{ l.amc }}</td><td>{{ l.balance }}</td>
+            <td>{{ l.med_name }}</td><td>{{ l.plain_amc }}</td>
+            <td>{% if l.unmet %}<strong>{{ l.unmet }}</strong>{% else %}0{% endif %}</td>
+            <td>{{ l.amc }}</td><td>{{ l.balance }}</td>
             <td>{{ l.mos_label }}</td><td>{{ l.shortfall }}</td>
             <td>{% if l.pack_known %}{{ l.pack_size }}{% else %}<strong>not recorded</strong>{% endif %}</td>
             <td>{{ l.packs }}</td><td>{{ l.units }}</td>
@@ -2272,6 +2353,9 @@ will read low. AMC is calculated from the completed months only.
 <strong>MOS</strong> is months of stock — current balance divided by AMC, i.e. how
 long today's stock lasts at the recent rate.
 <strong>Trend</strong> compares the last completed month against AMC.
+<strong>Unmet</strong> is demand that could not be filled because stock had run out,
+and <strong>fill rate</strong> is the share of demand that was met — an item with a
+low fill rate has an AMC that understates what people actually wanted.
 <strong>Pattern</strong> flags how steady demand has been: an erratic item needs more
 buffer than its AMC alone suggests.
 The peak month in each row is shown in bold.
@@ -2281,7 +2365,7 @@ The peak month in each row is shown in bold.
         <tr>
             <th>Medication</th>
             {% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
-            <th>AMC</th><th>Trend</th><th>Pattern</th>
+            <th>AMC</th><th>Unmet</th><th>Fill Rate</th><th>Trend</th><th>Pattern</th>
             <th>Balance</th><th>MOS</th><th>Suggested Order</th>
         </tr>
     </thead>
@@ -2293,6 +2377,8 @@ The peak month in each row is shown in bold.
             <td>{% if r.peak is not none and loop.index0 == r.peak and v %}<strong>{{ v }}</strong>{% else %}{{ v }}{% endif %}</td>
             {% endfor %}
             <td>{{ r.amc }}</td>
+            <td>{% if r.unmet %}<strong>{{ r.unmet }}</strong>{% else %}0{% endif %}</td>
+            <td>{% if r.fill_rate is not none %}{{ r.fill_rate }}%{% else %}&ndash;{% endif %}</td>
             <td>{{ r.trend_label }}</td>
             <td>{{ r.pattern }}</td>
             <td>{{ r.balance }}</td>
@@ -2300,7 +2386,7 @@ The peak month in each row is shown in bold.
             <td>{{ r.suggested_order }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="{{ month_labels|length + 7 }}">No medications matching the criteria.</td></tr>
+        <tr><td colspan="{{ month_labels|length + 9 }}">No medications matching the criteria.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -3196,16 +3282,52 @@ def dispense():
                                     {'med_name': med_name, 'requested_quantity': quantity,
                                      'patient': patient, 'transaction_id': tx_id}
                                 )
-                            elif med.get('balance', 0) < quantity:
-                                error_msgs.append(f'Insufficient stock for "{med_name}".')
-                                write_app_warning(
-                                    'insufficient_stock',
-                                    f'Insufficient stock for "{med_name}" during dispense.',
-                                    {'med_name': med_name, 'requested_quantity': quantity,
-                                     'available_quantity': med.get('balance', 0),
-                                     'patient': patient, 'transaction_id': tx_id}
-                                )
                             else:
+                                # NEW (Unmet demand): a short line used to be
+                                # refused ENTIRELY — not even the units actually on
+                                # the shelf were recorded. In practice the
+                                # pharmacist still hands over what they have, so the
+                                # software was manufacturing the very
+                                # "issued, not recorded" discrepancies the stock
+                                # take exists to find. Now the available units are
+                                # dispensed and the shortfall is recorded as demand
+                                # that could not be met.
+                                available = med.get('balance', 0) or 0
+                                given     = min(quantity, available)
+                                short     = quantity - given
+                                if short > 0:
+                                    unit_price = med.get('price', 0) or 0
+                                    transactions.insert_one({
+                                        'type': 'unmet_demand',
+                                        'transaction_id': tx_id,
+                                        'med_name': med_name,
+                                        # quantity is 0 so this NEVER moves stock in
+                                        # any balance calculation; the demand figures
+                                        # live in their own fields.
+                                        'quantity': 0,
+                                        'requested': quantity, 'given': given,
+                                        'shortfall': short,
+                                        'price': unit_price,
+                                        'shortfall_value': short * unit_price,
+                                        'patient': patient, 'prescriber': prescriber,
+                                        'dispenser': dispenser, 'date': date_str,
+                                        'user': current_user,
+                                        'timestamp': datetime.utcnow(),
+                                    })
+                                    write_app_warning(
+                                        'insufficient_stock',
+                                        f'Insufficient stock for "{med_name}" during dispense.',
+                                        {'med_name': med_name, 'requested_quantity': quantity,
+                                         'available_quantity': available,
+                                         'dispensed_quantity': given,
+                                         'patient': patient, 'transaction_id': tx_id}
+                                    )
+                                    error_msgs.append(
+                                        f'{med_name}: only {given} of {quantity} available — '
+                                        f'{short} recorded as unmet demand.')
+                                if given <= 0:
+                                    continue
+                                quantity = given
                                 medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
                                 transactions.insert_one({
                                     'type': 'dispense',
@@ -3847,6 +3969,38 @@ def delete_medication():
     return redirect('/reports')
 
 
+def _demand_by_med(transactions, time_filter, med_names=None):
+    """med_name -> {'shortfall', 'events'} — demand that could not be met.
+
+    Kept apart from _movement_by_med on purpose: unmet demand moves no stock,
+    so it must never touch a balance calculation. It exists only to correct the
+    demand signal, which consumption alone understates precisely when an item
+    is stocking out — the case where an accurate figure matters most.
+    """
+    match = {'type': 'unmet_demand', 'timestamp': time_filter}
+    if med_names is not None:
+        match['med_name'] = {'$in': med_names}
+    try:
+        return {r['_id']: {'shortfall': r.get('shortfall', 0) or 0,
+                           'events': r.get('events', 0) or 0}
+                for r in transactions.aggregate([
+                    {'$match': match},
+                    {'$group': {'_id': '$med_name',
+                                'shortfall': {'$sum': '$shortfall'},
+                                'events': {'$sum': 1}}}])}
+    except Exception as e:
+        app.logger.warning(f"Demand aggregation unavailable, falling back: {e}")
+        out = {}
+        for t in transactions.find(match, {'_id': 0, 'med_name': 1, 'shortfall': 1}):
+            b = out.setdefault(t.get('med_name'), {'shortfall': 0, 'events': 0})
+            b['shortfall'] += t.get('shortfall', 0) or 0
+            b['events'] += 1
+        return out
+
+
+_ZERO_DEMAND = {'shortfall': 0, 'events': 0}
+
+
 def _name_key(name):
     """Sort key for medication names.
 
@@ -3979,6 +4133,8 @@ def reports():
         monthly = None
         writeoffs = []
         writeoff_totals = {'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []}
+        unmet_list = []
+        unmet_totals = {'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []}
         report_type = None
         start_date = None
         end_date = None
@@ -4116,6 +4272,9 @@ def reports():
                         movement = _movement_by_med(
                             transactions, {'$gte': start_dt, '$lte': end_dt},
                             [m['name'] for m in meds] if search else None)
+                        demand = _demand_by_med(
+                            transactions, {'$gte': start_dt, '$lte': end_dt},
+                            [m['name'] for m in meds] if search else None)
 
                         def _tidy(v):
                             return int(v) if isinstance(v, float) and v.is_integer() else round(v, 2)
@@ -4143,6 +4302,13 @@ def reports():
                             # period scaled to a 30-day month, so the figure stays
                             # comparable whatever period length is selected.
                             amc               = avg_daily * 30
+                            # NEW (Unmet demand): true demand is what was asked
+                            # for, not what happened to be on the shelf. AMC is
+                            # left as consumption — the recognised figure — and
+                            # the demand-based version sits beside it, so the
+                            # gap between the two is visible rather than buried.
+                            unmet             = demand.get(med_name, _ZERO_DEMAND)['shortfall']
+                            adjusted_amc      = (dispensed + unmet) / days_in_period * 30
                             lead_time_stock   = avg_daily * 60
                             amount_to_order   = max(0, amc - current_balance + lead_time_stock)
 
@@ -4166,6 +4332,9 @@ def reports():
                                 'dispensed_effective': dispensed - adjustment - expired,
                                 'current_balance': current_balance,
                                 'amc': _tidy(amc),
+                                'unmet': unmet, 'adjusted_amc': _tidy(adjusted_amc),
+                                'fill_rate': (round(dispensed / (dispensed + unmet) * 100, 1)
+                                              if (dispensed + unmet) else None),
                                 'amount_to_order': _tidy(amount_to_order)
                             })
 
@@ -4184,6 +4353,45 @@ def reports():
                                 {'expiry_date':    {'$regex': search, '$options': 'i'}},
                             ]
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
+
+                    elif report_type == 'unmet_demand':
+                        if not start_date or not end_date:
+                            raise ValueError('Start and end dates are required for this report type.')
+                        q = {'type': 'unmet_demand',
+                             'timestamp': {'$gte': start_dt, '$lte': end_dt}}
+                        if search:
+                            q['$or'] = [
+                                {'med_name':   {'$regex': search, '$options': 'i'}},
+                                {'patient':    {'$regex': search, '$options': 'i'}},
+                                {'prescriber': {'$regex': search, '$options': 'i'}},
+                                {'user':       {'$regex': search, '$options': 'i'}},
+                            ]
+                        unmet_list = list(transactions.find(q).sort('timestamp', -1).limit(2000))
+                        disp = _movement_by_med(transactions, {'$gte': start_dt, '$lte': end_dt})
+                        by_med = {}
+                        for u in unmet_list:
+                            e = by_med.setdefault(u.get('med_name', ''),
+                                                  {'count': 0, 'shortfall': 0, 'value': 0.0})
+                            e['count'] += 1
+                            e['shortfall'] += u.get('shortfall', 0) or 0
+                            e['value'] += u.get('shortfall_value', 0) or 0
+                        rows_by_med = []
+                        for k, v in sorted(by_med.items(), key=lambda kv: -kv[1]['shortfall']):
+                            d = disp.get(k, _ZERO_MOVEMENT)['dispensed']
+                            total = d + v['shortfall']
+                            rows_by_med.append({'med_name': k, **v, 'dispensed': d,
+                                                'fill_rate': round(d / total * 100, 1) if total else None})
+                        tot_short = sum(v['shortfall'] for v in by_med.values())
+                        tot_disp = sum(r['dispensed'] for r in rows_by_med)
+                        unmet_totals = {
+                            'item_count': len(by_med),
+                            'shortfall': tot_short,
+                            'value': sum(v['value'] for v in by_med.values()),
+                            'fill_rate': (round(tot_disp / (tot_disp + tot_short) * 100, 1)
+                                          if (tot_disp + tot_short) else None),
+                            'by_med': rows_by_med,
+                        }
+                        report_title = 'Unmet Demand'
 
                     elif report_type == 'expiry_writeoffs':
                         # NEW: the record of what was actually removed, as
@@ -4383,12 +4591,21 @@ def reports():
                         movement  = _movement_by_med(
                             transactions, {'$gte': window_start, '$lte': window_end},
                             [m['name'] for m in req_meds] if search else None)
+                        # Ordering is precisely where demand matters more than
+                        # consumption: an item that ran out dispensed less than
+                        # was asked for, and ordering to that lower figure is how
+                        # a stockout becomes permanent.
+                        demand    = _demand_by_med(
+                            transactions, {'$gte': window_start, '$lte': window_end},
+                            [m['name'] for m in req_meds] if search else None)
 
                         by_supplier, unpriced, unsized = {}, 0, 0
                         for med in req_meds:
                             name    = med.get('name', '')
                             consumed = movement.get(name, _ZERO_MOVEMENT)['dispensed']
-                            amc      = consumed / 3.0          # 90 days -> per month
+                            unmet    = demand.get(name, _ZERO_DEMAND)['shortfall']
+                            plain_amc = consumed / 3.0         # 90 days -> per month
+                            amc      = (consumed + unmet) / 3.0
                             if amc <= 0:
                                 continue
                             balance = med.get('balance', 0) or 0
@@ -4416,6 +4633,11 @@ def reports():
                             supplier  = med.get('supplier') or 'Supplier not recorded'
                             by_supplier.setdefault(supplier, []).append({
                                 'med_name': name, 'amc': round(amc, 1),
+                                'plain_amc': round(plain_amc, 1),
+                                # expressed per month, like the AMC figures it
+                                # sits between — a 90-day total in that row would
+                                # have read as a monthly rate
+                                'unmet': round(unmet / 3.0, 1), 'unmet_units': unmet,
                                 'balance': balance,
                                 'mos_label': 'Out of stock' if balance == 0 else f'{mos:.1f}',
                                 'shortfall': int(round(shortfall)),
@@ -4442,6 +4664,8 @@ def reports():
                             'grand_total': sum(g['total'] for g in groups),
                             'unpriced': unpriced,
                             'unsized': unsized,
+                            'demand_adjusted': sum(1 for g in by_supplier.values()
+                                                   for l in g if l['unmet_units']),
                         }
                         report_title = 'Order Request'
 
@@ -4518,6 +4742,8 @@ def reports():
                     monthly = None
                     writeoffs = []
                     writeoff_totals = {'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []}
+                    unmet_list = []
+                    unmet_totals = {'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []}
             else:
                 message = 'Please select a report type.'
 
@@ -4527,6 +4753,7 @@ def reports():
             receive_list=receive_list, stock_data=stock_data,
             controlled_register=controlled_register, order_request=order_request,
             monthly=monthly, writeoffs=writeoffs, writeoff_totals=writeoff_totals,
+            unmet_list=unmet_list, unmet_totals=unmet_totals,
             start_date=start_date, end_date=end_date,
             total_transactions=total_transactions,
             nav_links=get_nav_links(), message=message,
@@ -4539,6 +4766,7 @@ def reports():
             report_type=None, report_data=[], receive_list=[], stock_data=[],
             controlled_register=[], order_request=None, monthly=None,
             writeoffs=[], writeoff_totals={'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []},
+            unmet_list=[], unmet_totals={'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []},
             start_date=None, end_date=None,
             total_transactions=0, search=None, report_title=None, is_admin=is_admin
         ), 500
@@ -4895,6 +5123,7 @@ def dashboard():
         totals = {'val_dispensed': [0.0] * n_m, 'val_received': [0.0] * n_m,
                   'val_adjusted': [0.0] * n_m}
         activity = _activity_by_month(db['transactions'], window_start)
+        demand = _demand_by_med(db['transactions'], {'$gte': window_start})
 
         for med in all_meds:
             name    = med.get('name', '')
@@ -4952,8 +5181,11 @@ def dashboard():
             suggested = max(0, amc * 3 - balance) if amc > 0 else 0
             peak      = monthly.index(max(monthly)) if any(monthly) else None
 
+            unmet_units = demand.get(name, _ZERO_DEMAND)['shortfall']
             rows.append({
-                'med_name': name, 'monthly': monthly,
+                'med_name': name, 'monthly': monthly, 'unmet': unmet_units,
+                'fill_rate': (round(sum(monthly) / (sum(monthly) + unmet_units) * 100)
+                              if (sum(monthly) + unmet_units) else None),
                 'amc': round(amc, 1), 'amc_raw': amc,
                 'trend_label': trend_label,
                 'trend_abs': abs((last_complete - amc) / amc) if amc > 0 else -1,
@@ -4993,8 +5225,22 @@ def dashboard():
         stock_value  = sum(r['value'] for r in rows)
         at_risk      = sum(r['value'] for r in expiring_90)
 
+        total_disp = sum(sum(r['monthly']) for r in rows)
+        total_unmet = sum(r['unmet'] for r in rows)
+        fill = (total_disp / (total_disp + total_unmet) * 100) if (total_disp + total_unmet) else None
+        short_items = [r for r in rows if r['unmet']]
         tiles = [
             {'label': 'Items tracked', 'value': len(rows), 'sub': '', 'bg': '#eef2f7', 'fg': '#1a3a5c'},
+            {'label': 'Fill rate', 'value': f'{fill:.1f}%' if fill is not None else '-',
+             'sub': f'{total_unmet:,} unit(s) asked for and not supplied',
+             'bg': ('#f8d7da' if fill is not None and fill < 90
+                    else ('#fff3cd' if fill is not None and fill < 98 else '#eef2f7')),
+             'fg': ('#721c24' if fill is not None and fill < 90
+                    else ('#856404' if fill is not None and fill < 98 else '#1a3a5c'))},
+            {'label': 'Items that ran short', 'value': len(short_items),
+             'sub': 'demand could not be met',
+             'bg': '#f8d7da' if short_items else '#eef2f7',
+             'fg': '#721c24' if short_items else '#1a3a5c'},
             {'label': 'Out of stock', 'value': len(out_of_stock), 'sub': 'balance is zero',
              'bg': '#f8d7da' if out_of_stock else '#eef2f7', 'fg': '#721c24' if out_of_stock else '#1a3a5c'},
             {'label': 'Under 1 month of stock', 'value': len(under_one), 'sub': 'reorder now',
