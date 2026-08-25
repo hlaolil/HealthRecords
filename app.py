@@ -1676,16 +1676,24 @@ EDIT_MED_TEMPLATE = CSS_STYLE + """
     <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
 <h2>Edit {{ med_data.name if med_data else '' }}</h2>
+<p style="font-size:13px;">Changes the item's details: pack size, price, batch,
+expiry and schedule. It does <strong>not</strong> change the quantity on hand
+&mdash; stock moves only through receiving, dispensing, a stock-take count or an
+expiry write-off, so that every change has a record behind it. To correct a
+balance, run a stock take and enter the physical count.</p>
 <form method="POST" action="{{ url_for('edit_medication') }}" class="edit-medication-form">
     <div class="common-section">
         <div>
             <label>Medication Name:</label>
             <input name="med_name" value="{{ med_data.name if med_data else '' }}" readonly>
         </div>
-        <div>
-            <label>Balance:</label>
-            <input name="balance" type="number" min="0" value="{{ med_data.balance if med_data else '' }}" required>
-        </div>
+        {# FIX (Data integrity): the Balance field used to live here, and writing to
+   it changed stock with NO transaction behind it — the one remaining way to
+   move stock without a trace, which is exactly what the stock take, the
+   expiry write-off and the delivery ledger were built to prevent. A balance
+   edited here would break every back-calculated beginning balance silently.
+   Stock now moves only through: receiving, dispensing, a stock-take count,
+   or an expiry write-off. #}
         <div>
             <label>Batch:</label>
             <input name="batch" value="{{ med_data.batch if med_data else '' }}" required>
@@ -1741,11 +1749,19 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         <option value="receive_list">Receive List</option>
         <option value="controlled_drug_register">Controlled Drug Register</option>
         <option value="order_request">Order Request (Requisition)</option>
-        <option value="monthly_report">Monthly Report</option>
+        <option value="monthly_report">Period Report (day / week / month / quarter / year)</option>
     </select><br>
     <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" type="date"><br>
     <label>End Date (YYYY-MM-DD, if applicable):</label><input name="end_date" type="date"><br>
     <label>Search (optional):</label><input name="search" type="text" placeholder="Filter results by relevant fields"><br>
+    <label>Period (Period Report only):</label>
+    <select name="period">
+        {% for v, lbl in [('day','Day'), ('week','Week'), ('month','Month'),
+                          ('quarter','Quarter'), ('year','Year')] %}
+        <option value="{{ v }}" {% if v == 'month' %}selected{% endif %}>{{ lbl }}</option>
+        {% endfor %}
+    </select>
+    <span style="font-size:13px;">&nbsp;the start date picks the period; the whole period is covered.</span><br>
     <label>Months of Cover (Order Request only):</label>
     <select name="cover_months">
         {% for m in [2, 3, 4, 6] %}
@@ -2020,7 +2036,9 @@ how much is being brought in.</p>
 {% endif %}
 
 {% elif report_type == 'monthly_report' and monthly %}
-<h2>Monthly Report &mdash; {{ monthly.label }}</h2>
+<h2>{{ monthly.period_kind|capitalize }} Report &mdash; {{ monthly.label }}</h2>
+<p style="font-size:13px;">Covering {{ monthly.starts }} to {{ monthly.ends }}
+inclusive.</p>
 <p style="font-size:13px;">All figures at <strong>cost</strong>, valued from the
 price recorded on each transaction when it happened &mdash; not from today's
 price &mdash; so a report run again next year still says the same thing.
@@ -2033,7 +2051,7 @@ item's current price. Those figures are indicative.{% endif %}</p>
     <thead><tr><th>Movement</th><th>Value</th><th>Note</th></tr></thead>
     <tbody>
         <tr><td>Opening stock value</td><td>R{{ "%.2f"|format(monthly.opening_value) }}</td>
-            <td>at the start of the month</td></tr>
+            <td>at the start of the period</td></tr>
         <tr><td>Received from suppliers</td><td>R{{ "%.2f"|format(monthly.received_value) }}</td>
             <td>{{ monthly.receipt_lines }} line(s) across {{ monthly.delivery_count }} delivery(ies)</td></tr>
         <tr><td>Opening loads</td><td>R{{ "%.2f"|format(monthly.opening_load_value) }}</td>
@@ -2058,7 +2076,7 @@ item's current price. Those figures are indicative.{% endif %}</p>
 <p style="font-size:13px;">Opening and closing values are the stock on hand at each
 point, priced at each item's current unit price. Movements are priced as they
 happened, so the two bases differ and the column will not add up exactly when
-supplier prices have changed during the month &mdash; that difference is a price
+supplier prices have changed during the period &mdash; that difference is a price
 effect, not a stock discrepancy.</p>
 
 <h3>Dispensing</h3>
@@ -2089,9 +2107,9 @@ effect, not a stock discrepancy.</p>
             <td>R{{ "%+.2f"|format(monthly.invoice_gap) }}</td></tr>
     </tbody>
 </table>
-<p style="font-size:13px;">An order counts in the month its first invoice was
+<p style="font-size:13px;">An order counts in the period its first invoice was
 recorded, since there is no separate order record. Where one order is invoiced
-across two months it is counted once, in the earlier month.</p>
+across two periods it is counted once, in the earlier one.</p>
 
 <h3>Highest Cost Items ({{ monthly.top_items|length }})</h3>
 <table>
@@ -3461,6 +3479,17 @@ def dispense():
                             message = f'Partial success: {", ".join(dispensed_meds)}. Errors: {"; ".join(error_msgs)}'
                         else:
                             message = '; '.join(error_msgs) or f'No medications {message_prefix.lower()}.'
+
+                        # FIX (Bug): this used to fall through and re-render with
+                        # the transaction list that was fetched BEFORE the insert,
+                        # so a dispense you had just recorded did not appear until
+                        # the next one pushed it into view.
+                        #
+                        # It also left the browser sitting on a POST, so a refresh
+                        # re-submitted the whole dispense and deducted the stock a
+                        # second time. Redirecting after the write fixes both.
+                        flash(message)
+                        return redirect(url_for('dispense'))
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
 
@@ -3992,7 +4021,6 @@ def edit_medication():
         med_data = med
         if request.method == 'POST':
             try:
-                balance     = int(request.form['balance'])
                 batch       = request.form['batch']
                 # NEW (Pack pricing): the unit price is derived here as well, so
                 # a pack size can be corrected without waiting for the item to be
@@ -4009,7 +4037,8 @@ def edit_medication():
                 schedule    = request.form['schedule']
                 medications.update_one(
                     {'name': med_name},
-                    {'$set': {'balance': balance, 'batch': batch, 'price': price,
+                    # balance deliberately absent — see the note in the template
+                    {'$set': {'batch': batch, 'price': price,
                               'pack_size': pack_size, 'pack_price': pack_price,
                               'expiry_date': expiry_date, 'schedule': schedule}}
                 )
@@ -4545,11 +4574,41 @@ def reports():
                         # change gives the same answer, which a lookup against
                         # today's price would not.
                         if not start_date:
-                            raise ValueError('A start date is required; the report covers its calendar month.')
-                        m_start = datetime(start_dt.year, start_dt.month, 1)
-                        m_end = (datetime(m_start.year + (m_start.month == 12),
-                                          1 if m_start.month == 12 else m_start.month + 1, 1)
-                                 - timedelta(seconds=1))
+                            raise ValueError('A start date is required; the report covers the period containing it.')
+                        # NEW: the same report over any period. The start date
+                        # picks a point and the whole surrounding period is
+                        # covered, so nobody has to work out where a week or a
+                        # quarter begins.
+                        period_kind = request.values.get('period', 'month')
+                        if period_kind not in ('day', 'week', 'month', 'quarter', 'year'):
+                            period_kind = 'month'
+                        d = start_dt
+                        if period_kind == 'day':
+                            m_start = datetime(d.year, d.month, d.day)
+                            m_end = m_start + timedelta(days=1) - timedelta(seconds=1)
+                            label = m_start.strftime('%A, %d %B %Y')
+                        elif period_kind == 'week':
+                            wd = datetime(d.year, d.month, d.day)
+                            m_start = wd - timedelta(days=wd.weekday())      # Monday
+                            m_end = m_start + timedelta(days=7) - timedelta(seconds=1)
+                            label = (f"Week of {m_start.strftime('%d %b')} to "
+                                     f"{(m_end).strftime('%d %b %Y')}")
+                        elif period_kind == 'quarter':
+                            q = (d.month - 1) // 3
+                            m_start = datetime(d.year, q * 3 + 1, 1)
+                            m_end = (datetime(d.year + (q == 3), 1 if q == 3 else q * 3 + 4, 1)
+                                     - timedelta(seconds=1))
+                            label = f'Q{q + 1} {d.year}'
+                        elif period_kind == 'year':
+                            m_start = datetime(d.year, 1, 1)
+                            m_end = datetime(d.year + 1, 1, 1) - timedelta(seconds=1)
+                            label = str(d.year)
+                        else:
+                            m_start = datetime(d.year, d.month, 1)
+                            m_end = (datetime(m_start.year + (m_start.month == 12),
+                                              1 if m_start.month == 12 else m_start.month + 1, 1)
+                                     - timedelta(seconds=1))
+                            label = m_start.strftime('%B %Y')
                         period = {'$gte': m_start, '$lte': m_end}
 
                         lines = list(transactions.find(
@@ -4629,7 +4688,9 @@ def reports():
 
                         top = sorted(per_item.items(), key=lambda kv: -kv[1]['value'])[:15]
                         monthly = {
-                            'label': m_start.strftime('%B %Y'),
+                            'label': label, 'period_kind': period_kind,
+                            'starts': m_start.strftime('%Y-%m-%d'),
+                            'ends': m_end.strftime('%Y-%m-%d'),
                             'opening_value': opening_value,
                             'closing_value': closing_value,
                             'received_value': received_value,
@@ -4658,7 +4719,7 @@ def reports():
                                  if dispensed_value else 0}
                                 for k, v in top],
                         }
-                        report_title = f'Monthly Report — {monthly["label"]}'
+                        report_title = f'Period Report — {label}'
 
                     elif report_type == 'order_request':
                         # NEW (Order Request): turns "amount to order" into an
