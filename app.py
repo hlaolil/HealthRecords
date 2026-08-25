@@ -2005,8 +2005,8 @@ recorded in the audit log.</p>
 <h2>Inventory Report for {{ start_date }} to {{ end_date }}</h2>
 {% if is_admin %}
 <p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed
-&minus; Issued Internally + Adjustment + Expired + Damaged = Current</strong>.
-<strong>Issued Internally</strong> is stock sent to a department rather than a
+&minus; To Departments + Adjustment + Expired + Damaged = Current</strong>.
+<strong>To Departments</strong> is stock sent to a department rather than a
 patient &mdash; it is consumption and counts toward AMC, because it has to be
 replaced. <strong>Damaged</strong> is stock lost, and does not.
 Adjustment is the net of any physical-count corrections made during the period —
@@ -2021,11 +2021,13 @@ plain AMC is understating demand — which is exactly what happens to an item th
 keeps running out. <strong>Fill rate</strong> is the share of demand that was
 met.</p>
 {% else %}
-<p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed
-&minus; Issued Internally = Current</strong>.
-<strong>Issued Internally</strong> is stock sent to a department rather than a
-patient. AMC is average monthly consumption &mdash; dispensing plus internal
-issues, since both have to be replaced.</p>
+<p>Each row reconciles: <strong>Beginning + Received &minus; Issued
+&minus; To Departments = Current</strong>.</p>
+<p style="font-size:13px;"><strong>Issued</strong> is everything that left the
+shelf to patients or was written off it &mdash; the general outward column, which
+is why it is not headed "Dispensed". <strong>To Departments</strong> is stock sent
+to a department rather than a patient. AMC is average monthly consumption
+&mdash; dispensing plus issues to departments, since both have to be replaced.</p>
 {% endif %}
 <table>
     <thead>
@@ -2033,9 +2035,16 @@ issues, since both have to be replaced.</p>
            still adds up, because dispensed_effective has the adjustment folded
            into it — see the comment in the reports() route for why that is the
            honest place to put it. #}
-        <tr><th>Medication</th><th>Beginning Balance</th><th>Received</th><th>Dispensed</th>
+        {# NEW: an admin sees Dispensed as pure patient dispensing, because the
+           adjustment, expiry and damage columns sit beside it. A non-admin does
+           not see those columns — they are folded into this one — so calling it
+           "Dispensed" would be a mislabel: the figure includes stock that was
+           written off, not handed to anyone. "Issued" is the honest general
+           heading for the same number. #}
+        <tr><th>Medication</th><th>Beginning Balance</th><th>Received</th>
+            <th>{% if is_admin %}Dispensed{% else %}Issued{% endif %}</th>
             {% if is_admin %}<th>Adjustment</th><th>Expired</th>{% endif %}
-            <th>Issued Internally</th>
+            <th>To Departments</th>
             {% if is_admin %}<th>Damaged</th>{% endif %}
             <th>Current Balance</th><th>AMC</th><th>Unmet</th><th>Adjusted AMC</th>
             <th>Fill Rate</th><th>Amount to Order</th></tr>
@@ -5658,7 +5667,8 @@ def _stdev(values):
 
 
 DEPARTMENTS = ['Emergency Department', 'Emergency Trolley', 'PHC', 'OHC',
-               'Lab', 'Testing Room', 'Doctor Consultation', 'Campaigns', 'Other']
+               'Lab', 'Testing Room', 'Doctor Consultation', 'Campaigns',
+               'Environment', 'Other']
 
 DAMAGE_REASONS = ['Broken / spilled', 'Contaminated', 'Cold chain failure',
                   'Recalled by supplier', 'Lost / unaccounted', 'Other']
