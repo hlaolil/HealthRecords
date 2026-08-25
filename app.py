@@ -101,6 +101,11 @@ def init_db_collections():
             db.create_collection('stock_takes')
         if 'stock_take_counts' not in existing:
             db.create_collection('stock_take_counts')
+        # NEW (Deliveries): header document carrying supplier, order number +
+        # order total, invoice number + invoice total for a consignment. Its
+        # line items are ordinary 'receive' transactions tagged with delivery_id.
+        if 'deliveries' not in existing:
+            db.create_collection('deliveries')
 
         # audit_log: /audit page sorts by timestamp desc and filters by
         # action/target_type/target_id/user via $or regex, plus an exact
@@ -139,6 +144,11 @@ def init_db_collections():
         db['stock_take_counts'].create_index([('stock_take_id', 1), ('timestamp', -1)])
         db['stock_take_counts'].create_index([('med_name', 1)])
         db['stock_take_counts'].create_index([('discrepancy_type', 1)])
+        db['deliveries'].create_index([('status', 1), ('opened_at', -1)])
+        db['deliveries'].create_index([('reference', 1)], unique=True)
+        db['deliveries'].create_index([('invoice_number', 1)])
+        db['deliveries'].create_index([('order_number', 1)])
+        db['transactions'].create_index([('delivery_id', 1)])
 
         app.logger.info("DB collections and indexes initialized (audit_log, error_logs, app_warnings, transactions, medications)")
         print("✅ DB collections and indexes initialized (audit_log, error_logs, app_warnings, transactions, medications)")
@@ -874,6 +884,31 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
 </form>
 <hr>
 <h3>Dispense Transactions</h3>
+
+{% if window_defaulted %}
+<p class="message" style="font-size:13px;">Showing <strong>this month</strong> by
+default. Set a date range to look further back, or use the search box &mdash; a
+search looks across all records, not just this month.</p>
+{% endif %}
+{% macro pagebar(pager, endpoint, start_date, end_date, search, unit) %}
+{% if pager.total %}
+<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:10px 0;">
+    <span style="font-size:13px;">Showing {{ pager.first }}&ndash;{{ pager.last }} of {{ pager.total }} {{ unit }}</span>
+    {% if pager.pages > 1 %}
+    {% if pager.has_prev %}
+        <a href="{{ url_for(endpoint, page=1, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">&laquo; First</button></a>
+        <a href="{{ url_for(endpoint, page=pager.page-1, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">&lsaquo; Previous</button></a>
+    {% endif %}
+    <span style="font-size:13px;">Page {{ pager.page }} of {{ pager.pages }}</span>
+    {% if pager.has_next %}
+        <a href="{{ url_for(endpoint, page=pager.page+1, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">Next &rsaquo;</button></a>
+        <a href="{{ url_for(endpoint, page=pager.pages, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">Last &raquo;</button></a>
+    {% endif %}
+    {% endif %}
+</div>
+{% endif %}
+{% endmacro %}
+
 <form method="GET" action="{{ url_for('dispense') }}" class="filter-form">
     <div class="filter-section">
         <div>
@@ -894,6 +929,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
         </div>
     </div>
 </form>
+{{ pagebar(pager, 'dispense', start_date, end_date, search, unit) }}
 <table>
     <thead>
         <tr>
@@ -987,6 +1023,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
         {% endfor %}
     </tbody>
 </table>
+{{ pagebar(pager, 'dispense', start_date, end_date, search, unit) }}
 <script>
 let medRowCount = {{ (tx_data.meds|length if tx_data else 1) }};
 let diagRowCount = {{ (tx_data.diags|length if tx_data else 1) }};
@@ -1143,100 +1180,219 @@ RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
 </p>
 {% endif %}
 
-<h2>{% if rx_data %}Edit Receive Transaction{% else %}Receive Medication{% endif %}</h2>
+{# NEW (Deliveries): receiving now happens inside a DELIVERY, which carries
+   the supplier, order number + order total, and invoice number + invoice total
+   ONCE. Line items inherit them, so those four fields are typed once per
+   delivery instead of once per medication.
 
-<form method="POST"
-      action="{% if rx_data %}{{ url_for('edit_receive', receive_id=rx_data.receive_id) }}{% else %}/receive{% endif %}"
-      class="receive-form">
+   That is the convenience benefit. The control benefit is the three-way match:
+   what was ordered vs what was invoiced vs what actually arrived. Mismatches
+   are surfaced immediately but never block receiving — stock physically on the
+   shelf must always be recordable. #}
 
-    {% if rx_data %}
-        <input type="hidden" name="receive_id" value="{{ rx_data.receive_id }}">
-    {% endif %}
-
+{% if rx_data %}
+<h2>Edit Receive Line</h2>
+<form method="POST" action="{{ url_for('edit_receive', receive_id=rx_data.receive_id) }}" class="receive-form">
+    <input type="hidden" name="receive_id" value="{{ rx_data.receive_id }}">
     <div class="common-section">
-        <div>
-            <label>Medication:</label>
-            <input name="med_name" id="med_name" list="med_suggestions"
-                   value="{{ rx_data.med_name if rx_data else '' }}" required>
-        </div>
-        <div>
-            <label>Quantity:</label>
-            <input name="quantity" type="number" min="1"
-                   value="{{ rx_data.quantity if rx_data else '' }}" required>
-        </div>
-        <div>
-            <label>Batch:</label>
-            <input name="batch" value="{{ rx_data.batch if rx_data else '' }}" required>
-        </div>
-        <div>
-            <label>Price per Unit:</label>
-            <input name="price" type="number" step="0.01" min="0"
-                   value="{{ rx_data.price if rx_data else '' }}" required>
-        </div>
-        <div>
-            <label>Expiry Date (YYYY-MM-DD):</label>
-            <input name="expiry_date" type="date"
-                   value="{{ rx_data.expiry_date if rx_data else '' }}" required>
-        </div>
-        <div>
-            <label>Schedule:</label>
+        <div><label>Medication:</label>
+            <input name="med_name" id="med_name" list="med_suggestions" value="{{ rx_data.med_name }}" required></div>
+        <div><label>Quantity:</label>
+            <input name="quantity" type="number" min="1" value="{{ rx_data.quantity }}" required></div>
+        <div><label>Batch:</label><input name="batch" value="{{ rx_data.batch }}" required></div>
+        <div><label>Price per Unit:</label>
+            <input name="price" type="number" step="0.01" min="0" value="{{ rx_data.price }}" required></div>
+        <div><label>Expiry Date:</label>
+            <input name="expiry_date" type="date" value="{{ rx_data.expiry_date }}" required></div>
+        <div><label>Schedule:</label>
+            <select name="schedule" required>
+            {% for opt in ['controlled', 'not controlled'] %}
+                <option value="{{ opt }}" {% if rx_data.schedule == opt %}selected{% endif %}>{{ opt|title }}</option>
+            {% endfor %}
+            </select></div>
+        <div><label>Stock Receiver:</label>
+            <input name="stock_receiver" value="{{ rx_data.stock_receiver }}" required></div>
+        <div><label>Order Number:</label>
+            <input name="order_number" value="{{ rx_data.order_number }}" required></div>
+        <div><label>Supplier:</label>
+            <input name="supplier" value="{{ rx_data.supplier }}" required></div>
+        <div><label>Invoice Number:</label>
+            <input name="invoice_number" value="{{ rx_data.invoice_number }}" required></div>
+    </div>
+    <datalist id="med_suggestions"></datalist>
+    <div class="form-buttons">
+        <input type="submit" value="Update Receive">
+        <a href="{{ url_for('receive') }}"><button type="button">Cancel</button></a>
+    </div>
+</form>
+
+{% elif delivery %}
+<h2>{{ delivery.reference }} &mdash; {{ delivery.supplier }}</h2>
+<p><strong>Status:</strong> {{ delivery.status|upper }} &nbsp;|&nbsp;
+   <strong>Order:</strong> {{ delivery.order_number }} &nbsp;|&nbsp;
+   <strong>Invoice:</strong> {{ delivery.invoice_number }} &nbsp;|&nbsp;
+   Opened {{ delivery.opened_at.strftime('%Y-%m-%d %H:%M') }} by {{ delivery.received_by }}
+   {% if delivery.closed_at %}&nbsp;|&nbsp; Closed {{ delivery.closed_at.strftime('%Y-%m-%d %H:%M') }} by {{ delivery.closed_by }}{% endif %}
+</p>
+<p><a href="{{ url_for('receive') }}">&larr; All deliveries</a></p>
+
+<h3>Three-Way Match</h3>
+<table>
+    <thead><tr><th>Document</th><th>Total</th><th>Compared With</th><th>Difference</th><th>Status</th></tr></thead>
+    <tbody>
+        <tr class="{{ recon.order_class }}">
+            <td>Purchase order {{ delivery.order_number }}</td>
+            <td>R{{ "%.2f"|format(delivery.order_total) }}</td>
+            <td>Invoice R{{ "%.2f"|format(delivery.invoice_total) }}</td>
+            <td>{{ recon.order_diff_label }}</td>
+            <td>{{ recon.order_note }}</td>
+        </tr>
+        <tr class="{{ recon.goods_class }}">
+            <td>Invoice {{ delivery.invoice_number }}</td>
+            <td>R{{ "%.2f"|format(delivery.invoice_total) }}</td>
+            <td>Goods received R{{ "%.2f"|format(recon.goods_value) }}</td>
+            <td>{{ recon.goods_diff_label }}</td>
+            <td>{{ recon.goods_note }}</td>
+        </tr>
+    </tbody>
+</table>
+<p style="font-size:13px;">Goods received is the sum of quantity &times; unit price
+across the lines captured below. A mismatch is flagged but never blocks
+receiving &mdash; stock that is physically on the shelf must always be
+recordable. Investigate it, then close the delivery.</p>
+
+{% if delivery.status == 'open' %}
+<h3>Add a Line</h3>
+<p style="font-size:13px;">Supplier, order number and invoice number come from the
+delivery above &mdash; you do not re-enter them per item.</p>
+<form method="POST" action="{{ url_for('receive') }}" class="receive-form">
+    <input type="hidden" name="action" value="line">
+    <input type="hidden" name="delivery_id" value="{{ delivery._id|string }}">
+    <div class="common-section">
+        <div><label>Medication:</label>
+            <input name="med_name" id="med_name" list="med_suggestions" required autocomplete="off"></div>
+        <div><label>Quantity:</label><input name="quantity" type="number" min="1" required></div>
+        <div><label>Batch:</label><input name="batch" required></div>
+        <div><label>Price per Unit:</label>
+            <input name="price" type="number" step="0.01" min="0" required></div>
+        <div><label>Expiry Date:</label><input name="expiry_date" type="date" required></div>
+        <div><label>Schedule:</label>
             <select name="schedule" required>
                 <option value="">-- Select Schedule --</option>
                 {% for opt in ['controlled', 'not controlled'] %}
-                    <option value="{{ opt }}"
-                            {% if rx_data and rx_data.schedule == opt %}selected{% endif %}>
-                        {{ opt|title }}
-                    </option>
+                <option value="{{ opt }}">{{ opt|title }}</option>
                 {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Stock Receiver:</label>
-            <input name="stock_receiver"
-                   value="{{ rx_data.stock_receiver if rx_data else '' }}" required>
-        </div>
-        <div>
-            <label>Order Number:</label>
-            <input name="order_number"
-                   value="{{ rx_data.order_number if rx_data else '' }}" required>
-        </div>
-        <div>
-            <label>Supplier:</label>
-            <input name="supplier"
-                   value="{{ rx_data.supplier if rx_data else '' }}" required>
-        </div>
-        <div>
-            <label>Invoice Number:</label>
-            <input name="invoice_number"
-                   value="{{ rx_data.invoice_number if rx_data else '' }}" required>
-        </div>
+            </select></div>
     </div>
-
     <datalist id="med_suggestions"></datalist>
-
-    <div class="form-buttons">
-        <input type="submit" value="{% if rx_data %}Update Receive{% else %}Receive{% endif %}">
-        {% if rx_data %}
-            <a href="{{ url_for('receive', start_date=start_date, end_date=end_date, search=search) }}">
-                <button type="button">Cancel</button>
-            </a>
-        {% else %}
-            <button type="button"
-                    onclick="document.querySelector('form.receive-form').reset();
-                             document.getElementById('med_suggestions').innerHTML='';">
-                Clear Form
-            </button>
-        {% endif %}
-    </div>
-
-    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-    <input type="hidden" name="end_date"   value="{{ end_date   or '' }}">
-    <input type="hidden" name="search"     value="{{ search     or '' }}">
+    <div class="form-buttons"><input type="submit" value="Add Line"></div>
 </form>
+
+<form method="POST" action="{{ url_for('receive') }}" style="margin-top:16px;">
+    <input type="hidden" name="action" value="close">
+    <input type="hidden" name="delivery_id" value="{{ delivery._id|string }}">
+    <button type="submit" class="delete-btn"
+            onclick="return confirm('Close {{ delivery.reference }}? No further lines can be added.');">
+        Close This Delivery</button>
+</form>
+{% endif %}
+
+<h3>Lines Captured ({{ delivery_lines|length }})</h3>
+<table>
+    <thead><tr><th>Medication</th><th>Quantity</th><th>Unit Price</th><th>Line Value</th>
+               <th>Batch</th><th>Expiry</th><th>Schedule</th><th>Captured</th></tr></thead>
+    <tbody>
+    {% for l in delivery_lines %}
+        <tr>
+            <td>{{ l.med_name }}</td><td>{{ l.quantity }}</td>
+            <td>R{{ "%.2f"|format(l.price) }}</td>
+            <td>R{{ "%.2f"|format(l.quantity * l.price) }}</td>
+            <td>{{ l.batch }}</td><td>{{ l.expiry_date }}</td><td>{{ l.schedule }}</td>
+            <td>{{ l.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="8">No lines captured yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+{% else %}
+<h2>Start a Delivery</h2>
+<p>Capture the paperwork once, then add each medication as a line. Several
+deliveries can be open at the same time.</p>
+<form method="POST" action="{{ url_for('receive') }}" class="receive-form">
+    <input type="hidden" name="action" value="open">
+    <div class="common-section">
+        <div><label>Supplier:</label><input name="supplier" required></div>
+        <div><label>Order Number:</label><input name="order_number" required></div>
+        <div><label>Order Total (R):</label>
+            <input name="order_total" type="number" step="0.01" min="0" required></div>
+        <div><label>Invoice Number:</label><input name="invoice_number" required></div>
+        <div><label>Invoice Total (R):</label>
+            <input name="invoice_total" type="number" step="0.01" min="0" required></div>
+        <div><label>Received By:</label><input name="stock_receiver" required></div>
+        <div><label>Note (optional):</label><input name="note" type="text"></div>
+    </div>
+    <div class="form-buttons"><input type="submit" value="Open Delivery"></div>
+</form>
+
+<h2>Deliveries ({{ deliveries|length }})</h2>
+<table>
+    <thead>
+        <tr><th>Reference</th><th>Supplier</th><th>Order</th><th>Order Total</th>
+            <th>Invoice</th><th>Invoice Total</th><th>Goods Received</th>
+            <th>Difference</th><th>Lines</th><th>Status</th><th>Opened</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+    {% for d in deliveries %}
+        <tr class="{{ d.row_class }}">
+            <td>{{ d.reference }}</td><td>{{ d.supplier }}</td>
+            <td>{{ d.order_number }}</td><td>R{{ "%.2f"|format(d.order_total) }}</td>
+            <td>{{ d.invoice_number }}</td><td>R{{ "%.2f"|format(d.invoice_total) }}</td>
+            <td>R{{ "%.2f"|format(d.goods_value) }}</td>
+            <td>{{ d.diff_label }}</td>
+            <td>{{ d.line_count }}</td><td>{{ d.status|upper }}</td>
+            <td>{{ d.opened_at.strftime('%Y-%m-%d') }}</td>
+            <td class="action-buttons">
+                <a href="{{ url_for('receive', delivery_id=d._id|string) }}">
+                    <button class="edit-btn">{% if d.status == 'open' %}Continue{% else %}View{% endif %}</button></a>
+            </td>
+        </tr>
+    {% else %}
+        <tr><td colspan="12">No deliveries yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
 
 <hr>
 
 <h2>Receive Transactions</h2>
+
+{% if window_defaulted %}
+<p class="message" style="font-size:13px;">Showing <strong>this month</strong> by
+default. Set a date range to look further back, or use the search box &mdash; a
+search looks across all records, not just this month.</p>
+{% endif %}
+{% macro pagebar(pager, endpoint, start_date, end_date, search, unit) %}
+{% if pager.total %}
+<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:10px 0;">
+    <span style="font-size:13px;">Showing {{ pager.first }}&ndash;{{ pager.last }} of {{ pager.total }} {{ unit }}</span>
+    {% if pager.pages > 1 %}
+    {% if pager.has_prev %}
+        <a href="{{ url_for(endpoint, page=1, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">&laquo; First</button></a>
+        <a href="{{ url_for(endpoint, page=pager.page-1, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">&lsaquo; Previous</button></a>
+    {% endif %}
+    <span style="font-size:13px;">Page {{ pager.page }} of {{ pager.pages }}</span>
+    {% if pager.has_next %}
+        <a href="{{ url_for(endpoint, page=pager.page+1, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">Next &rsaquo;</button></a>
+        <a href="{{ url_for(endpoint, page=pager.pages, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">Last &raquo;</button></a>
+    {% endif %}
+    {% endif %}
+</div>
+{% endif %}
+{% endmacro %}
+
 
 <form method="GET" action="{{ url_for('receive') }}" class="filter-form">
     <div class="filter-section">
@@ -1260,6 +1416,7 @@ RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
     </div>
 </form>
 
+{{ pagebar(pager, 'receive', start_date, end_date, search, unit) }}
 <table>
     <thead>
         <tr>
@@ -1275,7 +1432,7 @@ RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
             <td>{{ t.med_name }}</td>
             <td>{{ t.quantity }}</td>
             <td>{{ t.batch }}</td>
-            <td>${{ "%.2f"|format(t.price) }}</td>
+            <td>R{{ "%.2f"|format(t.price) }}</td>
             <td>{{ t.expiry_date }}</td>
             <td>{{ t.stock_receiver }}</td>
             <td>{{ t.order_number }}</td>
@@ -1314,6 +1471,7 @@ RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
         {% endfor %}
     </tbody>
 </table>
+{{ pagebar(pager, 'receive', start_date, end_date, search, unit) }}
 
 <script>
 document.addEventListener('DOMContentLoaded', async () => {
@@ -1519,7 +1677,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ med.balance }}</td>
             <td>{{ med.expiry_date }}</td>
             <td>{{ med.batch }}</td>
-            <td>${{ "%.2f"|format(med.price) }}</td>
+            <td>R{{ "%.2f"|format(med.price) }}</td>
             <td class="action-buttons">
                 {% if is_admin %}
                 <a href="{{ url_for('edit_medication', med_name=med.name) }}"><button class="edit-btn">Edit</button></a>
@@ -1604,7 +1762,7 @@ AMC is average monthly consumption over the selected period.</p>
     {% for t in receive_list %}
         <tr>
             <td>{{ t.med_name }}</td><td>{{ t.quantity }}</td><td>{{ t.batch }}</td>
-            <td>${{ "%.2f"|format(t.price) }}</td><td>{{ t.expiry_date }}</td>
+            <td>R{{ "%.2f"|format(t.price) }}</td><td>{{ t.expiry_date }}</td>
             <td>{{ t.stock_receiver }}</td><td>{{ t.order_number }}</td><td>{{ t.supplier }}</td>
             <td>{{ t.invoice_number }}</td><td>{{ t.user }}</td>
             <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
@@ -1729,15 +1887,15 @@ DASHBOARD_TEMPLATE = CSS_STYLE + """
         <tr><td><strong>Items dispensed</strong></td>{% for v in act.lines %}<td>{{ v }}</td>{% endfor %}</tr>
         <tr><td><strong>Items per visit</strong></td>{% for v in act.per_visit %}<td>{{ v }}</td>{% endfor %}</tr>
         <tr><td><strong>Patients seen</strong></td>{% for v in act.patients %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Value dispensed</strong></td>{% for v in totals.val_dispensed %}<td>${{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Value dispensed</strong></td>{% for v in totals.val_dispensed %}<td>R{{ v }}</td>{% endfor %}</tr>
         <tr><td><strong>Stock receipts</strong></td>{% for v in act.receipts %}<td>{{ v }}</td>{% endfor %}</tr>
         <tr><td><strong>Deliveries</strong></td>{% for v in act.deliveries %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Value received</strong></td>{% for v in totals.val_received %}<td>${{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Value received</strong></td>{% for v in totals.val_received %}<td>R{{ v }}</td>{% endfor %}</tr>
         {% if is_admin %}
         <tr><td><strong>Items adjusted at stock take</strong></td>
             {% for v in act.adjusted_lines %}<td>{{ v }}</td>{% endfor %}</tr>
         <tr><td><strong>Value of adjustments</strong></td>
-            {% for v in totals.val_adjusted %}<td>${{ v }}</td>{% endfor %}</tr>
+            {% for v in totals.val_adjusted %}<td>R{{ v }}</td>{% endfor %}</tr>
         {% endif %}
     </tbody>
 </table>
@@ -1808,7 +1966,7 @@ The peak month in each row is shown in bold.
             <td>{{ e.expiry_date }}</td>
             <td>{{ e.days_left }}</td>
             <td>{{ e.balance }}</td>
-            <td>${{ "%.2f"|format(e.value) }}</td>
+            <td>R{{ "%.2f"|format(e.value) }}</td>
             <td>{{ e.amc }}</td>
             <td>{{ e.likely_unused }}</td>
         </tr>
@@ -1868,7 +2026,7 @@ stock take. These are the shelves where a discrepancy would still be invisible.<
     <thead><tr><th>Medication</th><th>Balance</th><th>Value</th></tr></thead>
     <tbody>
     {% for n in never_counted %}
-        <tr><td>{{ n.med_name }}</td><td>{{ n.balance }}</td><td>${{ "%.2f"|format(n.value) }}</td></tr>
+        <tr><td>{{ n.med_name }}</td><td>{{ n.balance }}</td><td>R{{ "%.2f"|format(n.value) }}</td></tr>
     {% else %}
         <tr><td colspan="3">Every item with stock has been counted at least once.</td></tr>
     {% endfor %}
@@ -2539,6 +2697,11 @@ def dispense():
         end_date = request.values.get('end_date')
         search = request.values.get('search')
         current_user = session['user']['name']
+        # FIX (Performance): default to the current month so an unfiltered
+        # visit never asks for the whole history. A search bypasses this and
+        # looks across all time.
+        start_date, end_date, window_defaulted = _default_window(start_date, end_date, search)
+        page = _requested_page()
 
         base_query = {'type': 'dispense'}
         date_query = {}
@@ -2563,17 +2726,52 @@ def dispense():
                 {'diagnoses.0':{'$regex': search, '$options': 'i'}},
             ]
 
-        raw_tx = list(transactions.find(base_query).sort('timestamp', -1))
+        # FIX (Performance): page over VISITS, not lines. Paging the raw
+        # transaction rows would split a patient's three medicines across a
+        # page break, so the distinct transaction_ids are paged first and then
+        # every line belonging to that page's visits is fetched. A search that
+        # matches one line still shows the whole visit it belongs to, which is
+        # what someone looking up a record actually wants.
+        visit_ids, total_visits = [], 0
+        try:
+            counted = list(transactions.aggregate([
+                {'$match': base_query},
+                {'$group': {'_id': '$transaction_id'}},
+                {'$count': 'n'},
+            ]))
+            total_visits = counted[0]['n'] if counted else 0
+            pager = _pager(page, DISPENSE_PAGE_SIZE, total_visits)
+            visit_ids = [g['_id'] for g in transactions.aggregate([
+                {'$match': base_query},
+                {'$group': {'_id': '$transaction_id', 'ts': {'$max': '$timestamp'}}},
+                {'$sort': {'ts': -1}},
+                {'$skip': (pager['page'] - 1) * DISPENSE_PAGE_SIZE},
+                {'$limit': DISPENSE_PAGE_SIZE},
+            ])]
+        except Exception as e:
+            # Never let a paging failure turn back into an unbounded fetch.
+            app.logger.warning(f"Dispense paging aggregation unavailable: {e}")
+            seen, capped = [], transactions.find(base_query).sort('timestamp', -1).limit(
+                DISPENSE_PAGE_SIZE * 40)
+            for t in capped:
+                if t.get('transaction_id') not in seen:
+                    seen.append(t.get('transaction_id'))
+            total_visits = len(seen)
+            pager = _pager(page, DISPENSE_PAGE_SIZE, total_visits)
+            start = (pager['page'] - 1) * DISPENSE_PAGE_SIZE
+            visit_ids = seen[start:start + DISPENSE_PAGE_SIZE]
+
+        raw_tx = list(transactions.find(
+            {'type': 'dispense', 'transaction_id': {'$in': visit_ids}}
+        ).sort('timestamp', -1)) if visit_ids else []
 
         # FIX (UX/Correctness): group rows by transaction_id in Python so the
         # template can use reliable rowspan values regardless of sort order or
-        # shared timestamps.  Use an OrderedDict to preserve display order.
-        from collections import OrderedDict
-        grouped = OrderedDict()
+        # shared timestamps.  Ordered by the paged visit order.
+        grouped = {}
         for t in raw_tx:
-            tid = t['transaction_id']
-            grouped.setdefault(tid, []).append(t)
-        tx_groups = list(grouped.items())   # [(tx_id, [rows]), ...]
+            grouped.setdefault(t['transaction_id'], []).append(t)
+        tx_groups = [(tid, grouped[tid]) for tid in visit_ids if tid in grouped]
         # Keep flat list for backwards-compat with anything that needs it
         tx_list = raw_tx
 
@@ -2695,7 +2893,8 @@ def dispense():
             start_date=start_date,
             end_date=end_date,
             search=search,
-            tx_data=tx_data
+            tx_data=tx_data,
+            pager=pager, window_defaulted=window_defaulted, unit='visits'
         )
     except ServerSelectionTimeoutError:
         return render_template_string(
@@ -2703,8 +2902,75 @@ def dispense():
             tx_list=[], tx_groups=[],
             nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
-            start_date='', end_date='', search='', tx_data=None
+            start_date='', end_date='', search='', tx_data=None,
+            pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='visits'
         ), 500
+
+
+def _load_delivery(deliveries, raw_id):
+    if not raw_id:
+        return None
+    try:
+        return deliveries.find_one({'_id': ObjectId(raw_id)})
+    except (InvalidId, TypeError):
+        return None
+
+
+def _delivery_goods_value(transactions, delivery_id):
+    return sum(l.get('quantity', 0) * l.get('price', 0) for l in
+               transactions.find({'type': 'receive', 'delivery_id': delivery_id},
+                                 {'_id': 0, 'quantity': 1, 'price': 1}))
+
+
+def _delivery_values(transactions, delivery_ids):
+    """delivery_id -> (goods value, line count), in one aggregation."""
+    if not delivery_ids:
+        return {}
+    pipeline = [
+        {'$match': {'type': 'receive', 'delivery_id': {'$in': delivery_ids}}},
+        {'$group': {'_id': '$delivery_id',
+                    'value': {'$sum': {'$multiply': ['$quantity', '$price']}},
+                    'lines': {'$sum': 1}}},
+    ]
+    try:
+        return {r['_id']: (r.get('value', 0) or 0, r.get('lines', 0)) for r in
+                transactions.aggregate(pipeline)}
+    except Exception as e:
+        app.logger.warning(f"Delivery value aggregation unavailable: {e}")
+        out = {}
+        for l in transactions.find({'type': 'receive', 'delivery_id': {'$in': delivery_ids}},
+                                   {'_id': 0, 'delivery_id': 1, 'quantity': 1, 'price': 1}):
+            v, n = out.get(l['delivery_id'], (0.0, 0))
+            out[l['delivery_id']] = (v + l.get('quantity', 0) * l.get('price', 0), n + 1)
+        return out
+
+
+def _reconcile_delivery(delivery, goods_value):
+    """Three-way match: order vs invoice vs goods actually received.
+
+    Differences are reported, never enforced. Stock physically standing on the
+    shelf has to be recordable whatever the paperwork says; the job of this
+    panel is to make sure nobody can record it without seeing the discrepancy.
+    """
+    order_total   = delivery.get('order_total', 0) or 0
+    invoice_total = delivery.get('invoice_total', 0) or 0
+    order_diff    = invoice_total - order_total
+    goods_diff    = goods_value - invoice_total
+
+    def band(diff, over, under):
+        if abs(diff) < 0.01:
+            return 'normal', 'matched', 'Matched'
+        return ('expired' if diff > 0 else 'close-to-expire',
+                f'R{diff:+.2f}', over if diff > 0 else under)
+
+    o_class, o_label, o_note = band(
+        order_diff, 'Invoiced above the order', 'Invoiced below the order')
+    g_class, g_label, g_note = band(
+        goods_diff, 'More goods than invoiced', 'Fewer goods than invoiced')
+    return {'goods_value': goods_value,
+            'order_class': o_class, 'order_diff_label': o_label, 'order_note': o_note,
+            'goods_class': g_class, 'goods_diff_label': g_label, 'goods_note': g_note,
+            'matched': abs(goods_diff) < 0.01 and abs(order_diff) < 0.01}
 
 
 @app.route('/receive', methods=['GET', 'POST'])
@@ -2715,6 +2981,7 @@ def receive():
         db = client['pharmacy_db']
         medications = db['medications']
         transactions = db['transactions']
+        deliveries = db['deliveries']
         # Read any flashed message from a preceding redirect (e.g. from
         # delete_receive success/error, or access-denied from other routes).
         flashed = get_flashed_messages()
@@ -2723,6 +2990,11 @@ def receive():
         end_date = request.values.get('end_date')
         search = request.values.get('search')
         current_user = session['user']['name']
+        # FIX (Performance): default to the current month so an unfiltered
+        # visit never asks for the whole history. A search bypasses this and
+        # looks across all time.
+        start_date, end_date, window_defaulted = _default_window(start_date, end_date, search)
+        page = _requested_page()
 
         base_query = {'type': 'receive'}
         date_query = {}
@@ -2744,7 +3016,13 @@ def receive():
                 {'expiry_date':    {'$regex': search, '$options': 'i'}},
             ]
 
-        tx_list = list(transactions.find(base_query).sort('timestamp', -1))
+        # FIX (Performance): a flat list, so ordinary skip/limit paging.
+        total_lines = transactions.count_documents(base_query)
+        pager = _pager(page, RECEIVE_PAGE_SIZE, total_lines)
+        tx_list = list(transactions.find(base_query)
+                       .sort('timestamp', -1)
+                       .skip((pager['page'] - 1) * RECEIVE_PAGE_SIZE)
+                       .limit(RECEIVE_PAGE_SIZE))
 
         # FIX (Bug): the original GET-based edit path used {'_id': edit_id} (a raw
         # string) which never matched a MongoDB ObjectId and always returned None.
@@ -2753,52 +3031,150 @@ def receive():
         # /edit-receive/<id>.
         rx_data = None
 
+        # ---------------- Delivery actions ----------------------------
         if request.method == 'POST':
-            try:
-                med_name       = request.form['med_name']
-                quantity       = int(request.form['quantity'])
-                batch          = request.form['batch']
-                price          = float(request.form['price'])
-                expiry_date    = request.form['expiry_date']
-                schedule       = request.form['schedule']
-                stock_receiver = request.form['stock_receiver']
-                order_number   = request.form['order_number']
-                supplier       = request.form['supplier']
-                invoice_number = request.form['invoice_number']
+            action = request.form.get('action')
 
+            if action == 'open':
+                try:
+                    reference = f"DEL-{datetime.utcnow().strftime('%Y%m%d')}-{uuid4().hex[:4].upper()}"
+                    new_id = deliveries.insert_one({
+                        'reference': reference,
+                        'supplier': request.form['supplier'].strip(),
+                        'order_number': request.form['order_number'].strip(),
+                        'order_total': float(request.form['order_total']),
+                        'invoice_number': request.form['invoice_number'].strip(),
+                        'invoice_total': float(request.form['invoice_total']),
+                        'stock_receiver': request.form['stock_receiver'].strip(),
+                        'note': (request.form.get('note') or '').strip(),
+                        'status': 'open',
+                        'received_by': current_user,
+                        'opened_at': datetime.utcnow(),
+                        'closed_by': None, 'closed_at': None,
+                    }).inserted_id
+                    write_audit_entry('CREATE', 'delivery', reference,
+                                      f'Delivery {reference} opened by {current_user}')
+                    flash(f'Delivery {reference} opened.')
+                    return redirect(url_for('receive', delivery_id=str(new_id)))
+                except (ValueError, KeyError) as e:
+                    flash(f'Invalid delivery details: {e}')
+                    return redirect(url_for('receive'))
+
+            if action == 'line':
+                d = _load_delivery(deliveries, request.form.get('delivery_id'))
+                if not d:
+                    flash('Delivery not found.')
+                    return redirect(url_for('receive'))
+                if d['status'] != 'open':
+                    flash(f"Delivery {d['reference']} is closed. No further lines can be added.")
+                    return redirect(url_for('receive', delivery_id=str(d['_id'])))
+                try:
+                    med_name    = request.form['med_name'].strip()
+                    quantity    = int(request.form['quantity'])
+                    price       = float(request.form['price'])
+                    batch       = request.form['batch'].strip()
+                    expiry_date = request.form['expiry_date']
+                    schedule    = request.form['schedule']
+                    if quantity < 1:
+                        raise ValueError('quantity must be at least 1')
+                    if price < 0:
+                        raise ValueError('price cannot be negative')
+                except (ValueError, KeyError) as e:
+                    flash(f'Invalid line: {e}')
+                    return redirect(url_for('receive', delivery_id=str(d['_id'])))
+
+                # Supplier / order / invoice are INHERITED from the delivery
+                # header — that is the whole point: they are typed once per
+                # delivery, not once per medication, so they cannot drift
+                # between lines of the same consignment.
                 medications.update_one(
                     {'name': med_name},
                     {'$inc': {'balance': quantity},
-                     '$set': {
-                         'batch': batch, 'price': price, 'expiry_date': expiry_date,
-                         'schedule': schedule, 'stock_receiver': stock_receiver,
-                         'order_number': order_number, 'supplier': supplier,
-                         'invoice_number': invoice_number
-                     }},
+                     '$set': {'batch': batch, 'price': price, 'expiry_date': expiry_date,
+                              'schedule': schedule, 'stock_receiver': d['stock_receiver'],
+                              'order_number': d['order_number'], 'supplier': d['supplier'],
+                              'invoice_number': d['invoice_number']}},
                     upsert=True
                 )
                 transactions.insert_one({
                     'type': 'receive',
                     'med_name': med_name, 'quantity': quantity, 'batch': batch,
                     'price': price, 'expiry_date': expiry_date, 'schedule': schedule,
-                    'stock_receiver': stock_receiver, 'order_number': order_number,
-                    'supplier': supplier, 'invoice_number': invoice_number,
-                    'user': current_user, 'timestamp': datetime.utcnow()
+                    'stock_receiver': d['stock_receiver'],
+                    'order_number': d['order_number'], 'supplier': d['supplier'],
+                    'invoice_number': d['invoice_number'],
+                    'delivery_id': str(d['_id']), 'delivery_reference': d['reference'],
+                    'user': current_user, 'timestamp': datetime.utcnow(),
                 })
-                message = 'Received successfully!'
-            except ValueError as e:
-                message = f'Invalid input: {str(e)}'
+                flash(f'{med_name}: {quantity} received onto {d["reference"]}.')
+                return redirect(url_for('receive', delivery_id=str(d['_id'])))
+
+            if action == 'close':
+                d = _load_delivery(deliveries, request.form.get('delivery_id'))
+                if not d:
+                    flash('Delivery not found.')
+                    return redirect(url_for('receive'))
+                if d['status'] != 'open':
+                    flash(f"Delivery {d['reference']} is already closed.")
+                    return redirect(url_for('receive', delivery_id=str(d['_id'])))
+                goods = _delivery_goods_value(transactions, str(d['_id']))
+                deliveries.update_one(
+                    {'_id': d['_id'], 'status': 'open'},
+                    {'$set': {'status': 'closed', 'closed_by': current_user,
+                              'closed_at': datetime.utcnow(),
+                              'goods_value_at_close': goods}})
+                write_audit_entry('UPDATE', 'delivery', d['reference'],
+                                  f"closed by {current_user}; goods R{goods:.2f} "
+                                  f"vs invoice R{d['invoice_total']:.2f}")
+                # Warn but allow: a mismatch is surfaced, never blocking.
+                if abs(goods - d['invoice_total']) >= 0.01:
+                    flash(f"Delivery {d['reference']} closed with a mismatch: goods received "
+                          f"R{goods:.2f} against invoice R{d['invoice_total']:.2f} "
+                          f"(difference R{goods - d['invoice_total']:+.2f}).")
+                else:
+                    flash(f"Delivery {d['reference']} closed and fully matched.")
+                return redirect(url_for('receive', delivery_id=str(d['_id'])))
+
+            flash('Unknown receiving action.')
+            return redirect(url_for('receive'))
+
+        # ---------------- Delivery views ------------------------------
+        delivery, delivery_lines, recon, delivery_rows = None, [], {}, []
+        delivery = _load_delivery(deliveries, request.values.get('delivery_id'))
+        if delivery:
+            delivery_lines = list(transactions.find(
+                {'type': 'receive', 'delivery_id': str(delivery['_id'])}
+            ).sort('timestamp', 1).limit(500))
+            recon = _reconcile_delivery(delivery,
+                                        sum(l.get('quantity', 0) * l.get('price', 0)
+                                            for l in delivery_lines))
+        elif not rx_data:
+            delivery_rows = list(deliveries.find().sort([('status', 1), ('opened_at', -1)]).limit(200))
+            values = _delivery_values(transactions, [str(d['_id']) for d in delivery_rows])
+            for d in delivery_rows:
+                goods = values.get(str(d['_id']), (0.0, 0))
+                d['goods_value'], d['line_count'] = goods[0], goods[1]
+                diff = d['goods_value'] - d.get('invoice_total', 0)
+                matched = abs(diff) < 0.01
+                d['diff_label'] = 'matched' if matched else f'R{diff:+.2f}'
+                d['row_class'] = ('close-to-expire' if d['status'] == 'open'
+                                  else ('normal' if matched else 'expired'))
 
         return render_template_string(
             RECEIVE_TEMPLATE,
             tx_list=tx_list, nav_links=get_nav_links(),
             message=message, start_date=start_date, end_date=end_date,
-            search=search, rx_data=rx_data
+            search=search, rx_data=rx_data,
+            delivery=delivery, delivery_lines=delivery_lines, recon=recon,
+            deliveries=delivery_rows,
+            pager=pager, window_defaulted=window_defaulted, unit='receipts'
         )
     except ServerSelectionTimeoutError:
         return render_template_string(
             RECEIVE_TEMPLATE, tx_list=[], nav_links=get_nav_links(),
-            message="Database connection failed.", start_date='', end_date='', search='', rx_data=None
+            delivery=None, delivery_lines=[], recon={}, deliveries=[],
+            message="Database connection failed.", start_date='', end_date='', search='', rx_data=None,
+            pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='receipts'
         ), 500
 
 
@@ -3182,7 +3558,13 @@ def reports():
                     elif report_type == 'controlled_drug_register':
                         if not start_date or not end_date:
                             raise ValueError('Start and end dates are required for this report type.')
-                        controlled_meds = [m['name'] for m in medications.find({'schedule': 'controlled'}, {'_id': 0, 'name': 1})]
+                        # FIX (Performance): fetch the controlled medications once
+                        # and index them by name, instead of a find_one per drug
+                        # inside the loop below. This was the last query loop in
+                        # the app; the arithmetic is untouched.
+                        controlled_docs = {m['name']: m for m in
+                                           medications.find({'schedule': 'controlled'}, {'_id': 0})}
+                        controlled_meds = list(controlled_docs)
                         if controlled_meds:
                             # NEW (Stock Take): adjustments are included so the
                             # register's running balance still lands on the
@@ -3198,7 +3580,7 @@ def reports():
                                 tx_by_med[tx['med_name']].append(tx)
 
                             for med_name in sorted(controlled_meds):
-                                med = medications.find_one({'name': med_name})
+                                med = controlled_docs.get(med_name)
                                 if not med:
                                     continue
                                 try:
@@ -3473,6 +3855,53 @@ def _activity_by_month(transactions, window_start):
         return buckets
 
 
+# -----------------------------------------------------------------------
+# FIX (Performance/Scalability): /dispense and /receive used to fetch the
+# ENTIRE transaction history with no limit and render every row into one HTML
+# page. Measured at 6,000 transactions that produced a 6.5 MB page; at a few
+# thousand dispensing lines a month it reaches tens of megabytes within a
+# year, on the page dispensers open every single time they dispense.
+#
+# Two changes fix it:
+#   1. A default date window, so an unfiltered visit shows the current month
+#      rather than all history. A search overrides it — searching should look
+#      across everything, not just this month, or the box is useless for
+#      finding an old record.
+#   2. Real pagination, so even a wide window can't produce an unbounded page.
+# -----------------------------------------------------------------------
+DISPENSE_PAGE_SIZE = 25    # visits per page (a visit may hold several lines)
+RECEIVE_PAGE_SIZE  = 50    # receipt lines per page
+
+
+def _requested_page():
+    try:
+        return max(1, int(request.values.get('page', 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _default_window(start_date, end_date, search):
+    """Fall back to the current month when nothing else narrows the list.
+
+    Returns (start_date, end_date, defaulted). A search is deliberately NOT
+    date-limited: someone looking up a patient or an invoice from March should
+    find it without first working out which month to ask for.
+    """
+    if start_date or end_date or search:
+        return start_date, end_date, False
+    today = datetime.utcnow().date()
+    return today.replace(day=1).strftime('%Y-%m-%d'), today.strftime('%Y-%m-%d'), True
+
+
+def _pager(page, page_size, total):
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, pages)
+    return {'page': page, 'pages': pages, 'total': total, 'page_size': page_size,
+            'has_prev': page > 1, 'has_next': page < pages,
+            'first': 0 if total == 0 else (page - 1) * page_size + 1,
+            'last': min(page * page_size, total)}
+
+
 def _parse_expiry(raw):
     if not raw:
         return None
@@ -3656,9 +4085,9 @@ def dashboard():
              'bg': '#f8d7da' if under_one else '#eef2f7', 'fg': '#721c24' if under_one else '#1a3a5c'},
             {'label': 'Expired on shelf', 'value': len(expired_now), 'sub': 'remove from stock',
              'bg': '#f8d7da' if expired_now else '#eef2f7', 'fg': '#721c24' if expired_now else '#1a3a5c'},
-            {'label': 'Expiring in 90 days', 'value': len(expiring_90), 'sub': f'${at_risk:,.2f} at risk',
+            {'label': 'Expiring in 90 days', 'value': len(expiring_90), 'sub': f'R{at_risk:,.2f} at risk',
              'bg': '#fff3cd' if expiring_90 else '#eef2f7', 'fg': '#856404' if expiring_90 else '#1a3a5c'},
-            {'label': 'Stock value', 'value': f'${stock_value:,.0f}', 'sub': 'balance x unit price',
+            {'label': 'Stock value', 'value': f'R{stock_value:,.0f}', 'sub': 'balance x unit price',
              'bg': '#eef2f7', 'fg': '#1a3a5c'},
         ]
 
@@ -4223,7 +4652,16 @@ def edit_receive(receive_id):
                 {'invoice_number': {'$regex': search, '$options': 'i'}},
                 {'expiry_date':    {'$regex': search, '$options': 'i'}},
             ]
-        tx_list = list(transactions.find(base_query).sort('timestamp', -1))
+        # FIX (Performance): this route renders the same list template, so it
+        # carried the same unbounded fetch. It only ever shows the first page
+        # behind the edit form, so it is capped outright.
+        page = _requested_page()
+        total_lines = transactions.count_documents(base_query)
+        pager = _pager(page, RECEIVE_PAGE_SIZE, total_lines)
+        tx_list = list(transactions.find(base_query)
+                       .sort('timestamp', -1)
+                       .skip((pager['page'] - 1) * RECEIVE_PAGE_SIZE)
+                       .limit(RECEIVE_PAGE_SIZE))
 
         rx_data = None
         message = None
@@ -4291,7 +4729,9 @@ def edit_receive(receive_id):
             RECEIVE_TEMPLATE,
             tx_list=tx_list, nav_links=get_nav_links(),
             message=message, start_date=start_date, end_date=end_date,
-            search=search, rx_data=rx_data
+            search=search, rx_data=rx_data,
+            delivery=None, delivery_lines=[], recon={}, deliveries=[],
+            pager=pager, window_defaulted=False, unit='receipts'
         )
     except ServerSelectionTimeoutError:
         return "Database connection failed.", 500
