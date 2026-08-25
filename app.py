@@ -758,14 +758,16 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
             <input id="position" name="position" list="position_suggestions" type="text" value="{{ tx_data.position if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
         </div>
         <div>
-            <label>Age Group:</label>
-            <select name="age_group" {% if not tx_data %}required{% endif %}>
-                <option value="">-- Select Age Group --</option>
-                {% set age_options = ['18-24', '25-34', '35-45', '45-54', '54-65'] %}
-                {% for opt in age_options %}
-                    <option value="{{ opt }}" {% if tx_data and tx_data.age_group == opt %}selected{% endif %}>{{ opt }}</option>
-                {% endfor %}
-            </select>
+            {# NEW: the prescription states a year of birth, not an age band.
+               Asking for the band made the dispenser convert on the spot, which
+               is both slower and lossy — and a band recorded today is wrong next
+               year, whereas a birth year stays true. Age is derived where it is
+               needed. #}
+            <label>Year of Birth:</label>
+            <input name="birth_year" type="number" min="1900" max="{{ current_year }}"
+                   placeholder="e.g. 1985"
+                   value="{{ tx_data.birth_year if tx_data and tx_data.birth_year else '' }}"
+                   {% if not tx_data %}required{% endif %}>
         </div>
         <div>
             <label>Gender:</label>
@@ -776,8 +778,23 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
             </select>
         </div>
         <div>
-            <label>Number of Sick Leave Days:</label>
-            <input name="sick_leave_days" type="number" min="0" autocomplete="on" value="{{ tx_data.sick_leave_days if tx_data else '' }}" required>
+            {# NEW: not every visit ends in sick leave. The old required
+               "number of days" field forced a 0 onto referrals and admissions,
+               which made those outcomes invisible. Outcome is now optional and
+               names what actually happened. #}
+            <label>Outcome (optional):</label>
+            <select name="outcome">
+                <option value="">-- None --</option>
+                {% for opt in ['Sick leave', 'Referral', 'Admission'] %}
+                <option value="{{ opt }}" {% if tx_data and tx_data.outcome == opt %}selected{% endif %}>{{ opt }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Days (sick leave / admission):</label>
+            <input name="outcome_days" type="number" min="0"
+                   value="{{ tx_data.outcome_days if tx_data and tx_data.outcome_days else '' }}"
+                   placeholder="leave blank if not applicable">
         </div>
         <div>
             <label>Prescriber (Doctor):</label>
@@ -939,13 +956,13 @@ search looks across all records, not just this month.</p>
             <th>Company</th>
             <th>Position</th>
             <th>Gender</th>
-            <th>Age Group</th>
+            <th>Year of Birth</th>
             <th>Timestamp</th>
             <th>User</th>
             <th>Diagnoses</th>
             <th>Prescriber</th>
             <th>Dispenser</th>
-            <th>Sick Leave (Days)</th>
+            <th>Outcome</th>
             <th>Medication</th>
             <th>Quantity</th>
             <th>Unit Cost</th>
@@ -982,13 +999,13 @@ search looks across all records, not just this month.</p>
                     <td>{{ t.company }}</td>
                     <td>{{ t.position }}</td>
                     <td>{{ t.gender }}</td>
-                    <td>{{ t.age_group }}</td>
+                    <td>{{ t.get('birth_year') or t.get('age_group') or '-' }}</td>
                     <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
                     <td>{{ t.user }}</td>
                     <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
                     <td>{{ t.prescriber }}</td>
                     <td>{{ t.dispenser }}</td>
-                    <td>{{ t.sick_leave_days }}</td>
+                    <td>{{ t.get('outcome') or '-' }}{% if t.get('outcome_days') %} ({{ t.outcome_days }}d){% endif %}</td>
                     <td>{{ t.med_name }}</td>
                     <td>{{ t.quantity }}</td>
                     <td>{% if t.get('price') %}R{{ "%.4f"|format(t.price) }}{% else %}&ndash;{% endif %}</td>
@@ -2347,6 +2364,50 @@ The final column is the current month to date, so it is always a part-month and
 will read low. AMC is calculated from the completed months only.
 </p>
 
+<h2>Visit Outcomes by Month</h2>
+<table>
+    <thead>
+        <tr><th>Outcome</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
+            <th>Total</th><th>Days</th></tr>
+    </thead>
+    <tbody>
+    {% for o in clinical.outcomes %}
+        <tr><td><strong>{{ o.name }}</strong></td>
+            {% for v in o.counts %}<td>{{ v }}</td>{% endfor %}
+            <td>{{ o.total }}</td>
+            <td>{% if o.days %}{{ o.days }}{% else %}&ndash;{% endif %}</td></tr>
+    {% else %}
+        <tr><td colspan="{{ month_labels|length + 3 }}">No outcomes recorded yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+<p style="font-size:13px;">Counted per <strong>visit</strong>, not per medication
+&mdash; a visit that produced three items is one referral, not three. Outcome is
+optional, so a visit with none recorded appears in no row here. Days apply to sick
+leave and admission.</p>
+
+<h2>Disease Trends</h2>
+<table>
+    <thead>
+        <tr><th>Diagnosis</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
+            <th>Total</th><th>Trend</th></tr>
+    </thead>
+    <tbody>
+    {% for d in clinical.diagnoses %}
+        <tr><td>{{ d.name }}</td>
+            {% for v in d.counts %}<td>{{ v }}</td>{% endfor %}
+            <td>{{ d.total }}</td><td>{{ d.trend }}</td></tr>
+    {% else %}
+        <tr><td colspan="{{ month_labels|length + 2 }}">No diagnoses recorded yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+<p style="font-size:13px;">The twelve most frequent diagnoses across
+{{ clinical.episodes }} visit(s), by episode. <strong>Trend</strong> compares the
+last completed month against the average of the months before it, so a genuine
+rise stands out from ordinary variation. A visit recording several diagnoses
+counts once under each.</p>
+
 <h2>Consumption by Month &amp; AMC ({{ rows|length }} of {{ total_items }} items)</h2>
 <p style="font-size:13px;">
 <strong>AMC</strong> is the average of the completed months shown.
@@ -2539,33 +2600,59 @@ Each item's balance is corrected the moment you record its count.</p>
 <p><a href="{{ url_for('stock_take') }}">&larr; All stock takes</a></p>
 
 {% if active.status == 'open' %}
-<h3>Record a Physical Count</h3>
-<p>Enter what you actually counted on the shelf. The system figure is hidden
-until after you save, so the count is not influenced by what the app expects.</p>
-<form method="POST" action="{{ url_for('stock_take') }}" class="dispense-form">
-    <input type="hidden" name="action" value="count">
+<h3>Count Sheet ({{ uncounted|length }} still to count)</h3>
+{# NEW: every item is listed up front, the way a paper count sheet works — walk
+   the shelves, fill in what you find, post whatever you have done. Blank rows
+   are ignored, so a sheet can be posted as many times as you like and the
+   remaining items simply stay on it. The system balance is still absent: the
+   count has to be blind. #}
+<p>Fill in the counts you have done and press <strong>Post Counts</strong>.
+Rows left blank are ignored, so you can post part of the sheet now and the rest
+later &mdash; counted items drop off this list. The system figure is not shown
+until after you post.</p>
+<form method="POST" action="{{ url_for('stock_take') }}">
+    <input type="hidden" name="action" value="count_sheet">
     <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
-    <div class="common-section">
-        <div>
-            <label>Medication:</label>
-            <input name="med_name" id="st_med_name" list="st_med_suggestions" required autocomplete="off">
-            <datalist id="st_med_suggestions">
-            {% for m in med_names %}<option value="{{ m }}"></option>{% endfor %}
-            </datalist>
-        </div>
-        <div>
-            <label>Physical Count:</label>
-            <input name="counted" type="number" min="0" required>
-        </div>
-        <div>
-            <label>Note (optional):</label>
-            <input name="note" type="text" placeholder="Shelf, remarks...">
-        </div>
-    </div>
+    <p>
+        <input type="text" id="st_filter" placeholder="Filter this list..."
+               onkeyup="stFilter()" style="width:16em;">
+        <span style="font-size:13px;">&nbsp;typing here only hides rows; it does not clear anything you have entered.</span>
+    </p>
+    <table id="st_sheet">
+        <thead>
+            <tr><th>Medication</th><th>Physical Count</th><th>Note (optional)</th></tr>
+        </thead>
+        <tbody>
+        {% for m in uncounted %}
+            <tr>
+                <td>{{ m }}<input type="hidden" name="med_name" value="{{ m }}"></td>
+                <td><input name="counted__{{ loop.index0 }}" type="number" min="0"
+                           style="width:7em;" autocomplete="off"></td>
+                <td><input name="note__{{ loop.index0 }}" type="text"
+                           style="width:14em;" placeholder="Shelf, batch, remarks"></td>
+            </tr>
+        {% else %}
+            <tr><td colspan="3">Every medication has been counted in this stock take.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% if uncounted %}
     <div class="form-buttons">
-        <input type="submit" value="Record Count">
+        <input type="submit" value="Post Counts">
     </div>
+    {% endif %}
 </form>
+<script>
+function stFilter() {
+    var q = document.getElementById('st_filter').value.toLowerCase();
+    var rows = document.querySelectorAll('#st_sheet tbody tr');
+    for (var i = 0; i < rows.length; i++) {
+        var cell = rows[i].cells[0];
+        if (!cell) { continue; }
+        rows[i].style.display = cell.textContent.toLowerCase().indexOf(q) > -1 ? '' : 'none';
+    }
+}
+</script>
 
 <form method="POST" action="{{ url_for('stock_take') }}" style="margin-top:20px;">
     <input type="hidden" name="action" value="close">
@@ -3156,7 +3243,7 @@ def dispense():
                 {'med_name':  {'$regex': search, '$options': 'i'}},
                 {'company':   {'$regex': search, '$options': 'i'}},
                 {'position':  {'$regex': search, '$options': 'i'}},
-                {'age_group': {'$regex': search, '$options': 'i'}},
+                {'outcome': {'$regex': search, '$options': 'i'}},
                 {'gender':    {'$regex': search, '$options': 'i'}},
                 {'prescriber':{'$regex': search, '$options': 'i'}},
                 {'dispenser': {'$regex': search, '$options': 'i'}},
@@ -3246,12 +3333,21 @@ def dispense():
                 patient       = request.form['patient']
                 company       = request.form['company']
                 position      = request.form['position']
-                age_group     = request.form['age_group']
+                # Stored as the year itself; age is derived at report time so it
+                # never goes stale.
+                try:
+                    birth_year = int(request.form.get('birth_year') or 0) or None
+                except (TypeError, ValueError):
+                    birth_year = None
                 prescriber    = request.form['prescriber']
                 dispenser     = request.form['dispenser']
                 date_str      = request.form['date']
                 gender        = request.form['gender']
-                sick_leave_days = int(request.form['sick_leave_days'])
+                outcome = (request.form.get('outcome') or '').strip() or None
+                try:
+                    outcome_days = int(request.form.get('outcome_days') or 0) or None
+                except (TypeError, ValueError):
+                    outcome_days = None
                 diagnoses     = [d.strip() for d in request.form.getlist('diagnoses') if d.strip()]
 
                 if not diagnoses:
@@ -3335,9 +3431,10 @@ def dispense():
                                     'patient': patient,
                                     'company': company,
                                     'position': position,
-                                    'age_group': age_group,
+                                    'birth_year': birth_year,
                                     'gender': gender,
-                                    'sick_leave_days': sick_leave_days,
+                                    'outcome': outcome,
+                                    'outcome_days': outcome_days,
                                     'diagnoses': diagnoses,
                                     'prescriber': prescriber,
                                     'dispenser': dispenser,
@@ -3376,7 +3473,7 @@ def dispense():
             start_date=start_date,
             end_date=end_date,
             search=search,
-            tx_data=tx_data,
+            tx_data=tx_data, current_year=datetime.utcnow().year,
             pager=pager, window_defaulted=window_defaulted, unit='visits'
         )
     except ServerSelectionTimeoutError:
@@ -3386,6 +3483,7 @@ def dispense():
             nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
             start_date='', end_date='', search='', tx_data=None,
+            current_year=datetime.utcnow().year,
             pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='visits'
         ), 500
 
@@ -5046,6 +5144,69 @@ def _pager(page, page_size, total):
             'last': min(page * page_size, total)}
 
 
+def _clinical_by_month(transactions, window_start, months):
+    """Outcomes and diagnoses per month, plus a period total per diagnosis.
+
+    Counted per VISIT, not per dispensed line: a visit that produced three
+    medications is one referral, not three, and one episode of a diagnosis. The
+    dispense collection stores one document per medication line, so counting
+    rows here would multiply every clinical figure by the prescription size.
+    """
+    idx = {ym: i for i, ym in enumerate(months)}
+    n = len(months)
+    outcomes = {}
+    dx_month, dx_total, seen = {}, {}, set()
+    cursor = transactions.find(
+        {'type': 'dispense', 'timestamp': {'$gte': window_start}},
+        {'_id': 0, 'timestamp': 1, 'transaction_id': 1, 'outcome': 1,
+         'outcome_days': 1, 'diagnoses': 1})
+    for t in cursor:
+        ts = t.get('timestamp')
+        if not isinstance(ts, datetime):
+            continue
+        i = idx.get((ts.year, ts.month))
+        if i is None:
+            continue
+        tid = t.get('transaction_id')
+        if tid in seen:
+            continue
+        seen.add(tid)
+        oc = t.get('outcome')
+        if oc:
+            row = outcomes.setdefault(oc, {'counts': [0] * n, 'days': 0})
+            row['counts'][i] += 1
+            row['days'] += t.get('outcome_days') or 0
+        for d in (t.get('diagnoses') or []):
+            d = (d or '').strip()
+            if not d:
+                continue
+            dx_month.setdefault(d, [0] * n)[i] += 1
+            dx_total[d] = dx_total.get(d, 0) + 1
+    top = sorted(dx_total.items(), key=lambda kv: -kv[1])[:12]
+    return {
+        'outcomes': [{'name': k, 'counts': v['counts'], 'total': sum(v['counts']),
+                      'days': v['days']}
+                     for k, v in sorted(outcomes.items(), key=lambda kv: -sum(kv[1]['counts']))],
+        'diagnoses': [{'name': k, 'counts': dx_month[k], 'total': v,
+                       'trend': _dx_trend(dx_month[k])} for k, v in top],
+        'episodes': len(seen),
+    }
+
+
+def _dx_trend(counts):
+    """Compare the last completed month against the mean of the ones before."""
+    if len(counts) < 3:
+        return '-'
+    body, last = counts[:-2], counts[-2]
+    base = sum(body) / len(body) if body else 0
+    if base == 0:
+        return 'new' if last else '-'
+    pct = (last - base) / base * 100
+    if abs(pct) < 20:
+        return 'steady'
+    return f"{'up' if pct > 0 else 'down'} {abs(pct):.0f}%"
+
+
 def _parse_expiry(raw):
     if not raw:
         return None
@@ -5124,6 +5285,7 @@ def dashboard():
                   'val_adjusted': [0.0] * n_m}
         activity = _activity_by_month(db['transactions'], window_start)
         demand = _demand_by_med(db['transactions'], {'$gte': window_start})
+        clinical = _clinical_by_month(db['transactions'], window_start, months)
 
         for med in all_meds:
             name    = med.get('name', '')
@@ -5342,7 +5504,8 @@ def dashboard():
             DASHBOARD_TEMPLATE, nav_links=get_nav_links(), message=message,
             is_admin=is_admin, month_labels=month_labels, months_back=months_back,
             month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
-            search=search, tiles=tiles, totals=totals, act=act, rows=table_rows,
+            search=search, tiles=tiles, totals=totals, act=act, clinical=clinical,
+            rows=table_rows,
             total_items=total_items, expiring=expiring, st_totals=st_totals,
             top_discrepancies=top_discrepancies, never_counted=never_counted,
         )
@@ -5354,6 +5517,7 @@ def dashboard():
             is_admin=is_admin, month_labels=month_labels, months_back=months_back,
             month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
             search=search, tiles=[], totals=empty, act=act_empty, rows=[], total_items=0,
+            clinical={'outcomes': [], 'diagnoses': [], 'episodes': 0},
             expiring=[], st_totals=st_empty, top_discrepancies=[], never_counted=[],
         ), 500
 
@@ -5460,6 +5624,54 @@ def stock_take():
                                   f"Stock take {reference} opened by {current_user}")
                 flash(f'Stock take {reference} opened.')
                 return redirect(url_for('stock_take', stock_take_id=str(new_id)))
+
+            # --- Post a whole count sheet at once -------------------------
+            if action == 'count_sheet':
+                st = _load_stock_take(stock_takes, request.form.get('stock_take_id'))
+                if not st:
+                    flash('Stock take not found.')
+                    return redirect(url_for('stock_take'))
+                if st['status'] != 'open':
+                    flash(f"Stock take {st['reference']} is closed.")
+                    return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+
+                names = request.form.getlist('med_name')
+                posted = agreed = short = over = skipped = 0
+                for i, name in enumerate(names):
+                    raw = (request.form.get(f'counted__{i}') or '').strip()
+                    if raw == '':
+                        continue          # blank row: nothing was counted, leave it
+                    try:
+                        counted = int(raw)
+                    except ValueError:
+                        skipped += 1
+                        continue
+                    if counted < 0:
+                        skipped += 1
+                        continue
+                    outcome = _record_count(
+                        medications, transactions, counts_col, st, name, counted,
+                        (request.form.get(f'note__{i}') or '').strip(), current_user)
+                    if outcome is None:
+                        skipped += 1
+                        continue
+                    posted += 1
+                    if outcome == 0:
+                        agreed += 1
+                    elif outcome < 0:
+                        short += 1
+                    else:
+                        over += 1
+
+                if posted:
+                    msg = (f'{posted} count(s) posted to {st["reference"]}: '
+                           f'{agreed} agreed, {short} short, {over} over.')
+                else:
+                    msg = 'No counts were entered.'
+                if skipped:
+                    msg += f' {skipped} row(s) skipped as invalid or unknown.'
+                flash(msg)
+                return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
 
             # --- Record one physical count -------------------------------
             if action == 'count':
@@ -5588,9 +5800,15 @@ def stock_take():
             # Only the names are sent to the counting sheet — never the
             # balances. The count has to be blind.
             med_names = [m['name'] for m in _by_name(medications.find({}, {'_id': 0, 'name': 1}))]
+            # Items already counted in THIS stock take drop off the sheet, so
+            # the list shrinks as the work is done and nothing is counted twice
+            # by accident.
+            done = set(counts_col.distinct('med_name', {'stock_take_id': str(active['_id'])}))
+            uncounted = [m for m in med_names if m not in done]
             return render_template_string(
                 STOCK_TAKE_TEMPLATE, nav_links=get_nav_links(), message=message,
-                active=active, counts=counts, med_names=med_names, sessions=[],
+                active=active, counts=counts, med_names=med_names,
+                uncounted=uncounted, sessions=[],
                 agreed_count=sum(1 for c in counts if c['variance'] == 0),
                 issued_not_recorded=sum(1 for c in counts if c['variance'] < 0),
                 recorded_not_issued=sum(1 for c in counts if c['variance'] > 0),
@@ -5604,7 +5822,7 @@ def stock_take():
                 {'stock_take_id': sid, 'variance': {'$ne': 0}})
         return render_template_string(
             STOCK_TAKE_TEMPLATE, nav_links=get_nav_links(), message=message,
-            active=None, sessions=sessions, counts=[], med_names=[],
+            active=None, sessions=sessions, counts=[], med_names=[], uncounted=[],
             agreed_count=0, issued_not_recorded=0, recorded_not_issued=0,
         )
 
@@ -5612,9 +5830,53 @@ def stock_take():
         return render_template_string(
             STOCK_TAKE_TEMPLATE, nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
-            active=None, sessions=[], counts=[], med_names=[],
+            active=None, sessions=[], counts=[], med_names=[], uncounted=[],
             agreed_count=0, issued_not_recorded=0, recorded_not_issued=0,
         ), 500
+
+
+def _record_count(medications, transactions, counts_col, st, med_name, counted,
+                  note, user):
+    """Apply one physical count. Returns the variance, or None if unknown item.
+
+    Shared by the single-item path and the count sheet so both correct stock,
+    post the signed adjustment and log the line in exactly the same way — the
+    sheet must not be a second, subtly different implementation.
+    """
+    before = medications.find_one_and_update(
+        {'name': med_name}, {'$set': {'balance': counted}},
+        return_document=ReturnDocument.BEFORE)
+    if not before:
+        write_app_warning(
+            'medication_not_found',
+            f'Medication "{med_name}" not found during stock take {st["reference"]}.',
+            {'med_name': med_name, 'stock_take': st['reference']})
+        return None
+
+    system_balance = before.get('balance', 0)
+    variance = counted - system_balance
+    dtype = classify_variance(variance)
+    now = datetime.utcnow()
+    if variance != 0:
+        transactions.insert_one({
+            'type': 'adjustment', 'med_name': med_name, 'quantity': variance,
+            'batch': before.get('batch'), 'price': before.get('price'),
+            'expiry_date': before.get('expiry_date'), 'schedule': before.get('schedule'),
+            'system_balance': system_balance, 'counted': counted,
+            'discrepancy_type': dtype,
+            'stock_take_id': str(st['_id']), 'stock_take_reference': st['reference'],
+            'user': user, 'timestamp': now,
+        })
+    counts_col.insert_one({
+        'stock_take_id': str(st['_id']), 'reference': st['reference'],
+        'med_name': med_name, 'system_balance': system_balance, 'counted': counted,
+        'variance': variance, 'discrepancy_type': dtype, 'note': note,
+        'counted_by': user, 'timestamp': now,
+    })
+    write_audit_entry('UPDATE', 'stock_take_count', f"{st['reference']} / {med_name}",
+                      f'balance: {system_balance} -> {counted} (variance {variance:+d}, '
+                      f'{DISCREPANCY_LABELS[dtype].lower()})')
+    return variance
 
 
 def _load_stock_take(stock_takes, raw_id):
