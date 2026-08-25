@@ -1236,17 +1236,53 @@ RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
 </p>
 <p><a href="{{ url_for('receive') }}">&larr; All deliveries</a></p>
 
-<h3>Three-Way Match</h3>
+{% if order_summary and order_summary.invoice_count %}
+<h3>Order {{ order_summary.order_number }}</h3>
+<p style="font-size:13px;">One order is often filled by several part-deliveries, each
+with its own invoice. This is the position across <strong>all</strong> invoices
+raised against this order number.</p>
+<table>
+    <thead><tr><th>Order Total</th><th>Invoices</th><th>Invoiced to Date</th>
+               <th>Goods Received</th><th>Still to Invoice</th><th>Status</th></tr></thead>
+    <tbody>
+        <tr class="{% if order_summary.over_invoiced %}expired{% elif order_summary.fully_invoiced %}normal{% else %}close-to-expire{% endif %}">
+            <td>R{{ "%.2f"|format(order_summary.order_total) }}</td>
+            <td>{{ order_summary.invoice_count }}</td>
+            <td>R{{ "%.2f"|format(order_summary.invoiced) }}</td>
+            <td>R{{ "%.2f"|format(order_summary.goods) }}</td>
+            <td>R{{ "%.2f"|format(order_summary.outstanding) }}</td>
+            <td>{% if order_summary.over_invoiced %}Invoiced beyond the order
+                {% elif order_summary.fully_invoiced %}Fully invoiced
+                {% else %}Part-delivered{% endif %}</td>
+        </tr>
+    </tbody>
+</table>
+{% if order_summary.conflicting_totals %}
+<p class="message error" style="font-size:13px;">The invoices recorded against this
+order do not agree on the order total. The figure above is from the most recently
+opened delivery. Check the paperwork.</p>
+{% endif %}
+{% if order_summary.invoice_count > 1 %}
+<table>
+    <thead><tr><th>Delivery</th><th>Invoice</th><th>Invoice Total</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for sib in order_summary.siblings %}
+        <tr {% if sib.id == delivery._id|string %}style="font-weight:bold;"{% endif %}>
+            <td><a href="{{ url_for('receive', delivery_id=sib.id) }}">{{ sib.reference }}</a></td>
+            <td>{{ sib.invoice_number }}</td>
+            <td>R{{ "%.2f"|format(sib.invoice_total) }}</td>
+            <td>{{ sib.status|upper }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endif %}
+
+<h3>This Invoice vs Goods Received</h3>
 <table>
     <thead><tr><th>Document</th><th>Total</th><th>Compared With</th><th>Difference</th><th>Status</th></tr></thead>
     <tbody>
-        <tr class="{{ recon.order_class }}">
-            <td>Purchase order {{ delivery.order_number }}</td>
-            <td>R{{ "%.2f"|format(delivery.order_total) }}</td>
-            <td>Invoice R{{ "%.2f"|format(delivery.invoice_total) }}</td>
-            <td>{{ recon.order_diff_label }}</td>
-            <td>{{ recon.order_note }}</td>
-        </tr>
         <tr class="{{ recon.goods_class }}">
             <td>Invoice {{ delivery.invoice_number }}</td>
             <td>R{{ "%.2f"|format(delivery.invoice_total) }}</td>
@@ -1256,25 +1292,33 @@ RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
         </tr>
     </tbody>
 </table>
-<p style="font-size:13px;">Goods received is the sum of quantity &times; unit price
-across the lines captured below. A mismatch is flagged but never blocks
+<p style="font-size:13px;">Goods received is the sum of the line values captured
+below, each computed from the pack price rather than a rounded unit price, so a
+pack size that does not divide cleanly cannot cause a false mismatch. A mismatch is flagged but never blocks
 receiving &mdash; stock that is physically on the shelf must always be
 recordable. Investigate it, then close the delivery.</p>
 
 {% if delivery.status == 'open' %}
 <h3>Add a Line</h3>
 <p style="font-size:13px;">Supplier, order number and invoice number come from the
-delivery above &mdash; you do not re-enter them per item.</p>
+delivery above &mdash; you do not re-enter them per item.<br>
+Enter the quantity in <strong>single units</strong> (the way stock is counted) and
+the price of a <strong>whole pack</strong> (the way the supplier bills). The unit
+price is worked out from the two, so stock values are correct. For an item already
+priced singly, leave pack size as 1.</p>
 <form method="POST" action="{{ url_for('receive') }}" class="receive-form">
     <input type="hidden" name="action" value="line">
     <input type="hidden" name="delivery_id" value="{{ delivery._id|string }}">
     <div class="common-section">
         <div><label>Medication:</label>
             <input name="med_name" id="med_name" list="med_suggestions" required autocomplete="off"></div>
-        <div><label>Quantity:</label><input name="quantity" type="number" min="1" required></div>
+        <div><label>Quantity (single units):</label>
+            <input name="quantity" type="number" min="1" required></div>
+        <div><label>Pack Size (units per pack):</label>
+            <input name="pack_size" type="number" min="1" value="1" required></div>
+        <div><label>Price per Pack (R):</label>
+            <input name="pack_price" type="number" step="0.01" min="0" required></div>
         <div><label>Batch:</label><input name="batch" required></div>
-        <div><label>Price per Unit:</label>
-            <input name="price" type="number" step="0.01" min="0" required></div>
         <div><label>Expiry Date:</label><input name="expiry_date" type="date" required></div>
         <div><label>Schedule:</label>
             <select name="schedule" required>
@@ -1299,19 +1343,25 @@ delivery above &mdash; you do not re-enter them per item.</p>
 
 <h3>Lines Captured ({{ delivery_lines|length }})</h3>
 <table>
-    <thead><tr><th>Medication</th><th>Quantity</th><th>Unit Price</th><th>Line Value</th>
-               <th>Batch</th><th>Expiry</th><th>Schedule</th><th>Captured</th></tr></thead>
+    <thead><tr><th>Medication</th><th>Units</th><th>Pack Size</th><th>Packs</th>
+               <th>Price/Pack</th><th>Unit Price</th><th>Line Value</th>
+               <th>Batch</th><th>Expiry</th><th>Captured</th></tr></thead>
     <tbody>
     {% for l in delivery_lines %}
         <tr>
             <td>{{ l.med_name }}</td><td>{{ l.quantity }}</td>
-            <td>R{{ "%.2f"|format(l.price) }}</td>
-            <td>R{{ "%.2f"|format(l.quantity * l.price) }}</td>
-            <td>{{ l.batch }}</td><td>{{ l.expiry_date }}</td><td>{{ l.schedule }}</td>
+            <td>{{ l.get('pack_size') or 1 }}</td>
+            <td>{{ '%g'|format(l.quantity / (l.get('pack_size') or 1)) }}</td>
+            {# a missing key yields Undefined, which is NOT none - so test with
+               .get(), or rows written before pack pricing existed blow up here #}
+            <td>{% if l.get('pack_price') is not none %}R{{ "%.2f"|format(l.get('pack_price')) }}{% else %}&ndash;{% endif %}</td>
+            <td>R{{ "%.4f"|format(l.price) }}</td>
+            <td>R{{ "%.2f"|format(l.get('line_value') if l.get('line_value') is not none else l.quantity * l.price) }}</td>
+            <td>{{ l.batch }}</td><td>{{ l.expiry_date }}</td>
             <td>{{ l.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="8">No lines captured yet.</td></tr>
+        <tr><td colspan="10">No lines captured yet.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -2916,10 +2966,69 @@ def _load_delivery(deliveries, raw_id):
         return None
 
 
+def _line_value(line):
+    """Value of one receive line.
+
+    NEW (Pack pricing): suppliers price by the pack but stock is counted in
+    single units, so a line stores the pack figures as entered and the unit
+    price is DERIVED from them. Reconciliation uses the stored line_value,
+    computed from the pack price directly, because multiplying a rounded unit
+    price back out by the quantity drifts: a pack of 3 at R250 gives a unit
+    price of R83.3333..., and 3 x R83.33 is R249.99, which would fail an
+    otherwise perfect invoice match by a cent.
+
+    Falls back to quantity x price for rows written before pack pricing
+    existed, and for lines edited through the single-line edit form.
+    """
+    if line.get('line_value') is not None:
+        return line['line_value']
+    return (line.get('quantity', 0) or 0) * (line.get('price', 0) or 0)
+
+
+def _unit_price(pack_price, pack_size):
+    """Price of a single countable unit, from the pack price and pack size."""
+    pack_size = pack_size or 1
+    return pack_price / pack_size if pack_size else pack_price
+
+
 def _delivery_goods_value(transactions, delivery_id):
-    return sum(l.get('quantity', 0) * l.get('price', 0) for l in
+    return sum(_line_value(l) for l in
                transactions.find({'type': 'receive', 'delivery_id': delivery_id},
-                                 {'_id': 0, 'quantity': 1, 'price': 1}))
+                                 {'_id': 0, 'quantity': 1, 'price': 1, 'line_value': 1}))
+
+
+def _order_rollup(deliveries, transactions, order_number):
+    """NEW (Multiple invoices per order): one purchase order is normally
+    fulfilled across several part-deliveries, each with its own invoice. The
+    order-level position is therefore the SUM of the invoices raised against
+    that order number, not any single one.
+
+    There is no separate order record — deliveries are grouped by the order
+    number typed on each invoice — so the order total is taken from the most
+    recently opened delivery for that order, and a disagreement between
+    deliveries is surfaced rather than silently resolved.
+    """
+    sibs = list(deliveries.find({'order_number': order_number}).sort('opened_at', -1))
+    if not sibs:
+        return None
+    totals = {round(d.get('order_total', 0) or 0, 2) for d in sibs}
+    order_total = sibs[0].get('order_total', 0) or 0
+    invoiced = sum(d.get('invoice_total', 0) or 0 for d in sibs)
+    goods = sum(_line_value(l) for l in transactions.find(
+        {'type': 'receive', 'delivery_id': {'$in': [str(d['_id']) for d in sibs]}},
+        {'_id': 0, 'quantity': 1, 'price': 1, 'line_value': 1}))
+    outstanding = order_total - invoiced
+    return {
+        'order_number': order_number, 'order_total': order_total,
+        'invoice_count': len(sibs), 'invoiced': invoiced, 'goods': goods,
+        'outstanding': outstanding,
+        'over_invoiced': invoiced - order_total > 0.005,
+        'fully_invoiced': abs(outstanding) < 0.01,
+        'conflicting_totals': len(totals) > 1,
+        'siblings': [{'reference': d['reference'], 'invoice_number': d.get('invoice_number'),
+                      'invoice_total': d.get('invoice_total', 0) or 0,
+                      'status': d.get('status'), 'id': str(d['_id'])} for d in sibs],
+    }
 
 
 def _delivery_values(transactions, delivery_ids):
@@ -2929,7 +3038,8 @@ def _delivery_values(transactions, delivery_ids):
     pipeline = [
         {'$match': {'type': 'receive', 'delivery_id': {'$in': delivery_ids}}},
         {'$group': {'_id': '$delivery_id',
-                    'value': {'$sum': {'$multiply': ['$quantity', '$price']}},
+                    'value': {'$sum': {'$ifNull': ['$line_value',
+                                                   {'$multiply': ['$quantity', '$price']}]}},
                     'lines': {'$sum': 1}}},
     ]
     try:
@@ -2939,9 +3049,10 @@ def _delivery_values(transactions, delivery_ids):
         app.logger.warning(f"Delivery value aggregation unavailable: {e}")
         out = {}
         for l in transactions.find({'type': 'receive', 'delivery_id': {'$in': delivery_ids}},
-                                   {'_id': 0, 'delivery_id': 1, 'quantity': 1, 'price': 1}):
+                                   {'_id': 0, 'delivery_id': 1, 'quantity': 1,
+                                    'price': 1, 'line_value': 1}):
             v, n = out.get(l['delivery_id'], (0.0, 0))
-            out[l['delivery_id']] = (v + l.get('quantity', 0) * l.get('price', 0), n + 1)
+            out[l['delivery_id']] = (v + _line_value(l), n + 1)
         return out
 
 
@@ -3070,18 +3181,30 @@ def receive():
                     return redirect(url_for('receive', delivery_id=str(d['_id'])))
                 try:
                     med_name    = request.form['med_name'].strip()
-                    quantity    = int(request.form['quantity'])
-                    price       = float(request.form['price'])
+                    quantity    = int(request.form['quantity'])       # single units
+                    pack_size   = int(request.form.get('pack_size') or 1)
+                    pack_price  = float(request.form['pack_price'])
                     batch       = request.form['batch'].strip()
                     expiry_date = request.form['expiry_date']
                     schedule    = request.form['schedule']
                     if quantity < 1:
                         raise ValueError('quantity must be at least 1')
-                    if price < 0:
+                    if pack_size < 1:
+                        raise ValueError('pack size must be at least 1')
+                    if pack_price < 0:
                         raise ValueError('price cannot be negative')
                 except (ValueError, KeyError) as e:
                     flash(f'Invalid line: {e}')
                     return redirect(url_for('receive', delivery_id=str(d['_id'])))
+
+                # NEW (Pack pricing): stock is counted in single units but
+                # suppliers price by the pack, so the unit price is derived
+                # rather than typed. Line value is computed from the pack price
+                # directly so that a unit price which does not divide cleanly
+                # (a pack of 3, say) cannot introduce a rounding mismatch
+                # against the invoice.
+                price      = _unit_price(pack_price, pack_size)
+                line_value = quantity * pack_price / pack_size
 
                 # Supplier / order / invoice are INHERITED from the delivery
                 # header — that is the whole point: they are typed once per
@@ -3091,6 +3214,7 @@ def receive():
                     {'name': med_name},
                     {'$inc': {'balance': quantity},
                      '$set': {'batch': batch, 'price': price, 'expiry_date': expiry_date,
+                              'pack_size': pack_size, 'pack_price': pack_price,
                               'schedule': schedule, 'stock_receiver': d['stock_receiver'],
                               'order_number': d['order_number'], 'supplier': d['supplier'],
                               'invoice_number': d['invoice_number']}},
@@ -3099,14 +3223,19 @@ def receive():
                 transactions.insert_one({
                     'type': 'receive',
                     'med_name': med_name, 'quantity': quantity, 'batch': batch,
-                    'price': price, 'expiry_date': expiry_date, 'schedule': schedule,
+                    'price': price, 'pack_size': pack_size, 'pack_price': pack_price,
+                    'line_value': line_value,
+                    'expiry_date': expiry_date, 'schedule': schedule,
                     'stock_receiver': d['stock_receiver'],
                     'order_number': d['order_number'], 'supplier': d['supplier'],
                     'invoice_number': d['invoice_number'],
                     'delivery_id': str(d['_id']), 'delivery_reference': d['reference'],
                     'user': current_user, 'timestamp': datetime.utcnow(),
                 })
-                flash(f'{med_name}: {quantity} received onto {d["reference"]}.')
+                packs = quantity / pack_size
+                flash(f'{med_name}: {quantity} units received onto {d["reference"]} '
+                      f'({packs:g} x pack of {pack_size} at R{pack_price:.2f} = '
+                      f'R{line_value:.2f}; unit price R{price:.4f}).')
                 return redirect(url_for('receive', delivery_id=str(d['_id'])))
 
             if action == 'close':
@@ -3140,14 +3269,16 @@ def receive():
 
         # ---------------- Delivery views ------------------------------
         delivery, delivery_lines, recon, delivery_rows = None, [], {}, []
+        order_summary = None
         delivery = _load_delivery(deliveries, request.values.get('delivery_id'))
         if delivery:
             delivery_lines = list(transactions.find(
                 {'type': 'receive', 'delivery_id': str(delivery['_id'])}
             ).sort('timestamp', 1).limit(500))
             recon = _reconcile_delivery(delivery,
-                                        sum(l.get('quantity', 0) * l.get('price', 0)
-                                            for l in delivery_lines))
+                                        sum(_line_value(l) for l in delivery_lines))
+            order_summary = _order_rollup(deliveries, transactions,
+                                          delivery.get('order_number'))
         elif not rx_data:
             delivery_rows = list(deliveries.find().sort([('status', 1), ('opened_at', -1)]).limit(200))
             values = _delivery_values(transactions, [str(d['_id']) for d in delivery_rows])
@@ -3166,13 +3297,13 @@ def receive():
             message=message, start_date=start_date, end_date=end_date,
             search=search, rx_data=rx_data,
             delivery=delivery, delivery_lines=delivery_lines, recon=recon,
-            deliveries=delivery_rows,
+            deliveries=delivery_rows, order_summary=order_summary,
             pager=pager, window_defaulted=window_defaulted, unit='receipts'
         )
     except ServerSelectionTimeoutError:
         return render_template_string(
             RECEIVE_TEMPLATE, tx_list=[], nav_links=get_nav_links(),
-            delivery=None, delivery_lines=[], recon={}, deliveries=[],
+            delivery=None, delivery_lines=[], recon={}, deliveries=[], order_summary=None,
             message="Database connection failed.", start_date='', end_date='', search='', rx_data=None,
             pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='receipts'
         ), 500
@@ -4730,7 +4861,7 @@ def edit_receive(receive_id):
             tx_list=tx_list, nav_links=get_nav_links(),
             message=message, start_date=start_date, end_date=end_date,
             search=search, rx_data=rx_data,
-            delivery=None, delivery_lines=[], recon={}, deliveries=[],
+            delivery=None, delivery_lines=[], recon={}, deliveries=[], order_summary=None,
             pager=pager, window_defaulted=False, unit='receipts'
         )
     except ServerSelectionTimeoutError:
