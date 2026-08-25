@@ -1656,8 +1656,14 @@ EDIT_MED_TEMPLATE = CSS_STYLE + """
             <input name="batch" value="{{ med_data.batch if med_data else '' }}" required>
         </div>
         <div>
-            <label>Price per Unit:</label>
-            <input name="price" type="number" step="0.01" min="0" value="{{ med_data.price if med_data else '' }}" required>
+            <label>Pack Size (units per pack):</label>
+            <input name="pack_size" type="number" min="1"
+                   value="{{ med_data.get('pack_size', 1) if med_data else 1 }}" required>
+        </div>
+        <div>
+            <label>Price per Pack (R):</label>
+            <input name="pack_price" type="number" step="0.01" min="0"
+                   value="{{ med_data.get('pack_price', med_data.price) if med_data else '' }}" required>
         </div>
         <div>
             <label>Expiry Date (YYYY-MM-DD):</label>
@@ -1832,7 +1838,8 @@ judgement.</p>
         <tr class="{{ l.status }}">
             <td>{{ l.med_name }}</td><td>{{ l.amc }}</td><td>{{ l.balance }}</td>
             <td>{{ l.mos_label }}</td><td>{{ l.shortfall }}</td>
-            <td>{{ l.pack_size }}</td><td>{{ l.packs }}</td><td>{{ l.units }}</td>
+            <td>{% if l.pack_known %}{{ l.pack_size }}{% else %}<strong>not recorded</strong>{% endif %}</td>
+            <td>{{ l.packs }}</td><td>{{ l.units }}</td>
             <td>{% if l.pack_price %}R{{ "%.2f"|format(l.pack_price) }}{% else %}&ndash;{% endif %}</td>
             <td>{% if l.pack_price %}R{{ "%.2f"|format(l.line_cost) }}{% else %}&ndash;{% endif %}</td>
         </tr>
@@ -1848,7 +1855,7 @@ consumption has more than {{ order_request.cover_months }} months of stock.</p>
 <h3>Summary</h3>
 <table>
     <thead><tr><th>Suppliers</th><th>Items</th><th>Packs</th><th>Estimated Total</th>
-               <th>Items with no price on file</th></tr></thead>
+               <th>No price on file</th><th>No pack size on file</th></tr></thead>
     <tbody>
         <tr>
             <td>{{ order_request.groups|length }}</td>
@@ -1856,6 +1863,7 @@ consumption has more than {{ order_request.cover_months }} months of stock.</p>
             <td>{{ order_request.total_packs }}</td>
             <td>R{{ "%.2f"|format(order_request.grand_total) }}</td>
             <td>{{ order_request.unpriced }}</td>
+            <td>{{ order_request.unsized }}</td>
         </tr>
     </tbody>
 </table>
@@ -1863,6 +1871,13 @@ consumption has more than {{ order_request.cover_months }} months of stock.</p>
 <p class="message error" style="font-size:13px;">{{ order_request.unpriced }} item(s)
 have no pack price on file, so their cost is not included in the total. They are
 still listed &mdash; the quantity is what matters for the request.</p>
+{% endif %}
+{% if order_request.unsized %}
+<p class="message error" style="font-size:13px;">{{ order_request.unsized }} item(s)
+have no pack size on file, so their quantity is expressed in single units. Check
+these against the supplier's pack before sending &mdash; the pack size is recorded
+automatically the first time an item is received on a delivery, or you can set it
+now under Edit Medication.</p>
 {% endif %}
 <p style="font-size:13px;">Estimated at the last pack price recorded for each item,
 so treat the total as indicative rather than a quotation.</p>
@@ -3540,12 +3555,23 @@ def edit_medication():
             try:
                 balance     = int(request.form['balance'])
                 batch       = request.form['batch']
-                price       = float(request.form['price'])
+                # NEW (Pack pricing): the unit price is derived here as well, so
+                # a pack size can be corrected without waiting for the item to be
+                # received again — which is what the order request needs in order
+                # to ask for whole packs.
+                pack_size   = int(request.form.get('pack_size') or 1)
+                pack_price  = float(request.form['pack_price'])
+                if pack_size < 1:
+                    raise ValueError('pack size must be at least 1')
+                if pack_price < 0:
+                    raise ValueError('price cannot be negative')
+                price       = _unit_price(pack_price, pack_size)
                 expiry_date = request.form['expiry_date']
                 schedule    = request.form['schedule']
                 medications.update_one(
                     {'name': med_name},
                     {'$set': {'balance': balance, 'batch': batch, 'price': price,
+                              'pack_size': pack_size, 'pack_price': pack_price,
                               'expiry_date': expiry_date, 'schedule': schedule}}
                 )
                 message = 'Medication updated successfully!'
@@ -3856,7 +3882,7 @@ def reports():
                             transactions, {'$gte': window_start, '$lte': window_end},
                             [m['name'] for m in req_meds] if search else None)
 
-                        by_supplier, unpriced = {}, 0
+                        by_supplier, unpriced, unsized = {}, 0, 0
                         for med in req_meds:
                             name    = med.get('name', '')
                             consumed = movement.get(name, _ZERO_MOVEMENT)['dispensed']
@@ -3868,12 +3894,22 @@ def reports():
                             if mos >= cover_months:
                                 continue
                             shortfall = amc * cover_months - balance
-                            pack_size = med.get('pack_size') or 1
+                            # An item whose pack size has never been recorded is
+                            # NOT the same as one that genuinely comes in singles.
+                            # Treating them alike produced a plausible-looking
+                            # request ("order 300 packs") that a supplier could
+                            # not fill, with nothing on the page to show it was a
+                            # guess. Quantities still fall back to singles, but
+                            # the row says so.
+                            pack_known = med.get('pack_size') is not None
+                            pack_size  = med.get('pack_size') or 1
                             packs     = int(-(-shortfall // pack_size))   # ceiling
                             units     = packs * pack_size
                             pack_price = med.get('pack_price')
                             if pack_price is None:
                                 unpriced += 1
+                            if not pack_known:
+                                unsized += 1
                             line_cost = packs * (pack_price or 0)
                             supplier  = med.get('supplier') or 'Supplier not recorded'
                             by_supplier.setdefault(supplier, []).append({
@@ -3881,7 +3917,8 @@ def reports():
                                 'balance': balance,
                                 'mos_label': 'Out of stock' if balance == 0 else f'{mos:.1f}',
                                 'shortfall': int(round(shortfall)),
-                                'pack_size': pack_size, 'packs': packs, 'units': units,
+                                'pack_size': pack_size, 'pack_known': pack_known,
+                                'packs': packs, 'units': units,
                                 'pack_price': pack_price, 'line_cost': line_cost,
                                 'status': ('expired' if balance == 0 or mos < 1
                                            else ('close-to-expire' if mos < 2 else 'normal')),
@@ -3902,6 +3939,7 @@ def reports():
                             'total_packs': sum(l['packs'] for g in groups for l in g['lines']),
                             'grand_total': sum(g['total'] for g in groups),
                             'unpriced': unpriced,
+                            'unsized': unsized,
                         }
                         report_title = 'Order Request'
 
@@ -5067,7 +5105,15 @@ def edit_receive(receive_id):
                          # FIX (Bug): schedule deliberately excluded here too —
                          # editing a receive line must not be able to reclassify
                          # a controlled drug. Change it under Edit Medication.
+                         #
+                         # pack_price is recomputed from the edited unit price and
+                         # the pack size already on file, so the three figures
+                         # cannot drift apart and leave the order request costing
+                         # packs at a stale rate.
                          '$set': {'batch': batch, 'price': price, 'expiry_date': expiry_date,
+                                  'pack_price': price * (medications.find_one(
+                                      {'name': med_name}, {'_id': 0, 'pack_size': 1}
+                                  ) or {}).get('pack_size', 1),
                                   'stock_receiver': stock_receiver,
                                   'order_number': order_number, 'supplier': supplier,
                                   'invoice_number': invoice_number}},
