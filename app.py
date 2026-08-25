@@ -763,11 +763,13 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
                is both slower and lossy — and a band recorded today is wrong next
                year, whereas a birth year stays true. Age is derived where it is
                needed. #}
-            <label>Year of Birth:</label>
-            <input name="birth_year" type="number" min="1900" max="{{ current_year }}"
-                   placeholder="e.g. 1985"
-                   value="{{ tx_data.birth_year if tx_data and tx_data.birth_year else '' }}"
-                   {% if not tx_data %}required{% endif %}>
+            <label>Year of Birth (decade):</label>
+            <select name="birth_decade" {% if not tx_data %}required{% endif %}>
+                <option value="">-- Select Decade --</option>
+                {% for d in birth_decades %}
+                <option value="{{ d }}" {% if tx_data and tx_data.birth_decade == d %}selected{% endif %}>{{ d }}&ndash;{{ d + 9 }}</option>
+                {% endfor %}
+            </select>
         </div>
         <div>
             <label>Gender:</label>
@@ -782,11 +784,15 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
                "number of days" field forced a 0 onto referrals and admissions,
                which made those outcomes invisible. Outcome is now optional and
                names what actually happened. #}
-            <label>Outcome (optional):</label>
-            <select name="outcome">
-                <option value="">-- None --</option>
-                {% for opt in ['Sick leave', 'Referral', 'Admission'] %}
-                <option value="{{ opt }}" {% if tx_data and tx_data.outcome == opt %}selected{% endif %}>{{ opt }}</option>
+            {# NEW: "Outpatient" replaces the empty option. An ordinary visit
+               that ends with the patient going home IS an outcome, and naming it
+               means every visit has one — which gives the other three a
+               denominator. With a blank option those visits were simply absent,
+               so a referral rate could not be worked out at all. #}
+            <label>Outcome:</label>
+            <select name="outcome" {% if not tx_data %}required{% endif %}>
+                {% for opt in ['Outpatient', 'Sick leave', 'Referral', 'Admission'] %}
+                <option value="{{ opt }}" {% if (tx_data and tx_data.outcome == opt) or (not tx_data and opt == 'Outpatient') %}selected{% endif %}>{{ opt }}</option>
                 {% endfor %}
             </select>
         </div>
@@ -956,7 +962,7 @@ search looks across all records, not just this month.</p>
             <th>Company</th>
             <th>Position</th>
             <th>Gender</th>
-            <th>Year of Birth</th>
+            <th>Born</th>
             <th>Timestamp</th>
             <th>User</th>
             <th>Diagnoses</th>
@@ -999,7 +1005,7 @@ search looks across all records, not just this month.</p>
                     <td>{{ t.company }}</td>
                     <td>{{ t.position }}</td>
                     <td>{{ t.gender }}</td>
-                    <td>{{ t.get('birth_year') or t.get('age_group') or '-' }}</td>
+                    <td>{% if t.get('birth_decade') %}{{ t.birth_decade }}&ndash;{{ t.birth_decade + 9 }}{% else %}{{ t.get('birth_year') or t.get('age_group') or '-' }}{% endif %}</td>
                     <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
                     <td>{{ t.user }}</td>
                     <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
@@ -2088,7 +2094,10 @@ effect, not a stock discrepancy.</p>
         <tr><td>Items per visit</td><td>{{ monthly.items_per_visit }}</td></tr>
         <tr><td>Patients seen</td><td>{{ monthly.patients }}</td></tr>
         <tr><td>Total cost dispensed</td><td>R{{ "%.2f"|format(monthly.dispensed_value) }}</td></tr>
+        <tr><td>Visits per patient</td><td>{{ monthly.visits_per_patient }}</td></tr>
         <tr><td>Average cost per visit</td><td>R{{ "%.2f"|format(monthly.cost_per_visit) }}</td></tr>
+        <tr><td><strong>Average cost per patient</strong></td>
+            <td><strong>R{{ "%.2f"|format(monthly.cost_per_patient) }}</strong></td></tr>
         <tr><td>Average cost per item</td><td>R{{ "%.2f"|format(monthly.cost_per_item) }}</td></tr>
     </tbody>
 </table>
@@ -3353,15 +3362,18 @@ def dispense():
                 position      = request.form['position']
                 # Stored as the year itself; age is derived at report time so it
                 # never goes stale.
+                # Stored as the first year of the decade (1980 means 1980-1989),
+                # so the range can always be re-derived and never goes stale the
+                # way a recorded age band would.
                 try:
-                    birth_year = int(request.form.get('birth_year') or 0) or None
+                    birth_decade = int(request.form.get('birth_decade') or 0) or None
                 except (TypeError, ValueError):
-                    birth_year = None
+                    birth_decade = None
                 prescriber    = request.form['prescriber']
                 dispenser     = request.form['dispenser']
                 date_str      = request.form['date']
                 gender        = request.form['gender']
-                outcome = (request.form.get('outcome') or '').strip() or None
+                outcome = (request.form.get('outcome') or '').strip() or 'Outpatient'
                 try:
                     outcome_days = int(request.form.get('outcome_days') or 0) or None
                 except (TypeError, ValueError):
@@ -3449,7 +3461,7 @@ def dispense():
                                     'patient': patient,
                                     'company': company,
                                     'position': position,
-                                    'birth_year': birth_year,
+                                    'birth_decade': birth_decade,
                                     'gender': gender,
                                     'outcome': outcome,
                                     'outcome_days': outcome_days,
@@ -3503,6 +3515,7 @@ def dispense():
             end_date=end_date,
             search=search,
             tx_data=tx_data, current_year=datetime.utcnow().year,
+            birth_decades=_birth_decades(),
             pager=pager, window_defaulted=window_defaulted, unit='visits'
         )
     except ServerSelectionTimeoutError:
@@ -3512,7 +3525,7 @@ def dispense():
             nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
             start_date='', end_date='', search='', tx_data=None,
-            current_year=datetime.utcnow().year,
+            current_year=datetime.utcnow().year, birth_decades=_birth_decades(),
             pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='visits'
         ), 500
 
@@ -4711,6 +4724,14 @@ def reports():
                             'items_dispensed': items_dispensed,
                             'items_per_visit': f'{items_dispensed / len(visits):.1f}' if visits else '-',
                             'cost_per_visit': dispensed_value / len(visits) if visits else 0.0,
+                            # Cost per PATIENT is not cost per visit: a patient who
+                            # attends three times in the period is one patient and
+                            # three visits, so the two answer different questions —
+                            # what a visit costs to serve, versus what a person
+                            # costs to care for over the period.
+                            'cost_per_patient': dispensed_value / len(patients) if patients else 0.0,
+                            'visits_per_patient': (f'{len(visits) / len(patients):.1f}'
+                                                   if patients else '-'),
                             'cost_per_item': dispensed_value / items_dispensed if items_dispensed else 0.0,
                             'estimated_lines': estimated_lines,
                             'top_items': [
@@ -5205,6 +5226,12 @@ def _pager(page, page_size, total):
             'last': min(page * page_size, total)}
 
 
+def _birth_decades():
+    """Decade options, most recent first — most patients are recent births."""
+    this = (datetime.utcnow().year // 10) * 10
+    return list(range(this, 1919, -10))
+
+
 def _clinical_by_month(transactions, window_start, months):
     """Outcomes and diagnoses per month, plus a period total per diagnosis.
 
@@ -5216,11 +5243,11 @@ def _clinical_by_month(transactions, window_start, months):
     idx = {ym: i for i, ym in enumerate(months)}
     n = len(months)
     outcomes = {}
-    dx_month, dx_total, seen = {}, {}, set()
+    dx_month, dx_total, seen, patients = {}, {}, set(), set()
     cursor = transactions.find(
         {'type': 'dispense', 'timestamp': {'$gte': window_start}},
         {'_id': 0, 'timestamp': 1, 'transaction_id': 1, 'outcome': 1,
-         'outcome_days': 1, 'diagnoses': 1})
+         'outcome_days': 1, 'diagnoses': 1, 'patient': 1})
     for t in cursor:
         ts = t.get('timestamp')
         if not isinstance(ts, datetime):
@@ -5232,6 +5259,8 @@ def _clinical_by_month(transactions, window_start, months):
         if tid in seen:
             continue
         seen.add(tid)
+        if t.get('patient'):
+            patients.add(t['patient'])
         oc = t.get('outcome')
         if oc:
             row = outcomes.setdefault(oc, {'counts': [0] * n, 'days': 0})
@@ -5251,6 +5280,7 @@ def _clinical_by_month(transactions, window_start, months):
         'diagnoses': [{'name': k, 'counts': dx_month[k], 'total': v,
                        'trend': _dx_trend(dx_month[k])} for k, v in top],
         'episodes': len(seen),
+        'patients': patients,
     }
 
 
@@ -5435,6 +5465,12 @@ def dashboard():
             act['receipts'].append(b['receipts'])
             act['deliveries'].append(len(b['deliveries']))
             act['adjusted_lines'].append(b['adjusted_lines'])
+        # Distinct patients across the whole window, so a patient attending in
+        # two months is counted once — the same basis as the period report.
+        patient_total = len(clinical.get('patients') or ())
+        dispensed_money = sum(totals['val_dispensed'])
+        cost_per_patient_label = (f'R{dispensed_money / patient_total:,.2f}'
+                                  if patient_total else '-')
         totals['val_dispensed'] = [f"{v:,.0f}" for v in totals['val_dispensed']]
         totals['val_received']  = [f"{v:,.0f}" for v in totals['val_received']]
         totals['val_adjusted']  = [f"{v:,.0f}" for v in totals['val_adjusted']]
@@ -5473,6 +5509,9 @@ def dashboard():
             {'label': 'Expiring in 90 days', 'value': len(expiring_90), 'sub': f'R{at_risk:,.2f} at risk',
              'bg': '#fff3cd' if expiring_90 else '#eef2f7', 'fg': '#856404' if expiring_90 else '#1a3a5c'},
             {'label': 'Stock value', 'value': f'R{stock_value:,.0f}', 'sub': 'balance x unit price',
+             'bg': '#eef2f7', 'fg': '#1a3a5c'},
+            {'label': 'Cost per patient', 'value': cost_per_patient_label,
+             'sub': f'{patient_total:,} patient(s) over the period',
              'bg': '#eef2f7', 'fg': '#1a3a5c'},
         ]
 
@@ -5578,7 +5617,7 @@ def dashboard():
             is_admin=is_admin, month_labels=month_labels, months_back=months_back,
             month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
             search=search, tiles=[], totals=empty, act=act_empty, rows=[], total_items=0,
-            clinical={'outcomes': [], 'diagnoses': [], 'episodes': 0},
+            clinical={'outcomes': [], 'diagnoses': [], 'episodes': 0, 'patients': set()},
             expiring=[], st_totals=st_empty, top_discrepancies=[], never_counted=[],
         ), 500
 
