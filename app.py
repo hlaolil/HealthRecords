@@ -302,6 +302,7 @@ def get_nav_links():
             <a href="/dashboard">Dashboard</a> |
             <a href="/dispense">Dispensing</a> |
             <a href="/receive">Receiving</a> |
+            <a href="/internal-issue">Internal Issues</a> |
             {add_med_link}
             <a href="/reports">Reports</a> |
             {stock_take_link}
@@ -1210,6 +1211,135 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 """
 
+INTERNAL_ISSUE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
+<h1>Internal Issues &amp; Damage</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
+{{ nav_links|safe }}
+{% if message %}
+    <p class="message {% if 'recorded' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+
+{# NEW: stock leaves the store for reasons other than dispensing to a patient.
+   The two here are deliberately separate because they mean opposite things for
+   ordering: stock ISSUED to a department was used and must be replaced, so it
+   counts as consumption and raises AMC. Stock DAMAGED was lost and must not be
+   replaced on that account, so it is excluded from AMC exactly like expiry.
+   Recording both as one "adjustment" would make the difference invisible. #}
+
+<h2>Issue Stock to a Department</h2>
+<p style="font-size:13px;">Counts as <strong>consumption</strong>: it raises the
+item's AMC and the order request will replace it.</p>
+<form method="POST" action="{{ url_for('internal_issue') }}" class="dispense-form">
+    <input type="hidden" name="action" value="issue">
+    <div class="common-section">
+        <div>
+            <label>Department:</label>
+            <select name="department" required>
+                <option value="">-- Select Department --</option>
+                {% for d in departments %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>If Other, specify:</label>
+            <input name="department_other" type="text" placeholder="Only if Other is selected">
+        </div>
+        <div>
+            <label>Requested / Received By:</label>
+            <input name="issued_to" type="text" required>
+        </div>
+        <div>
+            <label>Note (optional):</label>
+            <input name="note" type="text" placeholder="Requisition number, remarks">
+        </div>
+    </div>
+    <h3>Items</h3>
+    <table>
+        <thead><tr><th>Medication</th><th>Quantity</th></tr></thead>
+        <tbody>
+        {% for i in range(6) %}
+            <tr>
+                <td><input name="med_name" list="med_suggestions" autocomplete="off" style="width:18em;"></td>
+                <td><input name="quantity" type="number" min="0" style="width:8em;"></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    <datalist id="med_suggestions"></datalist>
+    <div class="form-buttons"><input type="submit" value="Record Issue"></div>
+</form>
+
+<hr>
+<h2>Record Damaged or Lost Stock</h2>
+<p style="font-size:13px;">A <strong>loss</strong>, like expiry: the stock leaves
+the shelf but is <strong>not</strong> counted as consumption, so it does not
+inflate AMC and the order request will not reorder against it.</p>
+<form method="POST" action="{{ url_for('internal_issue') }}" class="dispense-form">
+    <input type="hidden" name="action" value="damage">
+    <div class="common-section">
+        <div>
+            <label>Medication:</label>
+            <input name="med_name" list="med_suggestions2" required autocomplete="off">
+            <datalist id="med_suggestions2"></datalist>
+        </div>
+        <div>
+            <label>Quantity Lost:</label>
+            <input name="quantity" type="number" min="1" required>
+        </div>
+        <div>
+            <label>Reason:</label>
+            <select name="reason" required>
+                <option value="">-- Select --</option>
+                {% for r in damage_reasons %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Note (optional):</label>
+            <input name="note" type="text" placeholder="Batch, circumstances">
+        </div>
+    </div>
+    <div class="form-buttons"><input type="submit" value="Record Loss"></div>
+</form>
+
+<h2>Recent Internal Issues &amp; Losses ({{ recent|length }})</h2>
+<table>
+    <thead>
+        <tr><th>Date</th><th>Type</th><th>Medication</th><th>Quantity</th><th>Value</th>
+            <th>Department / Reason</th><th>To / Note</th><th>User</th></tr>
+    </thead>
+    <tbody>
+    {% for r in recent %}
+        <tr class="{% if r.type == 'damage' %}expired{% else %}normal{% endif %}">
+            <td>{{ r.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{% if r.type == 'damage' %}Loss{% else %}Issue{% endif %}</td>
+            <td>{{ r.med_name }}</td>
+            <td>{{ r.quantity if r.type != 'damage' else -r.quantity }}</td>
+            <td>R{{ "%.2f"|format(r.line_value if r.line_value >= 0 else -r.line_value) }}</td>
+            <td>{{ r.get('department') or r.get('reason') or '-' }}</td>
+            <td>{{ r.get('issued_to') or r.get('note') or '-' }}</td>
+            <td>{{ r.user }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="8">Nothing recorded yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+<script>
+document.addEventListener('DOMContentLoaded', async function() {
+    const options = await getMedicationOptions();
+    ['med_suggestions', 'med_suggestions2'].forEach(function(id) {
+        const dl = document.getElementById(id);
+        if (!dl) { return; }
+        options.forEach(function(m) {
+            const o = document.createElement('option');
+            o.value = m;
+            dl.appendChild(o);
+        });
+    });
+});
+</script>
+"""
+
+
 RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
 <h1>Receiving</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
@@ -1222,6 +1352,8 @@ RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
 {% endif %}
 
 {# NEW (Deliveries): receiving now happens inside a DELIVERY, which carries
+
+# NEW (Deliveries): receiving now happens inside a DELIVERY, which carries
    the supplier, order number + order total, and invoice number + invoice total
    ONCE. Line items inherit them, so those four fields are typed once per
    delivery instead of once per medication.
@@ -1747,7 +1879,8 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     <select name="report_type" required>
         <option value="stock_on_hand">Stock on Hand</option>
         <option value="expired_list">Expired Stock on Shelf (to action)</option>
-        <option value="expiry_writeoffs">Expiry Write-Offs (removed stock)</option>
+        <option value="expiry_writeoffs">Losses (expiry &amp; damage)</option>
+        <option value="internal_issues">Internal Issues (to departments)</option>
         <option value="unmet_demand">Unmet Demand (stockouts)</option>
         <option value="near_expired_list">Near Expired Drug List</option>
         <option value="out_of_stock_list">Out of Stock List</option>
@@ -1871,13 +2004,16 @@ recorded in the audit log.</p>
 </form>
 <h2>Inventory Report for {{ start_date }} to {{ end_date }}</h2>
 {% if is_admin %}
-<p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed + Adjustment
-+ Expired = Current</strong>.
+<p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed
+&minus; Issued Internally + Adjustment + Expired + Damaged = Current</strong>.
+<strong>Issued Internally</strong> is stock sent to a department rather than a
+patient &mdash; it is consumption and counts toward AMC, because it has to be
+replaced. <strong>Damaged</strong> is stock lost, and does not.
 Adjustment is the net of any physical-count corrections made during the period —
 see Audit &rarr; Stock Take Discrepancies for the detail behind it. Expired is
 stock written off the shelf. Both are shown signed.
-AMC is average monthly consumption over the selected period, and counts only
-recorded dispensing — write-offs and count corrections are excluded from it.
+AMC is average monthly consumption over the selected period — dispensing plus
+internal issues. Write-offs, damage and count corrections are excluded from it.
 <strong>Unmet</strong> is demand that could not be filled because stock had run
 out; <strong>Adjusted AMC</strong> adds it back, so it reflects what was actually
 asked for rather than what happened to be on the shelf. Where the two differ, the
@@ -1885,8 +2021,11 @@ plain AMC is understating demand — which is exactly what happens to an item th
 keeps running out. <strong>Fill rate</strong> is the share of demand that was
 met.</p>
 {% else %}
-<p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed = Current</strong>.
-AMC is average monthly consumption over the selected period.</p>
+<p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed
+&minus; Issued Internally = Current</strong>.
+<strong>Issued Internally</strong> is stock sent to a department rather than a
+patient. AMC is average monthly consumption &mdash; dispensing plus internal
+issues, since both have to be replaced.</p>
 {% endif %}
 <table>
     <thead>
@@ -1896,6 +2035,8 @@ AMC is average monthly consumption over the selected period.</p>
            honest place to put it. #}
         <tr><th>Medication</th><th>Beginning Balance</th><th>Received</th><th>Dispensed</th>
             {% if is_admin %}<th>Adjustment</th><th>Expired</th>{% endif %}
+            <th>Issued Internally</th>
+            {% if is_admin %}<th>Damaged</th>{% endif %}
             <th>Current Balance</th><th>AMC</th><th>Unmet</th><th>Adjusted AMC</th>
             <th>Fill Rate</th><th>Amount to Order</th></tr>
     </thead>
@@ -1911,6 +2052,8 @@ AMC is average monthly consumption over the selected period.</p>
             {% else %}
             <td>{{ row.dispensed_effective }}</td>
             {% endif %}
+            <td>{{ row.issued }}</td>
+            {% if is_admin %}<td>{% if row.damaged %}{{ '%+d'|format(row.damaged) }}{% else %}0{% endif %}</td>{% endif %}
             <td>{{ row.current_balance }}</td><td>{{ row.amc }}</td>
             <td>{% if row.unmet %}<strong>{{ row.unmet }}</strong>{% else %}0{% endif %}</td>
             <td>{{ row.adjusted_amc }}</td>
@@ -1918,10 +2061,73 @@ AMC is average monthly consumption over the selected period.</p>
             <td>{{ row.amount_to_order }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="{{ 12 if is_admin else 10 }}">No data for this period.</td></tr>
+        <tr><td colspan="{{ 14 if is_admin else 11 }}">No data for this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
+{% elif report_type == 'internal_issues' %}
+<h2>Internal Issues for {{ start_date }} to {{ end_date }}</h2>
+<p style="font-size:13px;">Stock issued out of the store to a department rather
+than dispensed to a patient. This is <strong>consumption</strong>: it counts
+toward each item's AMC and the order request replaces it, because the stock was
+used and has to be bought again. Damage and expiry are losses and appear under
+<em>Losses</em> instead.</p>
+<table>
+    <thead>
+        <tr><th>Date</th><th>Department</th><th>Medication</th><th>Quantity</th>
+            <th>Value</th><th>Received By</th><th>Note</th><th>Issued By</th></tr>
+    </thead>
+    <tbody>
+    {% for i in issues %}
+        <tr>
+            <td>{{ i.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ i.get('department') or 'Unspecified' }}</td>
+            <td>{{ i.med_name }}</td><td>{{ i.quantity }}</td>
+            <td>R{{ "%.2f"|format(i.line_value if i.get('line_value') is not none else i.quantity * (i.get('price') or 0)) }}</td>
+            <td>{{ i.get('issued_to') or '-' }}</td>
+            <td>{{ i.get('note') or '-' }}</td><td>{{ i.user }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="8">No internal issues in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% if issues %}
+<h3>By Department</h3>
+<table>
+    <thead><tr><th>Department</th><th>Lines</th><th>Units</th><th>Value</th><th>Share</th></tr></thead>
+    <tbody>
+    {% for d in issue_totals.by_dept %}
+        <tr><td>{{ d.name }}</td><td>{{ d.lines }}</td><td>{{ d.units }}</td>
+            <td>R{{ "%.2f"|format(d.value) }}</td>
+            <td>{% if issue_totals.value %}{{ "%.1f"|format(d.value / issue_totals.value * 100) }}%{% else %}&ndash;{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+<h3>By Medication</h3>
+<table>
+    <thead><tr><th>Medication</th><th>Lines</th><th>Units</th><th>Value</th></tr></thead>
+    <tbody>
+    {% for m in issue_totals.by_med %}
+        <tr><td>{{ m.name }}</td><td>{{ m.lines }}</td><td>{{ m.units }}</td>
+            <td>R{{ "%.2f"|format(m.value) }}</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+<h3>Summary</h3>
+<table>
+    <thead><tr><th>Issues</th><th>Departments</th><th>Units</th><th>Total Value</th></tr></thead>
+    <tbody>
+        <tr><td>{{ issue_totals.lines }}</td><td>{{ issue_totals.dept_count }}</td>
+            <td>{{ issue_totals.units }}</td>
+            <td>R{{ "%.2f"|format(issue_totals.value) }}</td></tr>
+    </tbody>
+</table>
+<div class="form-buttons">
+    <button type="button" onclick="window.print();">Print This Report</button>
+</div>
+{% endif %}
+
 {% elif report_type == 'unmet_demand' %}
 <h2>Unmet Demand for {{ start_date }} to {{ end_date }}</h2>
 <p style="font-size:13px;">Every occasion a medication was asked for and could not
@@ -1983,15 +2189,15 @@ what to buy.</p>
 {% endif %}
 
 {% elif report_type == 'expiry_writeoffs' %}
-<h2>Expiry Write-Offs for {{ start_date }} to {{ end_date }}</h2>
+<h2>Stock Losses for {{ start_date }} to {{ end_date }}</h2>
 <p style="font-size:13px;">Stock that was actually removed from the shelf as
-expired. This is the record of loss &mdash; distinct from
+expired, or written off as damaged or lost. This is the record of loss &mdash; distinct from
 <em>Expired Stock on Shelf</em>, which is a work list of what still needs
 removing and empties as you deal with it. Values are at the unit price recorded
 when the stock was written off.</p>
 <table>
     <thead>
-        <tr><th>Date</th><th>Medication</th><th>Units Removed</th><th>Unit Cost</th>
+        <tr><th>Date</th><th>Kind</th><th>Medication</th><th>Units Removed</th><th>Unit Cost</th>
             <th>Value Lost</th><th>Batch</th><th>Expiry Date</th>
             <th>Reason</th><th>Removed By</th></tr>
     </thead>
@@ -1999,6 +2205,7 @@ when the stock was written off.</p>
     {% for w in writeoffs %}
         <tr class="expired">
             <td>{{ w.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ w.kind }}</td>
             <td>{{ w.med_name }}</td>
             <td>{{ w.units }}</td>
             <td>R{{ "%.4f"|format(w.price) }}</td>
@@ -2009,7 +2216,7 @@ when the stock was written off.</p>
             <td>{{ w.user }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="9">No stock was written off in this period.</td></tr>
+        <tr><td colspan="10">No stock was written off in this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -2064,6 +2271,13 @@ item's current price. Those figures are indicative.{% endif %}</p>
             <td>stock brought onto the system</td></tr>
         <tr><td>Dispensed</td><td>&minus;R{{ "%.2f"|format(monthly.dispensed_value) }}</td>
             <td>{{ monthly.items_dispensed }} item(s) over {{ monthly.visits }} visit(s)</td></tr>
+        <tr><td>Issued to departments</td>
+            <td>&minus;R{{ "%.2f"|format(monthly.issued_value) }}</td>
+            <td>{{ monthly.issued_lines }} line(s) &mdash; counts as consumption</td></tr>
+        <tr class="{% if monthly.damaged_value %}expired{% else %}normal{% endif %}">
+            <td>Damaged or lost</td>
+            <td>R{{ "%+.2f"|format(monthly.damaged_value) }}</td>
+            <td>{{ monthly.damaged_lines }} write-off(s) &mdash; not consumption</td></tr>
         <tr class="{% if monthly.expired_value %}expired{% else %}normal{% endif %}">
             <td>Expired stock written off</td>
             <td>R{{ "%+.2f"|format(monthly.expired_value) }}</td>
@@ -2119,6 +2333,20 @@ effect, not a stock discrepancy.</p>
 <p style="font-size:13px;">An order counts in the period its first invoice was
 recorded, since there is no separate order record. Where one order is invoiced
 across two periods it is counted once, in the earlier one.</p>
+
+{% if monthly.by_dept %}
+<h3>Internal Issues by Department</h3>
+<table>
+    <thead><tr><th>Department</th><th>Lines</th><th>Value</th><th>Share of Issues</th></tr></thead>
+    <tbody>
+    {% for d in monthly.by_dept %}
+        <tr><td>{{ d.name }}</td><td>{{ d.lines }}</td>
+            <td>R{{ "%.2f"|format(d.value) }}</td>
+            <td>{% if monthly.issued_value %}{{ "%.1f"|format(d.value / monthly.issued_value * 100) }}%{% else %}&ndash;{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
 
 <h3>Highest Cost Items ({{ monthly.top_items|length }})</h3>
 <table>
@@ -4141,6 +4369,20 @@ def _demand_by_med(transactions, time_filter, med_names=None):
 _ZERO_DEMAND = {'shortfall': 0, 'events': 0}
 
 
+ACTIVE_ONLY = {'archived': {'$ne': True}}
+
+
+def _active(base=None):
+    """Add the not-archived condition to a medications query.
+
+    Archived items keep every transaction they ever had, so historical reports
+    still reconcile — they simply stop appearing in the lists you work from.
+    """
+    q = dict(base or {})
+    q['archived'] = {'$ne': True}
+    return q
+
+
 def _name_key(name):
     """Sort key for medication names.
 
@@ -4275,6 +4517,8 @@ def reports():
         writeoff_totals = {'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []}
         unmet_list = []
         unmet_totals = {'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []}
+        issues = []
+        issue_totals = {'lines': 0, 'units': 0, 'value': 0.0, 'dept_count': 0, 'by_dept': [], 'by_med': []}
         report_type = None
         start_date = None
         end_date = None
@@ -4336,7 +4580,7 @@ def reports():
                         threshold_date  = report_date + timedelta(days=30)
                         now_dt          = datetime.now(timezone.utc)
                         med_filter      = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
-                        all_meds        = _by_name(medications.find(med_filter, {'_id': 0}))
+                        all_meds        = _by_name(medications.find(_active(med_filter), {'_id': 0}))
                         stock_data      = []
                         # FIX (Performance): one aggregation for every medication
                         # instead of one per medication. Scoped by name only when a
@@ -4353,8 +4597,9 @@ def reports():
                             # reported as at that date.
                             mv = movement.get(med_name, _ZERO_MOVEMENT)
                             balance_at_date = max(0, current_balance - mv['received']
-                                                  + mv['dispensed'] - mv['adjusted']
-                                                  - mv['expired'])
+                                                  + mv['dispensed'] + mv['issued']
+                                                  - mv['adjusted'] - mv['expired']
+                                                  - mv['damaged'])
 
                             expiry_str = med.get('expiry_date')
                             expiry_dt = None
@@ -4405,7 +4650,7 @@ def reports():
                         # no message, no indication that anything was missing. It
                         # only existed to bound the per-medication query loop below,
                         # which no longer exists, so the cap goes with it.
-                        meds         = _by_name(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}))
+                        meds         = _by_name(medications.find(_active(med_filter), {'_id': 0, 'name': 1, 'balance': 1}))
                         days_in_period = max(1, (end_dt.date() - start_dt.date()).days + 1)
                         # FIX (Performance): one aggregation for the whole report
                         # instead of one per medication.
@@ -4434,10 +4679,21 @@ def reports():
                             # unwound separately or the beginning balance is wrong
                             # for every period containing a write-off.
                             expired           = mv['expired']
+                            # NEW: stock issued to a department is CONSUMED — it
+                            # left the store and has to be replaced — whereas
+                            # damage is LOST. Both reduce stock, only one is
+                            # demand, so they are tracked separately.
+                            issued            = mv['issued']
+                            damaged           = mv['damaged']
                             current_balance   = med.get('balance', 0)
                             beginning_balance = max(0, current_balance - received + dispensed
-                                                    - adjustment - expired)
-                            avg_daily         = dispensed / days_in_period
+                                                    + issued - adjustment - expired - damaged)
+                            # Consumption is everything issued out of the store,
+                            # to a patient or to a department. Excluding internal
+                            # issues would understate demand for exactly the items
+                            # the wards rely on most.
+                            consumption       = dispensed + issued
+                            avg_daily         = consumption / days_in_period
                             # AMC (Average Monthly Consumption): consumption in the
                             # period scaled to a 30-day month, so the figure stays
                             # comparable whatever period length is selected.
@@ -4448,7 +4704,7 @@ def reports():
                             # the demand-based version sits beside it, so the
                             # gap between the two is visible rather than buried.
                             unmet             = demand.get(med_name, _ZERO_DEMAND)['shortfall']
-                            adjusted_amc      = (dispensed + unmet) / days_in_period * 30
+                            adjusted_amc      = (consumption + unmet) / days_in_period * 30
                             lead_time_stock   = avg_daily * 60
                             amount_to_order   = max(0, amc - current_balance + lead_time_stock)
 
@@ -4457,6 +4713,7 @@ def reports():
                                 'beginning_balance': beginning_balance,
                                 'dispensed': dispensed, 'received': received,
                                 'adjustment': adjustment, 'expired': expired,
+                                'issued': issued, 'damaged': damaged,
                                 # NEW: non-admins don't see the Adjustment column,
                                 # so their Dispensed figure has to absorb it or the
                                 # row won't add up. Folding it in here isn't a fudge
@@ -4469,12 +4726,12 @@ def reports():
                                 # stays truthful either way, and
                                 #   Beginning + Received - Dispensed = Current
                                 # holds for the non-admin view.
-                                'dispensed_effective': dispensed - adjustment - expired,
+                                'dispensed_effective': dispensed - adjustment - expired - damaged,
                                 'current_balance': current_balance,
                                 'amc': _tidy(amc),
                                 'unmet': unmet, 'adjusted_amc': _tidy(adjusted_amc),
-                                'fill_rate': (round(dispensed / (dispensed + unmet) * 100, 1)
-                                              if (dispensed + unmet) else None),
+                                'fill_rate': (round(consumption / (consumption + unmet) * 100, 1)
+                                              if (consumption + unmet) else None),
                                 'amount_to_order': _tidy(amount_to_order)
                             })
 
@@ -4493,6 +4750,46 @@ def reports():
                                 {'expiry_date':    {'$regex': search, '$options': 'i'}},
                             ]
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
+
+                    elif report_type == 'internal_issues':
+                        if not start_date or not end_date:
+                            raise ValueError('Start and end dates are required for this report type.')
+                        q = {'type': 'internal_issue',
+                             'timestamp': {'$gte': start_dt, '$lte': end_dt}}
+                        if search:
+                            q['$or'] = [
+                                {'med_name':   {'$regex': search, '$options': 'i'}},
+                                {'department': {'$regex': search, '$options': 'i'}},
+                                {'issued_to':  {'$regex': search, '$options': 'i'}},
+                                {'user':       {'$regex': search, '$options': 'i'}},
+                            ]
+                        issues = list(transactions.find(q).sort('timestamp', -1).limit(2000))
+                        by_dept, by_med = {}, {}
+                        for i_ in issues:
+                            v = i_.get('line_value')
+                            if v is None:
+                                v = (i_.get('quantity', 0) or 0) * (i_.get('price', 0) or 0)
+                            d = by_dept.setdefault(i_.get('department') or 'Unspecified',
+                                                   {'lines': 0, 'units': 0, 'value': 0.0})
+                            d['lines'] += 1
+                            d['units'] += i_.get('quantity', 0) or 0
+                            d['value'] += v
+                            m_ = by_med.setdefault(i_.get('med_name', ''),
+                                                   {'lines': 0, 'units': 0, 'value': 0.0})
+                            m_['lines'] += 1
+                            m_['units'] += i_.get('quantity', 0) or 0
+                            m_['value'] += v
+                        issue_totals = {
+                            'lines': len(issues),
+                            'units': sum(v['units'] for v in by_dept.values()),
+                            'value': sum(v['value'] for v in by_dept.values()),
+                            'dept_count': len(by_dept),
+                            'by_dept': [{'name': k, **v} for k, v in
+                                        sorted(by_dept.items(), key=lambda kv: -kv[1]['value'])],
+                            'by_med': [{'name': k, **v} for k, v in
+                                       sorted(by_med.items(), key=lambda kv: -kv[1]['value'])][:20],
+                        }
+                        report_title = 'Internal Issues'
 
                     elif report_type == 'unmet_demand':
                         if not start_date or not end_date:
@@ -4541,7 +4838,7 @@ def reports():
                         # loss would only survive as an audit-log line.
                         if not start_date or not end_date:
                             raise ValueError('Start and end dates are required for this report type.')
-                        q = {'type': 'expiry_removal',
+                        q = {'type': {'$in': ['expiry_removal', 'damage']},
                              'timestamp': {'$gte': start_dt, '$lte': end_dt}}
                         if search:
                             q['$or'] = [
@@ -4561,7 +4858,9 @@ def reports():
                                 'units': units, 'price': w.get('price', 0) or 0,
                                 'value': value, 'batch': w.get('batch'),
                                 'expiry_date': w.get('expiry_date'),
-                                'reason': w.get('reason'), 'user': w.get('user'),
+                                'reason': w.get('reason'),
+                                'kind': 'Damage' if w.get('type') == 'damage' else 'Expiry',
+                                'user': w.get('user'),
                             })
                             e = by_med.setdefault(w.get('med_name', ''),
                                                   {'count': 0, 'units': 0, 'value': 0.0})
@@ -4578,7 +4877,7 @@ def reports():
                             'by_med': [{'med_name': k, **v} for k, v in
                                        sorted(by_med.items(), key=lambda kv: -kv[1]['value'])],
                         }
-                        report_title = 'Expiry Write-Offs'
+                        report_title = 'Stock Losses'
 
                     elif report_type == 'monthly_report':
                         # NEW (Costing): a month at cost. Everything is valued
@@ -4627,7 +4926,8 @@ def reports():
                         lines = list(transactions.find(
                             {'timestamp': period,
                              'type': {'$in': ['dispense', 'receive', 'adjustment',
-                                              'opening_balance', 'expiry_removal']}}))
+                                              'opening_balance', 'expiry_removal',
+                                              'internal_issue', 'damage']}}))
                         cur_price = {m['name']: (m.get('price', 0) or 0)
                                      for m in medications.find({}, {'_id': 0, 'name': 1, 'price': 1})}
 
@@ -4641,6 +4941,9 @@ def reports():
 
                         dispensed_value = received_value = opening_load_value = 0.0
                         adjustment_value = expired_value = 0.0
+                        issued_value = damaged_value = 0.0
+                        issued_lines = damaged_lines = 0
+                        by_dept = {}
                         items_dispensed = receipt_lines = adjustment_lines = 0
                         expired_lines = 0
                         estimated_lines = 0
@@ -4669,6 +4972,16 @@ def reports():
                             elif t == 'expiry_removal':
                                 expired_value += v
                                 expired_lines += 1
+                            elif t == 'internal_issue':
+                                issued_value += v
+                                issued_lines += 1
+                                d = by_dept.setdefault(l.get('department', 'Unspecified'),
+                                                       {'lines': 0, 'value': 0.0})
+                                d['lines'] += 1
+                                d['value'] += v
+                            elif t == 'damage':
+                                damaged_value += v
+                                damaged_lines += 1
                             else:
                                 adjustment_value += v
                                 adjustment_lines += 1
@@ -4713,6 +5026,10 @@ def reports():
                             'adjustment_lines': adjustment_lines,
                             'expired_value': expired_value,
                             'expired_lines': expired_lines,
+                            'issued_value': issued_value, 'issued_lines': issued_lines,
+                            'damaged_value': damaged_value, 'damaged_lines': damaged_lines,
+                            'by_dept': [{'name': k, **v} for k, v in
+                                        sorted(by_dept.items(), key=lambda kv: -kv[1]['value'])],
                             'receipt_lines': receipt_lines,
                             'delivery_count': len(month_dels),
                             'invoice_count': len(month_dels),
@@ -4767,7 +5084,7 @@ def reports():
                         window_start = window_end - timedelta(days=90)
                         req_filter = ({'name': {'$regex': search or '', '$options': 'i'}}
                                       if search else {})
-                        req_meds  = _by_name(medications.find(req_filter, {'_id': 0}))
+                        req_meds  = _by_name(medications.find(_active(req_filter), {'_id': 0}))
                         movement  = _movement_by_med(
                             transactions, {'$gte': window_start, '$lte': window_end},
                             [m['name'] for m in req_meds] if search else None)
@@ -4782,7 +5099,8 @@ def reports():
                         by_supplier, unpriced, unsized = {}, 0, 0
                         for med in req_meds:
                             name    = med.get('name', '')
-                            consumed = movement.get(name, _ZERO_MOVEMENT)['dispensed']
+                            mvd      = movement.get(name, _ZERO_MOVEMENT)
+                            consumed = mvd['dispensed'] + mvd['issued']
                             unmet    = demand.get(name, _ZERO_DEMAND)['shortfall']
                             plain_amc = consumed / 3.0         # 90 days -> per month
                             amc      = (consumed + unmet) / 3.0
@@ -4866,7 +5184,8 @@ def reports():
                             all_tx = list(transactions.find({
                                 'med_name': {'$in': controlled_meds},
                                 'type': {'$in': ['receive', 'dispense', 'adjustment',
-                                                 'opening_balance', 'expiry_removal']},
+                                                 'opening_balance', 'expiry_removal',
+                                                 'internal_issue', 'damage']},
                                 'timestamp': {'$gte': start_dt, '$lte': end_dt}
                             }).sort('timestamp', 1).limit(10000))
 
@@ -4924,6 +5243,8 @@ def reports():
                     writeoff_totals = {'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []}
                     unmet_list = []
                     unmet_totals = {'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []}
+                    issues = []
+                    issue_totals = {'lines': 0, 'units': 0, 'value': 0.0, 'dept_count': 0, 'by_dept': [], 'by_med': []}
             else:
                 message = 'Please select a report type.'
 
@@ -4934,6 +5255,7 @@ def reports():
             controlled_register=controlled_register, order_request=order_request,
             monthly=monthly, writeoffs=writeoffs, writeoff_totals=writeoff_totals,
             unmet_list=unmet_list, unmet_totals=unmet_totals,
+            issues=issues, issue_totals=issue_totals,
             start_date=start_date, end_date=end_date,
             total_transactions=total_transactions,
             nav_links=get_nav_links(), message=message,
@@ -4947,6 +5269,7 @@ def reports():
             controlled_register=[], order_request=None, monthly=None,
             writeoffs=[], writeoff_totals={'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []},
             unmet_list=[], unmet_totals={'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []},
+            issues=[], issue_totals={'lines': 0, 'units': 0, 'value': 0.0, 'dept_count': 0, 'by_dept': [], 'by_med': []},
             start_date=None, end_date=None,
             total_transactions=0, search=None, report_title=None, is_admin=is_admin
         ), 500
@@ -4990,7 +5313,8 @@ def _monthly_movement(transactions, window_start):
     movement = defaultdict(dict)
     pipeline = [
         {'$match': {'timestamp': {'$gte': window_start},
-                    'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance', 'expiry_removal']}}},
+                    'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance', 'expiry_removal',
+                       'internal_issue', 'damage']}}},
         {'$group': {
             '_id': {'med': '$med_name',
                     'y': {'$year': '$timestamp'},
@@ -5000,6 +5324,8 @@ def _monthly_movement(transactions, window_start):
                                              '$quantity', 0]}},
             'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type', 'adjustment']}, '$quantity', 0]}},
             'expired':   {'$sum': {'$cond': [{'$eq': ['$type', 'expiry_removal']}, '$quantity', 0]}},
+            'issued':    {'$sum': {'$cond': [{'$eq': ['$type', 'internal_issue']}, '$quantity', 0]}},
+            'damaged':   {'$sum': {'$cond': [{'$eq': ['$type', 'damage']}, '$quantity', 0]}},
         }}
     ]
     try:
@@ -5010,6 +5336,8 @@ def _monthly_movement(transactions, window_start):
                 'received':  row.get('received', 0) or 0,
                 'adjusted':  row.get('adjusted', 0) or 0,
                 'expired':   row.get('expired', 0) or 0,
+                'issued':    row.get('issued', 0) or 0,
+                'damaged':   row.get('damaged', 0) or 0,
             }
         return movement
     except Exception as e:
@@ -5020,7 +5348,8 @@ def _monthly_movement(transactions, window_start):
         movement = defaultdict(dict)
         cursor = transactions.find(
             {'timestamp': {'$gte': window_start},
-             'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance', 'expiry_removal']}},
+             'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance', 'expiry_removal',
+                       'internal_issue', 'damage']}},
             {'_id': 0, 'med_name': 1, 'type': 1, 'quantity': 1, 'timestamp': 1}
         )
         for tx in cursor:
@@ -5028,15 +5357,19 @@ def _monthly_movement(transactions, window_start):
             if not isinstance(ts, datetime):
                 continue
             bucket = movement[tx.get('med_name')].setdefault(
-                (ts.year, ts.month),
-                {'dispensed': 0, 'received': 0, 'adjusted': 0, 'expired': 0})
+                (ts.year, ts.month), dict(_ZERO_MOVEMENT))
             qty = tx.get('quantity', 0) or 0
-            if tx.get('type') == 'dispense':
+            k = tx.get('type')
+            if k == 'dispense':
                 bucket['dispensed'] += qty
-            elif tx.get('type') in ('receive', 'opening_balance'):
+            elif k in ('receive', 'opening_balance'):
                 bucket['received'] += qty
-            elif tx.get('type') == 'expiry_removal':
+            elif k == 'expiry_removal':
                 bucket['expired'] += qty
+            elif k == 'internal_issue':
+                bucket['issued'] += qty
+            elif k == 'damage':
+                bucket['damaged'] += qty
             else:
                 bucket['adjusted'] += qty
         return movement
@@ -5058,7 +5391,8 @@ def _monthly_movement(transactions, window_start):
 # plausible-looking row with fabricated figures in it. With a single query a
 # failure is visible instead of silent.
 # -----------------------------------------------------------------------
-_ZERO_MOVEMENT = {'dispensed': 0, 'received': 0, 'adjusted': 0, 'expired': 0}
+_ZERO_MOVEMENT = {'dispensed': 0, 'received': 0, 'adjusted': 0, 'expired': 0,
+                  'issued': 0, 'damaged': 0}
 
 
 def _movement_by_med(transactions, time_filter, med_names=None):
@@ -5073,7 +5407,8 @@ def _movement_by_med(transactions, time_filter, med_names=None):
     # does a receipt. Omitting it would make every period containing a go-live
     # load report a beginning balance that is too high.
     match = {'timestamp': time_filter,
-             'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance', 'expiry_removal']}}
+             'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance', 'expiry_removal',
+                       'internal_issue', 'damage']}}
     if med_names is not None:
         match['med_name'] = {'$in': med_names}
     pipeline = [
@@ -5085,27 +5420,35 @@ def _movement_by_med(transactions, time_filter, med_names=None):
                                              '$quantity', 0]}},
             'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type', 'adjustment']}, '$quantity', 0]}},
             'expired':   {'$sum': {'$cond': [{'$eq': ['$type', 'expiry_removal']}, '$quantity', 0]}},
+            'issued':    {'$sum': {'$cond': [{'$eq': ['$type', 'internal_issue']}, '$quantity', 0]}},
+            'damaged':   {'$sum': {'$cond': [{'$eq': ['$type', 'damage']}, '$quantity', 0]}},
         }}
     ]
     try:
         return {r['_id']: {'dispensed': r.get('dispensed', 0) or 0,
                            'received':  r.get('received', 0) or 0,
                            'adjusted':  r.get('adjusted', 0) or 0,
-                           'expired':   r.get('expired', 0) or 0}
+                           'expired':   r.get('expired', 0) or 0,
+                           'issued':    r.get('issued', 0) or 0,
+                           'damaged':   r.get('damaged', 0) or 0}
                 for r in transactions.aggregate(pipeline)}
     except Exception as e:
         app.logger.warning(f"Movement aggregation unavailable, falling back: {e}")
         out = {}
         for tx in transactions.find(match, {'_id': 0, 'med_name': 1, 'type': 1, 'quantity': 1}):
-            b = out.setdefault(tx.get('med_name'),
-                               {'dispensed': 0, 'received': 0, 'adjusted': 0, 'expired': 0})
+            b = out.setdefault(tx.get('med_name'), dict(_ZERO_MOVEMENT))
             qty = tx.get('quantity', 0) or 0
-            if tx.get('type') == 'dispense':
+            k = tx.get('type')
+            if k == 'dispense':
                 b['dispensed'] += qty
-            elif tx.get('type') in ('receive', 'opening_balance'):
+            elif k in ('receive', 'opening_balance'):
                 b['received'] += qty
-            elif tx.get('type') == 'expiry_removal':
+            elif k == 'expiry_removal':
                 b['expired'] += qty
+            elif k == 'internal_issue':
+                b['issued'] += qty
+            elif k == 'damage':
+                b['damaged'] += qty
             else:
                 b['adjusted'] += qty
         return out
@@ -5314,6 +5657,146 @@ def _stdev(values):
     return (sum((v - mean) ** 2 for v in values) / len(values)) ** 0.5
 
 
+DEPARTMENTS = ['Emergency Department', 'Emergency Trolley', 'PHC', 'OHC',
+               'Lab', 'Testing Room', 'Doctor Consultation', 'Campaigns', 'Other']
+
+DAMAGE_REASONS = ['Broken / spilled', 'Contaminated', 'Cold chain failure',
+                  'Recalled by supplier', 'Lost / unaccounted', 'Other']
+
+
+@app.route('/internal-issue', methods=['GET', 'POST'])
+@login_required
+def internal_issue():
+    """Stock leaving the store other than to a patient.
+
+    Two actions, deliberately distinct:
+      internal_issue — CONSUMED by a department. Counts toward AMC; the order
+                       request replaces it.
+      damage         — LOST. Excluded from AMC, exactly like expiry, so a
+                       breakage never causes the app to reorder more.
+    """
+    current_user = session['user']['name']
+    flashed = get_flashed_messages()
+    message = flashed[0] if flashed else None
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        medications, transactions = db['medications'], db['transactions']
+
+        if request.method == 'POST':
+            action = request.form.get('action')
+
+            if action == 'issue':
+                dept = (request.form.get('department') or '').strip()
+                if dept == 'Other':
+                    dept = (request.form.get('department_other') or '').strip() or 'Other'
+                issued_to = (request.form.get('issued_to') or '').strip()
+                note = (request.form.get('note') or '').strip()
+                if not dept or not issued_to:
+                    flash('Department and the person receiving are both required.')
+                    return redirect(url_for('internal_issue'))
+
+                names = request.form.getlist('med_name')
+                qtys = request.form.getlist('quantity')
+                issue_id = f"ISS-{datetime.utcnow().strftime('%Y%m%d')}-{uuid4().hex[:4].upper()}"
+                done, problems = [], []
+                for name, raw in zip(names, qtys):
+                    name = (name or '').strip()
+                    raw = (raw or '').strip()
+                    if not name or not raw:
+                        continue
+                    try:
+                        qty = int(raw)
+                    except ValueError:
+                        problems.append(f'{name}: quantity must be a whole number')
+                        continue
+                    if qty < 1:
+                        continue
+                    med = medications.find_one({'name': name})
+                    if not med:
+                        problems.append(f'"{name}" is not on file')
+                        continue
+                    available = med.get('balance', 0) or 0
+                    given = min(qty, available)
+                    if given <= 0:
+                        problems.append(f'{name}: nothing on hand')
+                        continue
+                    if given < qty:
+                        problems.append(f'{name}: only {given} of {qty} available')
+                    price = med.get('price', 0) or 0
+                    medications.update_one({'name': name}, {'$inc': {'balance': -given}})
+                    transactions.insert_one({
+                        'type': 'internal_issue', 'issue_id': issue_id,
+                        'med_name': name, 'quantity': given,
+                        'price': price, 'line_value': given * price,
+                        'department': dept, 'issued_to': issued_to, 'note': note,
+                        'batch': med.get('batch'), 'schedule': med.get('schedule'),
+                        'user': current_user, 'timestamp': datetime.utcnow(),
+                    })
+                    done.append(f'{name} x{given}')
+                if done:
+                    write_audit_entry('UPDATE', 'internal_issue', issue_id,
+                                      f'issued to {dept} ({issued_to}): {", ".join(done)}')
+                    msg = f'Issue to {dept} recorded: {", ".join(done)}.'
+                else:
+                    msg = 'Nothing was issued.'
+                if problems:
+                    msg += ' Problems: ' + '; '.join(problems)
+                flash(msg)
+                return redirect(url_for('internal_issue'))
+
+            if action == 'damage':
+                name = (request.form.get('med_name') or '').strip()
+                try:
+                    qty = int(request.form.get('quantity', ''))
+                except (TypeError, ValueError):
+                    flash('Quantity must be a whole number.')
+                    return redirect(url_for('internal_issue'))
+                reason = (request.form.get('reason') or '').strip()
+                if qty < 1 or not reason:
+                    flash('A quantity of at least 1 and a reason are both required.')
+                    return redirect(url_for('internal_issue'))
+                med = medications.find_one({'name': name})
+                if not med:
+                    flash(f'Medication "{name}" is not on file.')
+                    return redirect(url_for('internal_issue'))
+                balance = med.get('balance', 0) or 0
+                if qty > balance:
+                    flash(f'Cannot write off {qty} of "{name}" — only {balance} on hand.')
+                    return redirect(url_for('internal_issue'))
+                price = med.get('price', 0) or 0
+                medications.update_one({'name': name}, {'$inc': {'balance': -qty}})
+                transactions.insert_one({
+                    'type': 'damage', 'med_name': name,
+                    'quantity': -qty,                    # signed, like expiry
+                    'price': price, 'line_value': -qty * price,
+                    'reason': reason, 'note': (request.form.get('note') or '').strip(),
+                    'batch': med.get('batch'), 'balance_before': balance,
+                    'user': current_user, 'timestamp': datetime.utcnow(),
+                })
+                write_audit_entry('UPDATE', 'damage', name,
+                                  f'{qty} unit(s) written off as {reason} '
+                                  f'(balance {balance} -> {balance - qty}, '
+                                  f'value R{qty * price:.2f})')
+                flash(f'Loss recorded: {name} x{qty} ({reason}). '
+                      f'Balance is now {balance - qty}. Value R{qty * price:.2f}.')
+                return redirect(url_for('internal_issue'))
+
+            flash('Unknown action.')
+            return redirect(url_for('internal_issue'))
+
+        recent = list(transactions.find(
+            {'type': {'$in': ['internal_issue', 'damage']}}
+        ).sort('timestamp', -1).limit(100))
+        return render_template_string(
+            INTERNAL_ISSUE_TEMPLATE, nav_links=get_nav_links(), message=message,
+            departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=recent)
+    except ServerSelectionTimeoutError:
+        return render_template_string(
+            INTERNAL_ISSUE_TEMPLATE, nav_links=get_nav_links(),
+            message='Database connection failed. Please try again later.',
+            departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=[]), 500
+
+
 @app.route('/dashboard', methods=['GET'])
 @login_required
 def dashboard():
@@ -5365,7 +5848,7 @@ def dashboard():
     try:
         db = get_mongo_client()['pharmacy_db']
         movement = _monthly_movement(db['transactions'], window_start)
-        all_meds = _by_name(db['medications'].find({}, {'_id': 0}))
+        all_meds = _by_name(db['medications'].find(_active(), {'_id': 0}))
 
         rows = []
         # Units are only meaningful per medication, so the cross-medication
@@ -5899,7 +6382,7 @@ def stock_take():
                 c['discrepancy_label'] = DISCREPANCY_LABELS.get(c.get('discrepancy_type'), '-')
             # Only the names are sent to the counting sheet — never the
             # balances. The count has to be blind.
-            med_names = [m['name'] for m in _by_name(medications.find({}, {'_id': 0, 'name': 1}))]
+            med_names = [m['name'] for m in _by_name(medications.find(_active(), {'_id': 0, 'name': 1}))]
             # Items already counted in THIS stock take drop off the sheet, so
             # the list shrinks as the work is done and nothing is counted twice
             # by accident.
