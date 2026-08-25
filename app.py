@@ -1697,10 +1697,17 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         <option value="inventory">Inventory Report</option>
         <option value="receive_list">Receive List</option>
         <option value="controlled_drug_register">Controlled Drug Register</option>
+        <option value="order_request">Order Request (Requisition)</option>
     </select><br>
     <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" type="date"><br>
     <label>End Date (YYYY-MM-DD, if applicable):</label><input name="end_date" type="date"><br>
     <label>Search (optional):</label><input name="search" type="text" placeholder="Filter results by relevant fields"><br>
+    <label>Months of Cover (Order Request only):</label>
+    <select name="cover_months">
+        {% for m in [2, 3, 4, 6] %}
+        <option value="{{ m }}" {% if m == 3 %}selected{% endif %}>{{ m }} months</option>
+        {% endfor %}
+    </select><br>
     <input type="submit" value="Generate Report">
 </form>
 {% if report_type in ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list'] and stock_data %}
@@ -1797,6 +1804,72 @@ AMC is average monthly consumption over the selected period.</p>
     {% endfor %}
     </tbody>
 </table>
+{% elif report_type == 'order_request' %}
+<h2>Order Request</h2>
+<p><strong>Reference:</strong> {{ order_request.reference }} &nbsp;|&nbsp;
+   <strong>Raised:</strong> {{ order_request.raised_on }} &nbsp;|&nbsp;
+   <strong>By:</strong> {{ order_request.raised_by }} &nbsp;|&nbsp;
+   <strong>Cover:</strong> {{ order_request.cover_months }} months</p>
+<p style="font-size:13px;">Every item whose stock will not last
+{{ order_request.cover_months }} months at its current AMC. The quantity is
+rounded <strong>up to whole packs</strong>, since that is how the supplier
+sells &mdash; the units column shows what you actually receive, which is
+usually a little more than the shortfall.
+Items with no recorded consumption are not included: without an AMC there is
+no basis for a quantity, and guessing one is worse than leaving it to your
+judgement.</p>
+
+{% for group in order_request.groups %}
+<h3>{{ group.supplier }} &mdash; {{ group.lines|length }} item(s), R{{ "%.2f"|format(group.total) }}</h3>
+<table>
+    <thead>
+        <tr><th>Medication</th><th>AMC</th><th>On Hand</th><th>Months Left</th>
+            <th>Shortfall</th><th>Pack Size</th><th>Packs</th><th>Units</th>
+            <th>Price/Pack</th><th>Line Cost</th></tr>
+    </thead>
+    <tbody>
+    {% for l in group.lines %}
+        <tr class="{{ l.status }}">
+            <td>{{ l.med_name }}</td><td>{{ l.amc }}</td><td>{{ l.balance }}</td>
+            <td>{{ l.mos_label }}</td><td>{{ l.shortfall }}</td>
+            <td>{{ l.pack_size }}</td><td>{{ l.packs }}</td><td>{{ l.units }}</td>
+            <td>{% if l.pack_price %}R{{ "%.2f"|format(l.pack_price) }}{% else %}&ndash;{% endif %}</td>
+            <td>{% if l.pack_price %}R{{ "%.2f"|format(l.line_cost) }}{% else %}&ndash;{% endif %}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="message success">Nothing needs ordering &mdash; every item with recorded
+consumption has more than {{ order_request.cover_months }} months of stock.</p>
+{% endfor %}
+
+{% if order_request.groups %}
+<h3>Summary</h3>
+<table>
+    <thead><tr><th>Suppliers</th><th>Items</th><th>Packs</th><th>Estimated Total</th>
+               <th>Items with no price on file</th></tr></thead>
+    <tbody>
+        <tr>
+            <td>{{ order_request.groups|length }}</td>
+            <td>{{ order_request.line_count }}</td>
+            <td>{{ order_request.total_packs }}</td>
+            <td>R{{ "%.2f"|format(order_request.grand_total) }}</td>
+            <td>{{ order_request.unpriced }}</td>
+        </tr>
+    </tbody>
+</table>
+{% if order_request.unpriced %}
+<p class="message error" style="font-size:13px;">{{ order_request.unpriced }} item(s)
+have no pack price on file, so their cost is not included in the total. They are
+still listed &mdash; the quantity is what matters for the request.</p>
+{% endif %}
+<p style="font-size:13px;">Estimated at the last pack price recorded for each item,
+so treat the total as indicative rather than a quotation.</p>
+<div class="form-buttons">
+    <button type="button" onclick="window.print();">Print This Request</button>
+</div>
+{% endif %}
 {% elif report_type == 'receive_list' and receive_list %}
 <form method="POST" action="{{ url_for('reports') }}" class="filter-form">
     <input type="hidden" name="report_type" value="receive_list">
@@ -3529,6 +3602,24 @@ def delete_medication():
     return redirect('/reports')
 
 
+def _name_key(name):
+    """Sort key for medication names.
+
+    FIX (Bug): lists were sorted with MongoDB's default ordering, which
+    compares raw bytes. Every capitalised name therefore sorted ahead of every
+    lower-case one — "amoxicillin" landed after "Zinc" — and a name with a
+    stray leading space jumped to the very top. Neither looks alphabetical to
+    a person reading the report.
+    """
+    return (name or '').strip().lower()
+
+
+def _by_name(docs):
+    """Sort medication documents the way a human reads a list."""
+    return sorted(docs, key=lambda d: _name_key(d.get('name')))
+
+
+
 @app.route('/reports', methods=['GET', 'POST'])
 @login_required
 def reports():
@@ -3543,6 +3634,7 @@ def reports():
         receive_list = []
         stock_data = []
         controlled_register = []
+        order_request = None
         report_type = None
         start_date = None
         end_date = None
@@ -3596,7 +3688,7 @@ def reports():
                         threshold_date  = report_date + timedelta(days=30)
                         now_dt          = datetime.now(timezone.utc)
                         med_filter      = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
-                        all_meds        = list(medications.find(med_filter, {'_id': 0}).sort('name', 1))
+                        all_meds        = _by_name(medications.find(med_filter, {'_id': 0}))
                         stock_data      = []
                         # FIX (Performance): one aggregation for every medication
                         # instead of one per medication. Scoped by name only when a
@@ -3664,7 +3756,7 @@ def reports():
                         # no message, no indication that anything was missing. It
                         # only existed to bound the per-medication query loop below,
                         # which no longer exists, so the cap goes with it.
-                        meds         = list(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}).sort('name', 1))
+                        meds         = _by_name(medications.find(med_filter, {'_id': 0, 'name': 1, 'balance': 1}))
                         days_in_period = max(1, (end_dt.date() - start_dt.date()).days + 1)
                         # FIX (Performance): one aggregation for the whole report
                         # instead of one per medication.
@@ -3734,6 +3826,85 @@ def reports():
                             ]
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
 
+                    elif report_type == 'order_request':
+                        # NEW (Order Request): turns "amount to order" into an
+                        # actual requisition. Two things make it usable rather
+                        # than merely arithmetic:
+                        #   1. quantities round UP to whole packs, because that
+                        #      is how the supplier sells — asking for 137
+                        #      tablets when they come in boxes of 100 is not an
+                        #      order anyone can fill;
+                        #   2. items with no recorded consumption are left out.
+                        #      Without an AMC there is no basis for a quantity,
+                        #      and inventing one is worse than leaving the call
+                        #      to the pharmacist.
+                        try:
+                            cover_months = int(request.form.get('cover_months', 3))
+                        except (TypeError, ValueError):
+                            cover_months = 3
+                        if cover_months not in (2, 3, 4, 6):
+                            cover_months = 3
+
+                        # AMC over the last 90 days, matching the basis the
+                        # inventory report and dashboard already use.
+                        window_end   = datetime.utcnow()
+                        window_start = window_end - timedelta(days=90)
+                        req_filter = ({'name': {'$regex': search or '', '$options': 'i'}}
+                                      if search else {})
+                        req_meds  = _by_name(medications.find(req_filter, {'_id': 0}))
+                        movement  = _movement_by_med(
+                            transactions, {'$gte': window_start, '$lte': window_end},
+                            [m['name'] for m in req_meds] if search else None)
+
+                        by_supplier, unpriced = {}, 0
+                        for med in req_meds:
+                            name    = med.get('name', '')
+                            consumed = movement.get(name, _ZERO_MOVEMENT)['dispensed']
+                            amc      = consumed / 3.0          # 90 days -> per month
+                            if amc <= 0:
+                                continue
+                            balance = med.get('balance', 0) or 0
+                            mos     = balance / amc
+                            if mos >= cover_months:
+                                continue
+                            shortfall = amc * cover_months - balance
+                            pack_size = med.get('pack_size') or 1
+                            packs     = int(-(-shortfall // pack_size))   # ceiling
+                            units     = packs * pack_size
+                            pack_price = med.get('pack_price')
+                            if pack_price is None:
+                                unpriced += 1
+                            line_cost = packs * (pack_price or 0)
+                            supplier  = med.get('supplier') or 'Supplier not recorded'
+                            by_supplier.setdefault(supplier, []).append({
+                                'med_name': name, 'amc': round(amc, 1),
+                                'balance': balance,
+                                'mos_label': 'Out of stock' if balance == 0 else f'{mos:.1f}',
+                                'shortfall': int(round(shortfall)),
+                                'pack_size': pack_size, 'packs': packs, 'units': units,
+                                'pack_price': pack_price, 'line_cost': line_cost,
+                                'status': ('expired' if balance == 0 or mos < 1
+                                           else ('close-to-expire' if mos < 2 else 'normal')),
+                            })
+
+                        groups = [{'supplier': sup,
+                                   'lines': sorted(lines, key=lambda l: _name_key(l['med_name'])),
+                                   'total': sum(l['line_cost'] for l in lines)}
+                                  for sup, lines in sorted(by_supplier.items(),
+                                                           key=lambda kv: kv[0].lower())]
+                        order_request = {
+                            'reference': f"REQ-{datetime.utcnow().strftime('%Y%m%d')}-{uuid4().hex[:4].upper()}",
+                            'raised_on': datetime.utcnow().strftime('%Y-%m-%d'),
+                            'raised_by': session['user']['name'],
+                            'cover_months': cover_months,
+                            'groups': groups,
+                            'line_count': sum(len(g['lines']) for g in groups),
+                            'total_packs': sum(l['packs'] for g in groups for l in g['lines']),
+                            'grand_total': sum(g['total'] for g in groups),
+                            'unpriced': unpriced,
+                        }
+                        report_title = 'Order Request'
+
                     elif report_type == 'controlled_drug_register':
                         if not start_date or not end_date:
                             raise ValueError('Start and end dates are required for this report type.')
@@ -3758,7 +3929,7 @@ def reports():
                             for tx in all_tx:
                                 tx_by_med[tx['med_name']].append(tx)
 
-                            for med_name in sorted(controlled_meds):
+                            for med_name in sorted(controlled_meds, key=_name_key):
                                 med = controlled_docs.get(med_name)
                                 if not med:
                                     continue
@@ -3801,6 +3972,7 @@ def reports():
                     start_date   = end_date = search = None
                     report_data  = receive_list = stock_data = controlled_register = []
                     report_title = None
+                    order_request = None
             else:
                 message = 'Please select a report type.'
 
@@ -3808,7 +3980,7 @@ def reports():
             REPORTS_TEMPLATE,
             report_type=report_type, report_data=report_data,
             receive_list=receive_list, stock_data=stock_data,
-            controlled_register=controlled_register,
+            controlled_register=controlled_register, order_request=order_request,
             start_date=start_date, end_date=end_date,
             total_transactions=total_transactions,
             nav_links=get_nav_links(), message=message,
@@ -3819,7 +3991,7 @@ def reports():
             REPORTS_TEMPLATE, nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
             report_type=None, report_data=[], receive_list=[], stock_data=[],
-            controlled_register=[], start_date=None, end_date=None,
+            controlled_register=[], order_request=None, start_date=None, end_date=None,
             total_transactions=0, search=None, report_title=None, is_admin=is_admin
         ), 500
 
@@ -4155,7 +4327,7 @@ def dashboard():
     try:
         db = get_mongo_client()['pharmacy_db']
         movement = _monthly_movement(db['transactions'], window_start)
-        all_meds = list(db['medications'].find({}, {'_id': 0}).sort('name', 1))
+        all_meds = _by_name(db['medications'].find({}, {'_id': 0}))
 
         rows = []
         # Units are only meaningful per medication, so the cross-medication
@@ -4299,7 +4471,7 @@ def dashboard():
         total_items = len(table_rows)
 
         if sort_by == 'name':
-            table_rows = sorted(table_rows, key=lambda r: r['med_name'].lower())
+            table_rows = sorted(table_rows, key=lambda r: _name_key(r['med_name']))
         elif sort_by == 'amc':
             table_rows = sorted(table_rows, key=lambda r: -r['amc_raw'])
         elif sort_by == 'trend':
@@ -4611,7 +4783,7 @@ def stock_take():
                 c['discrepancy_label'] = DISCREPANCY_LABELS.get(c.get('discrepancy_type'), '-')
             # Only the names are sent to the counting sheet — never the
             # balances. The count has to be blind.
-            med_names = [m['name'] for m in medications.find({}, {'_id': 0, 'name': 1}).sort('name', 1)]
+            med_names = [m['name'] for m in _by_name(medications.find({}, {'_id': 0, 'name': 1}))]
             return render_template_string(
                 STOCK_TAKE_TEMPLATE, nav_links=get_nav_links(), message=message,
                 active=active, counts=counts, med_names=med_names, sessions=[],
@@ -4878,7 +5050,7 @@ def edit_receive(receive_id):
                 else:
                     medications.update_one({'name': old_rx['med_name']},
                                            {'$inc': {'balance': -old_rx['quantity']}})
-                    med_name       = request.form['med_name']
+                    med_name       = request.form['med_name'].strip()
                     quantity       = int(request.form['quantity'])
                     batch          = request.form['batch']
                     price          = float(request.form['price'])
