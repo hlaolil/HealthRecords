@@ -948,6 +948,9 @@ search looks across all records, not just this month.</p>
             <th>Sick Leave (Days)</th>
             <th>Medication</th>
             <th>Quantity</th>
+            <th>Unit Cost</th>
+            <th>Line Cost</th>
+            <th>Visit Cost</th>
             <th>Actions</th>
         </tr>
     </thead>
@@ -988,6 +991,21 @@ search looks across all records, not just this month.</p>
                     <td>{{ t.sick_leave_days }}</td>
                     <td>{{ t.med_name }}</td>
                     <td>{{ t.quantity }}</td>
+                    <td>{% if t.get('price') %}R{{ "%.4f"|format(t.price) }}{% else %}&ndash;{% endif %}</td>
+                    <td>{% if t.get('price') %}R{{ "%.2f"|format(t.get('line_value') if t.get('line_value') is not none else t.quantity * t.price) }}{% else %}&ndash;{% endif %}</td>
+                    {% if loop.first %}
+                    <td rowspan="{{ group_rows|length }}" style="vertical-align: middle; font-weight: bold;">
+                        {% set vc = namespace(v=0, known=true) %}
+                        {% for row in group_rows %}
+                            {% if row.get('price') %}
+                                {% set vc.v = vc.v + (row.get('line_value') if row.get('line_value') is not none else row.quantity * row.price) %}
+                            {% else %}
+                                {% set vc.known = false %}
+                            {% endif %}
+                        {% endfor %}
+                        R{{ "%.2f"|format(vc.v) }}{% if not vc.known %}*{% endif %}
+                    </td>
+                    {% endif %}
                     <td class="action-buttons">
                         {% if loop.first %}
                             {% if session['user']['role'] != 'viewer' %}
@@ -1704,6 +1722,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         <option value="receive_list">Receive List</option>
         <option value="controlled_drug_register">Controlled Drug Register</option>
         <option value="order_request">Order Request (Requisition)</option>
+        <option value="monthly_report">Monthly Report</option>
     </select><br>
     <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" type="date"><br>
     <label>End Date (YYYY-MM-DD, if applicable):</label><input name="end_date" type="date"><br>
@@ -1810,6 +1829,92 @@ AMC is average monthly consumption over the selected period.</p>
     {% endfor %}
     </tbody>
 </table>
+{% elif report_type == 'monthly_report' and monthly %}
+<h2>Monthly Report &mdash; {{ monthly.label }}</h2>
+<p style="font-size:13px;">All figures at <strong>cost</strong>, valued from the
+price recorded on each transaction when it happened &mdash; not from today's
+price &mdash; so a report run again next year still says the same thing.
+{% if monthly.estimated_lines %}<br><strong>Note:</strong> {{ monthly.estimated_lines }}
+dispensing line(s) in this period predate cost capture and are valued at the
+item's current price. Those figures are indicative.{% endif %}</p>
+
+<h3>Stock Value Movement</h3>
+<table>
+    <thead><tr><th>Movement</th><th>Value</th><th>Note</th></tr></thead>
+    <tbody>
+        <tr><td>Opening stock value</td><td>R{{ "%.2f"|format(monthly.opening_value) }}</td>
+            <td>at the start of the month</td></tr>
+        <tr><td>Received from suppliers</td><td>R{{ "%.2f"|format(monthly.received_value) }}</td>
+            <td>{{ monthly.receipt_lines }} line(s) across {{ monthly.delivery_count }} delivery(ies)</td></tr>
+        <tr><td>Opening loads</td><td>R{{ "%.2f"|format(monthly.opening_load_value) }}</td>
+            <td>stock brought onto the system</td></tr>
+        <tr><td>Dispensed</td><td>&minus;R{{ "%.2f"|format(monthly.dispensed_value) }}</td>
+            <td>{{ monthly.items_dispensed }} item(s) over {{ monthly.visits }} visit(s)</td></tr>
+        {% if is_admin %}
+        <tr class="{% if monthly.adjustment_value %}expired{% else %}normal{% endif %}">
+            <td>Stock take adjustments</td>
+            <td>R{{ "%+.2f"|format(monthly.adjustment_value) }}</td>
+            <td>{{ monthly.adjustment_lines }} item(s) corrected</td></tr>
+        {% endif %}
+        <tr style="font-weight:bold;"><td>Closing stock value</td>
+            <td>R{{ "%.2f"|format(monthly.closing_value) }}</td>
+            <td>at today's unit prices</td></tr>
+    </tbody>
+</table>
+<p style="font-size:13px;">Opening and closing values are the stock on hand at each
+point, priced at each item's current unit price. Movements are priced as they
+happened, so the two bases differ and the column will not add up exactly when
+supplier prices have changed during the month &mdash; that difference is a price
+effect, not a stock discrepancy.</p>
+
+<h3>Dispensing</h3>
+<table>
+    <thead><tr><th>Measure</th><th>Value</th></tr></thead>
+    <tbody>
+        <tr><td>Visits</td><td>{{ monthly.visits }}</td></tr>
+        <tr><td>Items dispensed</td><td>{{ monthly.items_dispensed }}</td></tr>
+        <tr><td>Items per visit</td><td>{{ monthly.items_per_visit }}</td></tr>
+        <tr><td>Patients seen</td><td>{{ monthly.patients }}</td></tr>
+        <tr><td>Total cost dispensed</td><td>R{{ "%.2f"|format(monthly.dispensed_value) }}</td></tr>
+        <tr><td>Average cost per visit</td><td>R{{ "%.2f"|format(monthly.cost_per_visit) }}</td></tr>
+        <tr><td>Average cost per item</td><td>R{{ "%.2f"|format(monthly.cost_per_item) }}</td></tr>
+    </tbody>
+</table>
+
+<h3>Procurement</h3>
+<table>
+    <thead><tr><th>Measure</th><th>Value</th></tr></thead>
+    <tbody>
+        <tr><td>Orders raised</td><td>{{ monthly.order_count }}</td></tr>
+        <tr><td>Total ordered</td><td>R{{ "%.2f"|format(monthly.order_total) }}</td></tr>
+        <tr><td>Invoices received</td><td>{{ monthly.invoice_count }}</td></tr>
+        <tr><td>Total invoiced</td><td>R{{ "%.2f"|format(monthly.invoice_total) }}</td></tr>
+        <tr><td>Goods actually received</td><td>R{{ "%.2f"|format(monthly.received_value) }}</td></tr>
+        <tr class="{% if monthly.invoice_gap|abs >= 0.01 %}close-to-expire{% else %}normal{% endif %}">
+            <td>Invoiced less goods received</td>
+            <td>R{{ "%+.2f"|format(monthly.invoice_gap) }}</td></tr>
+    </tbody>
+</table>
+<p style="font-size:13px;">An order counts in the month its first invoice was
+recorded, since there is no separate order record. Where one order is invoiced
+across two months it is counted once, in the earlier month.</p>
+
+<h3>Highest Cost Items ({{ monthly.top_items|length }})</h3>
+<table>
+    <thead><tr><th>Medication</th><th>Units Dispensed</th><th>Cost</th><th>Share of Total</th></tr></thead>
+    <tbody>
+    {% for t in monthly.top_items %}
+        <tr><td>{{ t.med_name }}</td><td>{{ t.units }}</td>
+            <td>R{{ "%.2f"|format(t.value) }}</td><td>{{ t.share }}%</td></tr>
+    {% else %}
+        <tr><td colspan="4">Nothing dispensed in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+<div class="form-buttons">
+    <button type="button" onclick="window.print();">Print This Report</button>
+</div>
+
 {% elif report_type == 'order_request' %}
 <h2>Order Request</h2>
 <p><strong>Reference:</strong> {{ order_request.reference }} &nbsp;|&nbsp;
@@ -3013,6 +3118,15 @@ def dispense():
                                     'date': date_str,
                                     'med_name': med_name,
                                     'quantity': quantity,
+                                    # NEW (Costing): freeze the unit price AT THE
+                                    # MOMENT OF DISPENSING. Costing historical
+                                    # activity by looking up today's price would
+                                    # silently rewrite last year's figures every
+                                    # time a supplier changed a rate — a report
+                                    # run twice would not agree with itself.
+                                    'price': med.get('price', 0) or 0,
+                                    'pack_size': med.get('pack_size'),
+                                    'line_value': quantity * (med.get('price', 0) or 0),
                                     'timestamp': datetime.utcnow()
                                 })
                                 dispensed_meds.append(med_name)
@@ -3661,6 +3775,7 @@ def reports():
         stock_data = []
         controlled_register = []
         order_request = None
+        monthly = None
         report_type = None
         start_date = None
         end_date = None
@@ -3852,6 +3967,122 @@ def reports():
                             ]
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
 
+                    elif report_type == 'monthly_report':
+                        # NEW (Costing): a month at cost. Everything is valued
+                        # from the price stored ON each transaction, so the
+                        # report is reproducible — re-running it after a price
+                        # change gives the same answer, which a lookup against
+                        # today's price would not.
+                        if not start_date:
+                            raise ValueError('A start date is required; the report covers its calendar month.')
+                        m_start = datetime(start_dt.year, start_dt.month, 1)
+                        m_end = (datetime(m_start.year + (m_start.month == 12),
+                                          1 if m_start.month == 12 else m_start.month + 1, 1)
+                                 - timedelta(seconds=1))
+                        period = {'$gte': m_start, '$lte': m_end}
+
+                        lines = list(transactions.find(
+                            {'timestamp': period,
+                             'type': {'$in': ['dispense', 'receive', 'adjustment',
+                                              'opening_balance']}}))
+                        cur_price = {m['name']: (m.get('price', 0) or 0)
+                                     for m in medications.find({}, {'_id': 0, 'name': 1, 'price': 1})}
+
+                        def valued(l):
+                            """Prefer the price frozen on the transaction."""
+                            if l.get('line_value') is not None:
+                                return l['line_value'], True
+                            if l.get('price'):
+                                return (l.get('quantity', 0) or 0) * l['price'], True
+                            return (l.get('quantity', 0) or 0) * cur_price.get(l.get('med_name'), 0), False
+
+                        dispensed_value = received_value = opening_load_value = 0.0
+                        adjustment_value = 0.0
+                        items_dispensed = receipt_lines = adjustment_lines = 0
+                        estimated_lines = 0
+                        visits, patients = set(), set()
+                        per_item = {}
+                        for l in lines:
+                            v, exact = valued(l)
+                            t = l.get('type')
+                            if t == 'dispense':
+                                dispensed_value += v
+                                items_dispensed += 1
+                                if not exact:
+                                    estimated_lines += 1
+                                if l.get('transaction_id'):
+                                    visits.add(l['transaction_id'])
+                                if l.get('patient'):
+                                    patients.add(l['patient'])
+                                e = per_item.setdefault(l.get('med_name', ''), {'units': 0, 'value': 0.0})
+                                e['units'] += l.get('quantity', 0) or 0
+                                e['value'] += v
+                            elif t == 'receive':
+                                received_value += v
+                                receipt_lines += 1
+                            elif t == 'opening_balance':
+                                opening_load_value += v
+                            else:
+                                adjustment_value += v
+                                adjustment_lines += 1
+
+                        # Deliveries and orders, counted by the month the invoice landed.
+                        month_dels = list(db['deliveries'].find({'opened_at': period}))
+                        invoice_total = sum(d.get('invoice_total', 0) or 0 for d in month_dels)
+                        orders = {}
+                        for d in month_dels:
+                            orders.setdefault(d.get('order_number'), d.get('order_total', 0) or 0)
+
+                        # Closing stock at today's prices; opening derived from it.
+                        closing_value = sum((m.get('balance', 0) or 0) * (m.get('price', 0) or 0)
+                                            for m in medications.find({}, {'_id': 0, 'balance': 1, 'price': 1}))
+                        after = _movement_by_med(transactions, {'$gt': m_end, '$lte': datetime.utcnow()})
+                        opening_value = closing_value
+                        for m in medications.find({}, {'_id': 0, 'name': 1, 'balance': 1, 'price': 1}):
+                            mv = after.get(m['name'], _ZERO_MOVEMENT)
+                            p = m.get('price', 0) or 0
+                            bal_at_end = max(0, (m.get('balance', 0) or 0)
+                                             - mv['received'] + mv['dispensed'] - mv['adjusted'])
+                            opening_value += (bal_at_end - (m.get('balance', 0) or 0)) * p
+                        # roll back through this month's own movements too
+                        month_mv = _movement_by_med(transactions, period)
+                        for m in medications.find({}, {'_id': 0, 'name': 1, 'price': 1}):
+                            mv = month_mv.get(m['name'], _ZERO_MOVEMENT)
+                            p = m.get('price', 0) or 0
+                            opening_value -= (mv['received'] - mv['dispensed'] + mv['adjusted']) * p
+                        opening_value = max(0.0, opening_value)
+
+                        top = sorted(per_item.items(), key=lambda kv: -kv[1]['value'])[:15]
+                        monthly = {
+                            'label': m_start.strftime('%B %Y'),
+                            'opening_value': opening_value,
+                            'closing_value': closing_value,
+                            'received_value': received_value,
+                            'opening_load_value': opening_load_value,
+                            'dispensed_value': dispensed_value,
+                            'adjustment_value': adjustment_value,
+                            'adjustment_lines': adjustment_lines,
+                            'receipt_lines': receipt_lines,
+                            'delivery_count': len(month_dels),
+                            'invoice_count': len(month_dels),
+                            'invoice_total': invoice_total,
+                            'order_count': len(orders),
+                            'order_total': sum(orders.values()),
+                            'invoice_gap': invoice_total - received_value,
+                            'visits': len(visits), 'patients': len(patients),
+                            'items_dispensed': items_dispensed,
+                            'items_per_visit': f'{items_dispensed / len(visits):.1f}' if visits else '-',
+                            'cost_per_visit': dispensed_value / len(visits) if visits else 0.0,
+                            'cost_per_item': dispensed_value / items_dispensed if items_dispensed else 0.0,
+                            'estimated_lines': estimated_lines,
+                            'top_items': [
+                                {'med_name': k, 'units': v['units'], 'value': v['value'],
+                                 'share': round(v['value'] / dispensed_value * 100, 1)
+                                 if dispensed_value else 0}
+                                for k, v in top],
+                        }
+                        report_title = f'Monthly Report — {monthly["label"]}'
+
                     elif report_type == 'order_request':
                         # NEW (Order Request): turns "amount to order" into an
                         # actual requisition. Two things make it usable rather
@@ -4011,6 +4242,7 @@ def reports():
                     report_data  = receive_list = stock_data = controlled_register = []
                     report_title = None
                     order_request = None
+                    monthly = None
             else:
                 message = 'Please select a report type.'
 
@@ -4019,6 +4251,7 @@ def reports():
             report_type=report_type, report_data=report_data,
             receive_list=receive_list, stock_data=stock_data,
             controlled_register=controlled_register, order_request=order_request,
+            monthly=monthly,
             start_date=start_date, end_date=end_date,
             total_transactions=total_transactions,
             nav_links=get_nav_links(), message=message,
@@ -4029,7 +4262,8 @@ def reports():
             REPORTS_TEMPLATE, nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
             report_type=None, report_data=[], receive_list=[], stock_data=[],
-            controlled_register=[], order_request=None, start_date=None, end_date=None,
+            controlled_register=[], order_request=None, monthly=None,
+            start_date=None, end_date=None,
             total_transactions=0, search=None, report_title=None, is_admin=is_admin
         ), 500
 
