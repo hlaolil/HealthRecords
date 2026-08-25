@@ -1715,7 +1715,8 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     <label>Report Type:</label>
     <select name="report_type" required>
         <option value="stock_on_hand">Stock on Hand</option>
-        <option value="expired_list">Expired Drugs List</option>
+        <option value="expired_list">Expired Stock on Shelf (to action)</option>
+        <option value="expiry_writeoffs">Expiry Write-Offs (removed stock)</option>
         <option value="near_expired_list">Near Expired Drug List</option>
         <option value="out_of_stock_list">Out of Stock List</option>
         <option value="inventory">Inventory Report</option>
@@ -1750,6 +1751,18 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     </div>
 </form>
 <h2>{{ report_title }}</h2>
+{% if report_type == 'expired_list' %}
+<p style="font-size:13px;">This is a <strong>work list</strong>: expired stock still
+on the shelf. Items leave it as you remove them. For the record of what was
+actually written off, run <em>Expiry Write-Offs</em>.</p>
+{% endif %}
+{% if is_admin and report_type in ['expired_list', 'near_expired_list'] %}
+<p style="font-size:13px;"><strong>Remove Expired</strong> writes the units off the
+shelf &mdash; enter how many actually expired, which may be less than the whole
+balance if only one batch is affected. <strong>Correct Date</strong> is for when the
+expiry was recorded wrongly; it changes the date and moves no stock. Both are
+recorded in the audit log.</p>
+{% endif %}
 <table>
     <thead>
         <tr>
@@ -1765,6 +1778,31 @@ REPORTS_TEMPLATE = CSS_STYLE + """
             <td>{{ med.batch }}</td>
             <td>R{{ "%.2f"|format(med.price) }}</td>
             <td class="action-buttons">
+                {% if is_admin and report_type in ['expired_list', 'near_expired_list'] %}
+                {# NEW (Expiry handling): two DIFFERENT problems live on this list.
+                   Either some units really have expired and must leave the shelf —
+                   often only part of what is on hand, since batches expire at
+                   different times — or the date was simply typed wrong and nothing
+                   should move at all. A single "remove from shelf" button would
+                   force the first answer onto both, so they are separate actions
+                   and the removal takes a quantity. #}
+                <form method="POST" action="{{ url_for('remove_expired') }}" style="display:inline;">
+                    <input type="hidden" name="med_name" value="{{ med.name }}">
+                    <input type="hidden" name="report_type" value="{{ report_type }}">
+                    <input name="quantity" type="number" min="1" max="{{ med.balance }}"
+                           value="{{ med.balance }}" style="width:5em;" required
+                           title="Units to remove — defaults to the whole balance, change it if only part of the stock has expired">
+                    <input name="reason" type="text" placeholder="Reason / batch" style="width:9em;">
+                    <button type="submit" class="delete-btn"
+                            onclick="return confirm('Remove these units of {{ med.name }} from the shelf? Stock will be reduced.');">Remove Expired</button>
+                </form>
+                <form method="POST" action="{{ url_for('correct_expiry') }}" style="display:inline;">
+                    <input type="hidden" name="med_name" value="{{ med.name }}">
+                    <input type="hidden" name="report_type" value="{{ report_type }}">
+                    <input name="expiry_date" type="date" value="{{ med.expiry_date }}" required>
+                    <button type="submit" class="edit-btn">Correct Date</button>
+                </form>
+                {% endif %}
                 {% if is_admin %}
                 <a href="{{ url_for('edit_medication', med_name=med.name) }}"><button class="edit-btn">Edit</button></a>
                 <form class="delete-btn" method="POST" action="{{ url_for('delete_medication') }}" style="display: inline;">
@@ -1793,10 +1831,13 @@ REPORTS_TEMPLATE = CSS_STYLE + """
 </form>
 <h2>Inventory Report for {{ start_date }} to {{ end_date }}</h2>
 {% if is_admin %}
-<p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed + Adjustment = Current</strong>.
+<p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed + Adjustment
++ Expired = Current</strong>.
 Adjustment is the net of any physical-count corrections made during the period —
-see Audit &rarr; Stock Take Discrepancies for the detail behind it.
-AMC is average monthly consumption over the selected period.</p>
+see Audit &rarr; Stock Take Discrepancies for the detail behind it. Expired is
+stock written off the shelf. Both are shown signed.
+AMC is average monthly consumption over the selected period, and counts only
+recorded dispensing — write-offs and count corrections are excluded from it.</p>
 {% else %}
 <p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed = Current</strong>.
 AMC is average monthly consumption over the selected period.</p>
@@ -1808,7 +1849,7 @@ AMC is average monthly consumption over the selected period.</p>
            into it — see the comment in the reports() route for why that is the
            honest place to put it. #}
         <tr><th>Medication</th><th>Beginning Balance</th><th>Received</th><th>Dispensed</th>
-            {% if is_admin %}<th>Adjustment</th>{% endif %}
+            {% if is_admin %}<th>Adjustment</th><th>Expired</th>{% endif %}
             <th>Current Balance</th><th>AMC</th><th>Amount to Order</th></tr>
     </thead>
     <tbody>
@@ -1819,16 +1860,76 @@ AMC is average monthly consumption over the selected period.</p>
             {% if is_admin %}
             <td>{{ row.dispensed }}</td>
             <td>{% if row.adjustment %}{{ '%+d'|format(row.adjustment) }}{% else %}0{% endif %}</td>
+            <td>{% if row.expired %}{{ '%+d'|format(row.expired) }}{% else %}0{% endif %}</td>
             {% else %}
             <td>{{ row.dispensed_effective }}</td>
             {% endif %}
             <td>{{ row.current_balance }}</td><td>{{ row.amc }}</td><td>{{ row.amount_to_order }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="{{ 8 if is_admin else 7 }}">No data for this period.</td></tr>
+        <tr><td colspan="{{ 9 if is_admin else 7 }}">No data for this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
+{% elif report_type == 'expiry_writeoffs' %}
+<h2>Expiry Write-Offs for {{ start_date }} to {{ end_date }}</h2>
+<p style="font-size:13px;">Stock that was actually removed from the shelf as
+expired. This is the record of loss &mdash; distinct from
+<em>Expired Stock on Shelf</em>, which is a work list of what still needs
+removing and empties as you deal with it. Values are at the unit price recorded
+when the stock was written off.</p>
+<table>
+    <thead>
+        <tr><th>Date</th><th>Medication</th><th>Units Removed</th><th>Unit Cost</th>
+            <th>Value Lost</th><th>Batch</th><th>Expiry Date</th>
+            <th>Reason</th><th>Removed By</th></tr>
+    </thead>
+    <tbody>
+    {% for w in writeoffs %}
+        <tr class="expired">
+            <td>{{ w.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ w.med_name }}</td>
+            <td>{{ w.units }}</td>
+            <td>R{{ "%.4f"|format(w.price) }}</td>
+            <td>R{{ "%.2f"|format(w.value) }}</td>
+            <td>{{ w.batch or '-' }}</td>
+            <td>{{ w.expiry_date or '-' }}</td>
+            <td>{{ w.reason or '-' }}</td>
+            <td>{{ w.user }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="9">No stock was written off in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% if writeoffs %}
+<h3>Summary</h3>
+<table>
+    <thead><tr><th>Write-Offs</th><th>Items Affected</th><th>Units Lost</th><th>Value Lost</th></tr></thead>
+    <tbody>
+        <tr><td>{{ writeoffs|length }}</td><td>{{ writeoff_totals.item_count }}</td>
+            <td>{{ writeoff_totals.units }}</td>
+            <td>R{{ "%.2f"|format(writeoff_totals.value) }}</td></tr>
+    </tbody>
+</table>
+<h3>By Medication</h3>
+<table>
+    <thead><tr><th>Medication</th><th>Times Written Off</th><th>Units Lost</th><th>Value Lost</th></tr></thead>
+    <tbody>
+    {% for m in writeoff_totals.by_med %}
+        <tr><td>{{ m.med_name }}</td><td>{{ m.count }}</td>
+            <td>{{ m.units }}</td><td>R{{ "%.2f"|format(m.value) }}</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+<p style="font-size:13px;">An item appearing here repeatedly is usually an
+over-ordering signal rather than a storage one &mdash; compare its AMC against
+how much is being brought in.</p>
+<div class="form-buttons">
+    <button type="button" onclick="window.print();">Print This Report</button>
+</div>
+{% endif %}
+
 {% elif report_type == 'monthly_report' and monthly %}
 <h2>Monthly Report &mdash; {{ monthly.label }}</h2>
 <p style="font-size:13px;">All figures at <strong>cost</strong>, valued from the
@@ -1850,6 +1951,10 @@ item's current price. Those figures are indicative.{% endif %}</p>
             <td>stock brought onto the system</td></tr>
         <tr><td>Dispensed</td><td>&minus;R{{ "%.2f"|format(monthly.dispensed_value) }}</td>
             <td>{{ monthly.items_dispensed }} item(s) over {{ monthly.visits }} visit(s)</td></tr>
+        <tr class="{% if monthly.expired_value %}expired{% else %}normal{% endif %}">
+            <td>Expired stock written off</td>
+            <td>R{{ "%+.2f"|format(monthly.expired_value) }}</td>
+            <td>{{ monthly.expired_lines }} write-off(s)</td></tr>
         {% if is_admin %}
         <tr class="{% if monthly.adjustment_value %}expired{% else %}normal{% endif %}">
             <td>Stock take adjustments</td>
@@ -3760,6 +3865,102 @@ def _by_name(docs):
 
 
 
+@app.route('/remove-expired', methods=['POST'])
+@login_required
+def remove_expired():
+    """Write a stated number of expired units off the shelf.
+
+    A quantity rather than an all-or-nothing button, because batches expire at
+    different times and the balance on hand is often a mix — writing off the
+    whole balance when one batch expired would destroy good stock on paper.
+    """
+    if session['user'].get('role') != 'admin':
+        flash('Access denied. Only admins can remove expired stock.')
+        return redirect('/reports')
+    report_type = request.form.get('report_type', 'expired_list')
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        med_name = (request.form.get('med_name') or '').strip()
+        try:
+            quantity = int(request.form.get('quantity', ''))
+        except (TypeError, ValueError):
+            flash('Quantity must be a whole number.')
+            return redirect(url_for('reports', report_type=report_type))
+        med = db['medications'].find_one({'name': med_name})
+        if not med:
+            flash(f'Medication "{med_name}" not found.')
+            return redirect(url_for('reports', report_type=report_type))
+        balance = med.get('balance', 0) or 0
+        if quantity < 1:
+            flash('Quantity must be at least 1.')
+            return redirect(url_for('reports', report_type=report_type))
+        if quantity > balance:
+            flash(f'Cannot remove {quantity} units of "{med_name}" — only {balance} on hand.')
+            return redirect(url_for('reports', report_type=report_type))
+
+        price = med.get('price', 0) or 0
+        db['medications'].update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
+        # Its own transaction type: this is stock leaving the shelf, but it is
+        # neither consumption nor a counting error, and every report that
+        # back-calculates a balance has to unwind it as its own thing.
+        db['transactions'].insert_one({
+            'type': 'expiry_removal',
+            'med_name': med_name,
+            'quantity': -quantity,               # signed, like an adjustment
+            'price': price, 'line_value': -quantity * price,
+            'batch': med.get('batch'), 'expiry_date': med.get('expiry_date'),
+            'schedule': med.get('schedule'),
+            'reason': (request.form.get('reason') or '').strip(),
+            'balance_before': balance,
+            'user': session['user']['name'], 'timestamp': datetime.utcnow(),
+        })
+        write_audit_entry('UPDATE', 'expiry_removal', med_name,
+                          f'{quantity} unit(s) written off as expired '
+                          f'(balance {balance} -> {balance - quantity}, '
+                          f'value R{quantity * price:.2f})')
+        flash(f'{med_name}: {quantity} unit(s) removed as expired. '
+              f'Balance is now {balance - quantity}. Value written off R{quantity * price:.2f}.')
+    except ServerSelectionTimeoutError:
+        flash('Database connection failed. Please try again later.')
+    return redirect(url_for('reports', report_type=report_type))
+
+
+@app.route('/correct-expiry', methods=['POST'])
+@login_required
+def correct_expiry():
+    """Fix a wrongly recorded expiry date. Moves no stock, by design."""
+    if session['user'].get('role') != 'admin':
+        flash('Access denied. Only admins can correct expiry dates.')
+        return redirect('/reports')
+    report_type = request.form.get('report_type', 'expired_list')
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        med_name = (request.form.get('med_name') or '').strip()
+        new_date = (request.form.get('expiry_date') or '').strip()
+        try:
+            datetime.strptime(new_date, '%Y-%m-%d')
+        except ValueError:
+            flash('Expiry date must be a valid date (YYYY-MM-DD).')
+            return redirect(url_for('reports', report_type=report_type))
+        med = db['medications'].find_one({'name': med_name})
+        if not med:
+            flash(f'Medication "{med_name}" not found.')
+            return redirect(url_for('reports', report_type=report_type))
+        old_date = med.get('expiry_date')
+        if old_date == new_date:
+            flash(f'{med_name}: expiry date is already {new_date}.')
+            return redirect(url_for('reports', report_type=report_type))
+        db['medications'].update_one({'name': med_name},
+                                     {'$set': {'expiry_date': new_date}})
+        write_audit_entry('UPDATE', 'medication', med_name,
+                          f'expiry date corrected: {old_date} -> {new_date}')
+        flash(f'{med_name}: expiry date corrected from {old_date} to {new_date}. '
+              f'No stock was moved.')
+    except ServerSelectionTimeoutError:
+        flash('Database connection failed. Please try again later.')
+    return redirect(url_for('reports', report_type=report_type))
+
+
 @app.route('/reports', methods=['GET', 'POST'])
 @login_required
 def reports():
@@ -3776,6 +3977,8 @@ def reports():
         controlled_register = []
         order_request = None
         monthly = None
+        writeoffs = []
+        writeoff_totals = {'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []}
         report_type = None
         start_date = None
         end_date = None
@@ -3808,11 +4011,14 @@ def reports():
 
         stock_report_types = ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list']
 
-        if request.method == 'POST':
-            report_type = request.form.get('report_type')
-            start_date  = request.form.get('start_date')
-            end_date    = request.form.get('end_date')
-            search      = request.form.get('search')
+        # NEW: also honour a GET with a report_type, so the expiry actions can
+        # return the admin to the list they were working in rather than dumping
+        # them back at the report menu after every removal.
+        if request.method == 'POST' or request.args.get('report_type'):
+            report_type = request.values.get('report_type')
+            start_date  = request.values.get('start_date')
+            end_date    = request.values.get('end_date')
+            search      = request.values.get('search')
 
             if report_type:
                 try:
@@ -3823,8 +4029,13 @@ def reports():
                                   + timedelta(days=1) - timedelta(seconds=1))
 
                     if report_type in stock_report_types:
+                        # NEW: default to today rather than refusing. "What is
+                        # expired?" is a question about now, and the expiry
+                        # actions redirect back here without a date.
                         if not end_date:
-                            raise ValueError('End date is required for this report type.')
+                            end_date = datetime.utcnow().strftime('%Y-%m-%d')
+                            end_dt = (datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                                      + timedelta(days=1) - timedelta(seconds=1))
                         report_date     = datetime.strptime(end_date, '%Y-%m-%d').date()
                         threshold_date  = report_date + timedelta(days=30)
                         now_dt          = datetime.now(timezone.utc)
@@ -3846,7 +4057,8 @@ def reports():
                             # reported as at that date.
                             mv = movement.get(med_name, _ZERO_MOVEMENT)
                             balance_at_date = max(0, current_balance - mv['received']
-                                                  + mv['dispensed'] - mv['adjusted'])
+                                                  + mv['dispensed'] - mv['adjusted']
+                                                  - mv['expired'])
 
                             expiry_str = med.get('expiry_date')
                             expiry_dt = None
@@ -3918,8 +4130,14 @@ def reports():
                             # what keeps the row internally consistent:
                             #   Beginning + Received - Dispensed + Adjustment = Current
                             adjustment        = mv['adjusted']
+                            # NEW (Expiry): written-off stock is its own movement —
+                            # neither consumption nor a counting error — so it is
+                            # unwound separately or the beginning balance is wrong
+                            # for every period containing a write-off.
+                            expired           = mv['expired']
                             current_balance   = med.get('balance', 0)
-                            beginning_balance = max(0, current_balance - received + dispensed - adjustment)
+                            beginning_balance = max(0, current_balance - received + dispensed
+                                                    - adjustment - expired)
                             avg_daily         = dispensed / days_in_period
                             # AMC (Average Monthly Consumption): consumption in the
                             # period scaled to a 30-day month, so the figure stays
@@ -3932,7 +4150,7 @@ def reports():
                                 'med_name': med_name,
                                 'beginning_balance': beginning_balance,
                                 'dispensed': dispensed, 'received': received,
-                                'adjustment': adjustment,
+                                'adjustment': adjustment, 'expired': expired,
                                 # NEW: non-admins don't see the Adjustment column,
                                 # so their Dispensed figure has to absorb it or the
                                 # row won't add up. Folding it in here isn't a fudge
@@ -3945,7 +4163,7 @@ def reports():
                                 # stays truthful either way, and
                                 #   Beginning + Received - Dispensed = Current
                                 # holds for the non-admin view.
-                                'dispensed_effective': dispensed - adjustment,
+                                'dispensed_effective': dispensed - adjustment - expired,
                                 'current_balance': current_balance,
                                 'amc': _tidy(amc),
                                 'amount_to_order': _tidy(amount_to_order)
@@ -3967,6 +4185,53 @@ def reports():
                             ]
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
 
+                    elif report_type == 'expiry_writeoffs':
+                        # NEW: the record of what was actually removed, as
+                        # opposed to expired_list, which is a work list of what
+                        # still needs removing. Once stock is written off it
+                        # leaves that list entirely, so without this report the
+                        # loss would only survive as an audit-log line.
+                        if not start_date or not end_date:
+                            raise ValueError('Start and end dates are required for this report type.')
+                        q = {'type': 'expiry_removal',
+                             'timestamp': {'$gte': start_dt, '$lte': end_dt}}
+                        if search:
+                            q['$or'] = [
+                                {'med_name': {'$regex': search, '$options': 'i'}},
+                                {'reason':   {'$regex': search, '$options': 'i'}},
+                                {'user':     {'$regex': search, '$options': 'i'}},
+                                {'batch':    {'$regex': search, '$options': 'i'}},
+                            ]
+                        raw = list(transactions.find(q).sort('timestamp', -1).limit(2000))
+                        writeoffs, by_med = [], {}
+                        for w in raw:
+                            units = abs(w.get('quantity', 0) or 0)
+                            value = abs(w.get('line_value') if w.get('line_value') is not None
+                                        else units * (w.get('price', 0) or 0))
+                            writeoffs.append({
+                                'timestamp': w.get('timestamp'), 'med_name': w.get('med_name'),
+                                'units': units, 'price': w.get('price', 0) or 0,
+                                'value': value, 'batch': w.get('batch'),
+                                'expiry_date': w.get('expiry_date'),
+                                'reason': w.get('reason'), 'user': w.get('user'),
+                            })
+                            e = by_med.setdefault(w.get('med_name', ''),
+                                                  {'count': 0, 'units': 0, 'value': 0.0})
+                            e['count'] += 1
+                            e['units'] += units
+                            e['value'] += value
+                        writeoff_totals = {
+                            # NOT 'items': Jinja resolves attribute access before
+                            # subscript, so writeoff_totals.items would render the
+                            # dict's .items METHOD instead of this value.
+                            'item_count': len(by_med),
+                            'units': sum(w['units'] for w in writeoffs),
+                            'value': sum(w['value'] for w in writeoffs),
+                            'by_med': [{'med_name': k, **v} for k, v in
+                                       sorted(by_med.items(), key=lambda kv: -kv[1]['value'])],
+                        }
+                        report_title = 'Expiry Write-Offs'
+
                     elif report_type == 'monthly_report':
                         # NEW (Costing): a month at cost. Everything is valued
                         # from the price stored ON each transaction, so the
@@ -3984,7 +4249,7 @@ def reports():
                         lines = list(transactions.find(
                             {'timestamp': period,
                              'type': {'$in': ['dispense', 'receive', 'adjustment',
-                                              'opening_balance']}}))
+                                              'opening_balance', 'expiry_removal']}}))
                         cur_price = {m['name']: (m.get('price', 0) or 0)
                                      for m in medications.find({}, {'_id': 0, 'name': 1, 'price': 1})}
 
@@ -3997,8 +4262,9 @@ def reports():
                             return (l.get('quantity', 0) or 0) * cur_price.get(l.get('med_name'), 0), False
 
                         dispensed_value = received_value = opening_load_value = 0.0
-                        adjustment_value = 0.0
+                        adjustment_value = expired_value = 0.0
                         items_dispensed = receipt_lines = adjustment_lines = 0
+                        expired_lines = 0
                         estimated_lines = 0
                         visits, patients = set(), set()
                         per_item = {}
@@ -4022,6 +4288,9 @@ def reports():
                                 receipt_lines += 1
                             elif t == 'opening_balance':
                                 opening_load_value += v
+                            elif t == 'expiry_removal':
+                                expired_value += v
+                                expired_lines += 1
                             else:
                                 adjustment_value += v
                                 adjustment_lines += 1
@@ -4062,6 +4331,8 @@ def reports():
                             'dispensed_value': dispensed_value,
                             'adjustment_value': adjustment_value,
                             'adjustment_lines': adjustment_lines,
+                            'expired_value': expired_value,
+                            'expired_lines': expired_lines,
                             'receipt_lines': receipt_lines,
                             'delivery_count': len(month_dels),
                             'invoice_count': len(month_dels),
@@ -4190,7 +4461,8 @@ def reports():
                             # current balance after a physical count.
                             all_tx = list(transactions.find({
                                 'med_name': {'$in': controlled_meds},
-                                'type': {'$in': ['receive', 'dispense', 'adjustment', 'opening_balance']},
+                                'type': {'$in': ['receive', 'dispense', 'adjustment',
+                                                 'opening_balance', 'expiry_removal']},
                                 'timestamp': {'$gte': start_dt, '$lte': end_dt}
                             }).sort('timestamp', 1).limit(10000))
 
@@ -4208,7 +4480,8 @@ def reports():
                                     received_in_period = sum(t['quantity'] for t in med_txs
                                                              if t['type'] in ('receive', 'opening_balance'))
                                     dispensed_in_period= sum(t['quantity'] for t in med_txs if t['type'] == 'dispense')
-                                    adjusted_in_period = sum(t['quantity'] for t in med_txs if t['type'] == 'adjustment')
+                                    adjusted_in_period = sum(t['quantity'] for t in med_txs
+                                                             if t['type'] in ('adjustment', 'expiry_removal'))
                                     beginning_balance  = max(0, current_balance - received_in_period
                                                              + dispensed_in_period - adjusted_in_period)
                                     running_bal        = beginning_balance
@@ -4218,7 +4491,7 @@ def reports():
                                             running_bal += tx['quantity']
                                         elif tx['type'] == 'dispense':
                                             running_bal -= tx['quantity']
-                                        else:  # adjustment — already signed
+                                        else:  # adjustment / expiry write-off — already signed
                                             running_bal += tx['quantity']
                                         tx_copy = tx.copy()
                                         tx_copy['balance_after'] = running_bal
@@ -4243,6 +4516,8 @@ def reports():
                     report_title = None
                     order_request = None
                     monthly = None
+                    writeoffs = []
+                    writeoff_totals = {'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []}
             else:
                 message = 'Please select a report type.'
 
@@ -4251,7 +4526,7 @@ def reports():
             report_type=report_type, report_data=report_data,
             receive_list=receive_list, stock_data=stock_data,
             controlled_register=controlled_register, order_request=order_request,
-            monthly=monthly,
+            monthly=monthly, writeoffs=writeoffs, writeoff_totals=writeoff_totals,
             start_date=start_date, end_date=end_date,
             total_transactions=total_transactions,
             nav_links=get_nav_links(), message=message,
@@ -4263,6 +4538,7 @@ def reports():
             message="Database connection failed. Please try again later.",
             report_type=None, report_data=[], receive_list=[], stock_data=[],
             controlled_register=[], order_request=None, monthly=None,
+            writeoffs=[], writeoff_totals={'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []},
             start_date=None, end_date=None,
             total_transactions=0, search=None, report_title=None, is_admin=is_admin
         ), 500
@@ -4306,7 +4582,7 @@ def _monthly_movement(transactions, window_start):
     movement = defaultdict(dict)
     pipeline = [
         {'$match': {'timestamp': {'$gte': window_start},
-                    'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance']}}},
+                    'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance', 'expiry_removal']}}},
         {'$group': {
             '_id': {'med': '$med_name',
                     'y': {'$year': '$timestamp'},
@@ -4315,6 +4591,7 @@ def _monthly_movement(transactions, window_start):
             'received':  {'$sum': {'$cond': [{'$in': ['$type', ['receive', 'opening_balance']]},
                                              '$quantity', 0]}},
             'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type', 'adjustment']}, '$quantity', 0]}},
+            'expired':   {'$sum': {'$cond': [{'$eq': ['$type', 'expiry_removal']}, '$quantity', 0]}},
         }}
     ]
     try:
@@ -4324,6 +4601,7 @@ def _monthly_movement(transactions, window_start):
                 'dispensed': row.get('dispensed', 0) or 0,
                 'received':  row.get('received', 0) or 0,
                 'adjusted':  row.get('adjusted', 0) or 0,
+                'expired':   row.get('expired', 0) or 0,
             }
         return movement
     except Exception as e:
@@ -4334,7 +4612,7 @@ def _monthly_movement(transactions, window_start):
         movement = defaultdict(dict)
         cursor = transactions.find(
             {'timestamp': {'$gte': window_start},
-             'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance']}},
+             'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance', 'expiry_removal']}},
             {'_id': 0, 'med_name': 1, 'type': 1, 'quantity': 1, 'timestamp': 1}
         )
         for tx in cursor:
@@ -4342,12 +4620,15 @@ def _monthly_movement(transactions, window_start):
             if not isinstance(ts, datetime):
                 continue
             bucket = movement[tx.get('med_name')].setdefault(
-                (ts.year, ts.month), {'dispensed': 0, 'received': 0, 'adjusted': 0})
+                (ts.year, ts.month),
+                {'dispensed': 0, 'received': 0, 'adjusted': 0, 'expired': 0})
             qty = tx.get('quantity', 0) or 0
             if tx.get('type') == 'dispense':
                 bucket['dispensed'] += qty
             elif tx.get('type') in ('receive', 'opening_balance'):
                 bucket['received'] += qty
+            elif tx.get('type') == 'expiry_removal':
+                bucket['expired'] += qty
             else:
                 bucket['adjusted'] += qty
         return movement
@@ -4369,7 +4650,7 @@ def _monthly_movement(transactions, window_start):
 # plausible-looking row with fabricated figures in it. With a single query a
 # failure is visible instead of silent.
 # -----------------------------------------------------------------------
-_ZERO_MOVEMENT = {'dispensed': 0, 'received': 0, 'adjusted': 0}
+_ZERO_MOVEMENT = {'dispensed': 0, 'received': 0, 'adjusted': 0, 'expired': 0}
 
 
 def _movement_by_med(transactions, time_filter, med_names=None):
@@ -4384,7 +4665,7 @@ def _movement_by_med(transactions, time_filter, med_names=None):
     # does a receipt. Omitting it would make every period containing a go-live
     # load report a beginning balance that is too high.
     match = {'timestamp': time_filter,
-             'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance']}}
+             'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance', 'expiry_removal']}}
     if med_names is not None:
         match['med_name'] = {'$in': med_names}
     pipeline = [
@@ -4395,23 +4676,28 @@ def _movement_by_med(transactions, time_filter, med_names=None):
             'received':  {'$sum': {'$cond': [{'$in': ['$type', ['receive', 'opening_balance']]},
                                              '$quantity', 0]}},
             'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type', 'adjustment']}, '$quantity', 0]}},
+            'expired':   {'$sum': {'$cond': [{'$eq': ['$type', 'expiry_removal']}, '$quantity', 0]}},
         }}
     ]
     try:
         return {r['_id']: {'dispensed': r.get('dispensed', 0) or 0,
                            'received':  r.get('received', 0) or 0,
-                           'adjusted':  r.get('adjusted', 0) or 0}
+                           'adjusted':  r.get('adjusted', 0) or 0,
+                           'expired':   r.get('expired', 0) or 0}
                 for r in transactions.aggregate(pipeline)}
     except Exception as e:
         app.logger.warning(f"Movement aggregation unavailable, falling back: {e}")
         out = {}
         for tx in transactions.find(match, {'_id': 0, 'med_name': 1, 'type': 1, 'quantity': 1}):
-            b = out.setdefault(tx.get('med_name'), {'dispensed': 0, 'received': 0, 'adjusted': 0})
+            b = out.setdefault(tx.get('med_name'),
+                               {'dispensed': 0, 'received': 0, 'adjusted': 0, 'expired': 0})
             qty = tx.get('quantity', 0) or 0
             if tx.get('type') == 'dispense':
                 b['dispensed'] += qty
             elif tx.get('type') in ('receive', 'opening_balance'):
                 b['received'] += qty
+            elif tx.get('type') == 'expiry_removal':
+                b['expired'] += qty
             else:
                 b['adjusted'] += qty
         return out
