@@ -1738,6 +1738,14 @@ Receiving page.</p>
             <input name="med_name" id="med_name" list="med_suggestions" required>
         </div>
         <div>
+            <label>Category:</label>
+            <select name="category" required>
+                {% for opt in categories %}
+                <option value="{{ opt }}" {% if opt == 'Pharmaceutical' %}selected{% endif %}>{{ opt }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
             <label>Pack Size (units per pack):</label>
             <input name="pack_size" type="number" min="1" value="1" required>
         </div>
@@ -1837,6 +1845,14 @@ balance, run a stock take and enter the physical count.</p>
             <input name="batch" value="{{ med_data.batch if med_data else '' }}" required>
         </div>
         <div>
+            <label>Category:</label>
+            <select name="category" required>
+                {% for opt in categories %}
+                <option value="{{ opt }}" {% if med_data and med_data.get('category', 'Pharmaceutical') == opt %}selected{% endif %}>{{ opt }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
             <label>Pack Size (units per pack):</label>
             <input name="pack_size" type="number" min="1"
                    value="{{ med_data.get('pack_size', 1) if med_data else 1 }}" required>
@@ -1892,6 +1908,12 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     </select><br>
     <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" type="date"><br>
     <label>End Date (YYYY-MM-DD, if applicable):</label><input name="end_date" type="date"><br>
+    <label>Category:</label>
+    <select name="category">
+        <option value="pharmaceutical" {% if category == 'pharmaceutical' %}selected{% endif %}>Pharmaceuticals</option>
+        <option value="supply" {% if category == 'supply' %}selected{% endif %}>Medical Supplies</option>
+        <option value="both" {% if category == 'both' %}selected{% endif %}>Both</option>
+    </select><br>
     <label>Search (optional):</label><input name="search" type="text" placeholder="Filter results by relevant fields"><br>
     <label>Period (Period Report only):</label>
     <select name="period">
@@ -1924,6 +1946,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     </div>
 </form>
 <h2>{{ report_title }}</h2>
+<p><strong>{{ category_label }}</strong></p>
 {% if report_type == 'expired_list' %}
 <p style="font-size:13px;">This is a <strong>work list</strong>: expired stock still
 on the shelf. Items leave it as you remove them. For the record of what was
@@ -2003,6 +2026,7 @@ recorded in the audit log.</p>
     </div>
 </form>
 <h2>Inventory Report for {{ start_date }} to {{ end_date }}</h2>
+<p><strong>{{ category_label }}</strong></p>
 {% if is_admin %}
 <p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed
 &minus; To Departments + Adjustment + Expired + Damaged = Current</strong>.
@@ -2041,7 +2065,8 @@ to a department rather than a patient. AMC is average monthly consumption
            "Dispensed" would be a mislabel: the figure includes stock that was
            written off, not handed to anyone. "Issued" is the honest general
            heading for the same number. #}
-        <tr><th>Medication</th><th>Beginning Balance</th><th>Received</th>
+        <tr><th>Item</th>{% if category == 'both' %}<th>Category</th>{% endif %}
+            <th>Beginning Balance</th><th>Received</th>
             <th>{% if is_admin %}Dispensed{% else %}Issued{% endif %}</th>
             {% if is_admin %}<th>Adjustment</th><th>Expired</th>{% endif %}
             <th>To Departments</th>
@@ -2052,7 +2077,9 @@ to a department rather than a patient. AMC is average monthly consumption
     <tbody>
     {% for row in report_data %}
         <tr>
-            <td>{{ row.med_name }}</td><td>{{ row.beginning_balance }}</td>
+            <td>{{ row.med_name }}</td>
+            {% if category == 'both' %}<td>{{ row.category }}</td>{% endif %}
+            <td>{{ row.beginning_balance }}</td>
             <td>{{ row.received }}</td>
             {% if is_admin %}
             <td>{{ row.dispensed }}</td>
@@ -2070,7 +2097,7 @@ to a department rather than a patient. AMC is average monthly consumption
             <td>{{ row.amount_to_order }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="{{ 14 if is_admin else 11 }}">No data for this period.</td></tr>
+        <tr><td colspan="{{ (14 if is_admin else 11) + (1 if category == 'both' else 0) }}">No data for this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -2569,7 +2596,15 @@ DASHBOARD_TEMPLATE = CSS_STYLE + """
             </select>
         </div>
         <div>
-            <label>Search Medication:</label>
+            <label>Category:</label>
+            <select name="category">
+                <option value="pharmaceutical" {% if category == 'pharmaceutical' %}selected{% endif %}>Pharmaceuticals</option>
+                <option value="supply" {% if category == 'supply' %}selected{% endif %}>Medical Supplies</option>
+                <option value="both" {% if category == 'both' %}selected{% endif %}>Both</option>
+            </select>
+        </div>
+        <div>
+            <label>Search Item:</label>
             <input name="search" type="text" value="{{ search or '' }}" placeholder="Filter by name">
         </div>
         <div class="button-div">
@@ -2579,7 +2614,7 @@ DASHBOARD_TEMPLATE = CSS_STYLE + """
     </div>
 </form>
 
-<h2>Stock Health</h2>
+<h2>Stock Health &mdash; {{ category_label }}</h2>
 <div style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:20px;">
 {% for t in tiles %}
     <div style="flex:1 1 150px; min-width:150px; border:1px solid #ccc; border-radius:6px; padding:12px;
@@ -4158,6 +4193,9 @@ def add_medication():
                 # item defined on this page values its stock correctly from the
                 # moment it is created rather than only after it is first
                 # received on a delivery.
+                category       = request.form.get('category') or CATEGORY_PHARM
+                if category not in CATEGORIES:
+                    category = CATEGORY_PHARM
                 pack_size      = int(request.form.get('pack_size') or 1)
                 pack_price     = float(request.form['pack_price'])
                 schedule       = request.form['schedule']
@@ -4174,11 +4212,13 @@ def add_medication():
 
                 if medications.find_one({'name': med_name}):
                     message = f'Medication "{med_name}" already exists. Use Receiving to add stock.'
-                    return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
+                    return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message,
+                                                  categories=CATEGORIES)
 
                 price = _unit_price(pack_price, pack_size)
                 medications.insert_one({
-                    'name': med_name, 'balance': initial_balance, 'batch': batch,
+                    'name': med_name, 'category': category,
+                    'balance': initial_balance, 'batch': batch,
                     'price': price, 'pack_size': pack_size, 'pack_price': pack_price,
                     'expiry_date': expiry_date, 'schedule': schedule,
                     'stock_receiver': stock_receiver,
@@ -4209,12 +4249,15 @@ def add_medication():
                                f'{initial_balance} units (unit price R{price:.4f}).')
                 else:
                     message = 'Medication added successfully! Receive stock against a delivery.'
-                return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
+                return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message,
+                                                  categories=CATEGORIES)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-                return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
+                return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message,
+                                                  categories=CATEGORIES)
 
-        return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message)
+        return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message,
+                                                  categories=CATEGORIES)
     except ServerSelectionTimeoutError:
         return render_template_string(
             ADD_MED_TEMPLATE, nav_links=get_nav_links(),
@@ -4255,6 +4298,7 @@ def edit_medication():
         if not med_name:
             message = 'No medication specified.'
             return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                                          categories=CATEGORIES,
                                           message=message, med_data=None, med_name=None)
 
         med = medications.find_one({'name': med_name})
@@ -4266,6 +4310,7 @@ def edit_medication():
                 {'med_name': med_name}
             )
             return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                                          categories=CATEGORIES,
                                           message=message, med_data=None, med_name=med_name)
 
         med_data = med
@@ -4276,6 +4321,9 @@ def edit_medication():
                 # a pack size can be corrected without waiting for the item to be
                 # received again — which is what the order request needs in order
                 # to ask for whole packs.
+                category    = request.form.get('category') or CATEGORY_PHARM
+                if category not in CATEGORIES:
+                    category = CATEGORY_PHARM
                 pack_size   = int(request.form.get('pack_size') or 1)
                 pack_price  = float(request.form['pack_price'])
                 if pack_size < 1:
@@ -4288,20 +4336,23 @@ def edit_medication():
                 medications.update_one(
                     {'name': med_name},
                     # balance deliberately absent — see the note in the template
-                    {'$set': {'batch': batch, 'price': price,
+                    {'$set': {'batch': batch, 'price': price, 'category': category,
                               'pack_size': pack_size, 'pack_price': pack_price,
                               'expiry_date': expiry_date, 'schedule': schedule}}
                 )
                 message = 'Medication updated successfully!'
                 med_data = medications.find_one({'name': med_name})
                 return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                                          categories=CATEGORIES,
                                               message=message, med_data=med_data, med_name=med_name)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
                 return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                                          categories=CATEGORIES,
                                               message=message, med_data=med_data, med_name=med_name)
 
         return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                                          categories=CATEGORIES,
                                       message=message, med_data=med_data, med_name=med_name)
     except ServerSelectionTimeoutError:
         # FIX: med_name may not be assigned yet if get_mongo_client() itself
@@ -4310,6 +4361,7 @@ def edit_medication():
         fallback_med_name = (request.form.get('med_name') if request.method == 'POST'
                              else request.args.get('med_name'))
         return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                                          categories=CATEGORIES,
                                       message="Database connection failed.", med_data=None, med_name=fallback_med_name), 500
 
 
@@ -4379,6 +4431,40 @@ _ZERO_DEMAND = {'shortfall': 0, 'events': 0}
 
 
 ACTIVE_ONLY = {'archived': {'$ne': True}}
+
+# NEW (Categories): items are either pharmaceuticals or medical supplies. This is
+# a field on the item, NOT a second collection — deliveries, stock takes,
+# write-offs, internal issues, ordering and the dashboard then work on supplies
+# with no new code and no second set of bugs to keep in step.
+CATEGORY_PHARM = 'Pharmaceutical'
+CATEGORY_SUPPLY = 'Medical Supply'
+CATEGORIES = [CATEGORY_PHARM, CATEGORY_SUPPLY]
+CATEGORY_LABELS = {'pharmaceutical': 'Pharmaceuticals',
+                   'supply': 'Medical Supplies',
+                   'both': 'Pharmaceuticals & Medical Supplies'}
+
+
+def _category_filter(choice):
+    """Query fragment for the chosen category view.
+
+    Items recorded before categories existed have no field at all, so
+    'pharmaceutical' must match a MISSING value too — otherwise every existing
+    medication would vanish from every report the moment this shipped.
+    """
+    if choice == 'supply':
+        return {'category': CATEGORY_SUPPLY}
+    if choice == 'both':
+        return {}
+    return {'category': {'$ne': CATEGORY_SUPPLY}}
+
+
+def _category_choice():
+    c = (request.values.get('category') or 'pharmaceutical').strip()
+    return c if c in ('pharmaceutical', 'supply', 'both') else 'pharmaceutical'
+
+
+def _cat_of(med):
+    return med.get('category') or CATEGORY_PHARM
 
 
 def _active(base=None):
@@ -4516,6 +4602,10 @@ def reports():
         medications = db['medications']
         transactions = db['transactions']
 
+        cat = _category_choice()
+        cat_q = _category_filter(cat)
+        cat_label = CATEGORY_LABELS[cat]
+
         report_data = []
         receive_list = []
         stock_data = []
@@ -4589,7 +4679,7 @@ def reports():
                         threshold_date  = report_date + timedelta(days=30)
                         now_dt          = datetime.now(timezone.utc)
                         med_filter      = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
-                        all_meds        = _by_name(medications.find(_active(med_filter), {'_id': 0}))
+                        all_meds        = _by_name(medications.find(_active({**med_filter, **cat_q}), {'_id': 0}))
                         stock_data      = []
                         # FIX (Performance): one aggregation for every medication
                         # instead of one per medication. Scoped by name only when a
@@ -4659,7 +4749,8 @@ def reports():
                         # no message, no indication that anything was missing. It
                         # only existed to bound the per-medication query loop below,
                         # which no longer exists, so the cap goes with it.
-                        meds         = _by_name(medications.find(_active(med_filter), {'_id': 0, 'name': 1, 'balance': 1}))
+                        meds         = _by_name(medications.find(_active({**med_filter, **cat_q}),
+                                                 {'_id': 0, 'name': 1, 'balance': 1, 'category': 1}))
                         days_in_period = max(1, (end_dt.date() - start_dt.date()).days + 1)
                         # FIX (Performance): one aggregation for the whole report
                         # instead of one per medication.
@@ -4718,7 +4809,7 @@ def reports():
                             amount_to_order   = max(0, amc - current_balance + lead_time_stock)
 
                             report_data.append({
-                                'med_name': med_name,
+                                'med_name': med_name, 'category': _cat_of(med),
                                 'beginning_balance': beginning_balance,
                                 'dispensed': dispensed, 'received': received,
                                 'adjustment': adjustment, 'expired': expired,
@@ -5093,7 +5184,7 @@ def reports():
                         window_start = window_end - timedelta(days=90)
                         req_filter = ({'name': {'$regex': search or '', '$options': 'i'}}
                                       if search else {})
-                        req_meds  = _by_name(medications.find(_active(req_filter), {'_id': 0}))
+                        req_meds  = _by_name(medications.find(_active({**req_filter, **cat_q}), {'_id': 0}))
                         movement  = _movement_by_med(
                             transactions, {'$gte': window_start, '$lte': window_end},
                             [m['name'] for m in req_meds] if search else None)
@@ -5262,6 +5353,7 @@ def reports():
             report_type=report_type, report_data=report_data,
             receive_list=receive_list, stock_data=stock_data,
             controlled_register=controlled_register, order_request=order_request,
+            category=cat, category_label=cat_label,
             monthly=monthly, writeoffs=writeoffs, writeoff_totals=writeoff_totals,
             unmet_list=unmet_list, unmet_totals=unmet_totals,
             issues=issues, issue_totals=issue_totals,
@@ -5276,6 +5368,7 @@ def reports():
             message="Database connection failed. Please try again later.",
             report_type=None, report_data=[], receive_list=[], stock_data=[],
             controlled_register=[], order_request=None, monthly=None,
+            category='pharmaceutical', category_label=CATEGORY_LABELS['pharmaceutical'],
             writeoffs=[], writeoff_totals={'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []},
             unmet_list=[], unmet_totals={'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []},
             issues=[], issue_totals={'lines': 0, 'units': 0, 'value': 0.0, 'dept_count': 0, 'by_dept': [], 'by_med': []},
@@ -5833,6 +5926,7 @@ def dashboard():
         limit = 50
 
     search = (request.args.get('search') or '').strip()
+    cat = _category_choice()
 
     months        = _month_sequence(months_back)
     month_labels  = [f"{MONTH_ABBR[m]} {y}" for y, m in months]
@@ -5858,7 +5952,7 @@ def dashboard():
     try:
         db = get_mongo_client()['pharmacy_db']
         movement = _monthly_movement(db['transactions'], window_start)
-        all_meds = _by_name(db['medications'].find(_active(), {'_id': 0}))
+        all_meds = _by_name(db['medications'].find(_active(_category_filter(cat)), {'_id': 0}))
 
         rows = []
         # Units are only meaningful per medication, so the cross-medication
@@ -6097,7 +6191,8 @@ def dashboard():
             DASHBOARD_TEMPLATE, nav_links=get_nav_links(), message=message,
             is_admin=is_admin, month_labels=month_labels, months_back=months_back,
             month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
-            search=search, tiles=tiles, totals=totals, act=act, clinical=clinical,
+            search=search, category=cat, category_label=CATEGORY_LABELS[cat],
+            tiles=tiles, totals=totals, act=act, clinical=clinical,
             rows=table_rows,
             total_items=total_items, expiring=expiring, st_totals=st_totals,
             top_discrepancies=top_discrepancies, never_counted=never_counted,
@@ -6109,7 +6204,9 @@ def dashboard():
             message="Database connection failed. Please try again later.",
             is_admin=is_admin, month_labels=month_labels, months_back=months_back,
             month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
-            search=search, tiles=[], totals=empty, act=act_empty, rows=[], total_items=0,
+            search=search, category='pharmaceutical',
+            category_label=CATEGORY_LABELS['pharmaceutical'],
+            tiles=[], totals=empty, act=act_empty, rows=[], total_items=0,
             clinical={'outcomes': [], 'diagnoses': [], 'episodes': 0, 'patients': set()},
             expiring=[], st_totals=st_empty, top_discrepancies=[], never_counted=[],
         ), 500
