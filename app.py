@@ -1912,7 +1912,8 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     <select name="category">
         <option value="pharmaceutical" {% if category == 'pharmaceutical' %}selected{% endif %}>Pharmaceuticals</option>
         <option value="supply" {% if category == 'supply' %}selected{% endif %}>Medical Supplies</option>
-        <option value="both" {% if category == 'both' %}selected{% endif %}>Both</option>
+        <option value="donor" {% if category == 'donor' %}selected{% endif %}>Donor Funded</option>
+        <option value="both" {% if category == 'both' %}selected{% endif %}>All categories</option>
     </select><br>
     <label>Search (optional):</label><input name="search" type="text" placeholder="Filter results by relevant fields"><br>
     <label>Period (Period Report only):</label>
@@ -2600,7 +2601,8 @@ DASHBOARD_TEMPLATE = CSS_STYLE + """
             <select name="category">
                 <option value="pharmaceutical" {% if category == 'pharmaceutical' %}selected{% endif %}>Pharmaceuticals</option>
                 <option value="supply" {% if category == 'supply' %}selected{% endif %}>Medical Supplies</option>
-                <option value="both" {% if category == 'both' %}selected{% endif %}>Both</option>
+                <option value="donor" {% if category == 'donor' %}selected{% endif %}>Donor Funded</option>
+                <option value="both" {% if category == 'both' %}selected{% endif %}>All categories</option>
             </select>
         </div>
         <div>
@@ -4438,10 +4440,12 @@ ACTIVE_ONLY = {'archived': {'$ne': True}}
 # with no new code and no second set of bugs to keep in step.
 CATEGORY_PHARM = 'Pharmaceutical'
 CATEGORY_SUPPLY = 'Medical Supply'
-CATEGORIES = [CATEGORY_PHARM, CATEGORY_SUPPLY]
+CATEGORY_DONOR = 'Donor Funded'
+CATEGORIES = [CATEGORY_PHARM, CATEGORY_SUPPLY, CATEGORY_DONOR]
 CATEGORY_LABELS = {'pharmaceutical': 'Pharmaceuticals',
                    'supply': 'Medical Supplies',
-                   'both': 'Pharmaceuticals & Medical Supplies'}
+                   'donor': 'Donor Funded',
+                   'both': 'All Categories'}
 
 
 def _category_filter(choice):
@@ -4453,14 +4457,20 @@ def _category_filter(choice):
     """
     if choice == 'supply':
         return {'category': CATEGORY_SUPPLY}
+    if choice == 'donor':
+        return {'category': CATEGORY_DONOR}
     if choice == 'both':
         return {}
-    return {'category': {'$ne': CATEGORY_SUPPLY}}
+    # Pharmaceuticals is expressed as "neither of the others" so that records
+    # written before categories existed — which have no field at all — still
+    # appear. Asking for category == 'Pharmaceutical' would hide every item
+    # already in the database.
+    return {'category': {'$nin': [CATEGORY_SUPPLY, CATEGORY_DONOR]}}
 
 
 def _category_choice():
     c = (request.values.get('category') or 'pharmaceutical').strip()
-    return c if c in ('pharmaceutical', 'supply', 'both') else 'pharmaceutical'
+    return c if c in ('pharmaceutical', 'supply', 'donor', 'both') else 'pharmaceutical'
 
 
 def _cat_of(med):
