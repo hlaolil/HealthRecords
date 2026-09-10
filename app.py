@@ -1898,6 +1898,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         <option value="expiry_writeoffs">Losses (expiry &amp; damage)</option>
         <option value="internal_issues">Internal Issues (to departments)</option>
         <option value="unmet_demand">Unmet Demand (stockouts)</option>
+        <option value="sick_leave">Sick Leave Register</option>
         <option value="near_expired_list">Near Expired Drug List</option>
         <option value="out_of_stock_list">Out of Stock List</option>
         <option value="inventory">Inventory Report</option>
@@ -2102,6 +2103,61 @@ to a department rather than a patient. AMC is average monthly consumption
     {% endfor %}
     </tbody>
 </table>
+{% elif report_type == 'sick_leave' %}
+<h2>Sick Leave Register for {{ start_date }} to {{ end_date }}</h2>
+<p style="font-size:13px;">Every visit whose outcome was sick leave, with the days
+given. One line per visit, not per medication &mdash; a patient who received three
+items on one visit was given one period of leave, not three.</p>
+<table>
+    <thead>
+        <tr><th>Date</th><th>Patient</th><th>Company</th><th>Days</th>
+            <th>Diagnoses</th><th>Prescriber</th><th>Dispenser</th></tr>
+    </thead>
+    <tbody>
+    {% for l in sick_leave %}
+        <tr>
+            <td>{{ l.date }}</td>
+            <td>{{ l.patient }}</td>
+            <td>{{ l.company or '-' }}</td>
+            <td><strong>{{ l.days }}</strong></td>
+            <td>{{ l.diagnoses or '-' }}</td>
+            <td>{{ l.prescriber or '-' }}</td>
+            <td>{{ l.dispenser or '-' }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="7">No sick leave was recorded in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% if sick_leave %}
+<h3>Summary</h3>
+<table>
+    <thead><tr><th>Certificates</th><th>Patients</th><th>Total Days</th>
+               <th>Average Days</th><th>Longest</th></tr></thead>
+    <tbody>
+        <tr><td>{{ sick_leave|length }}</td>
+            <td>{{ sick_leave_totals.patients }}</td>
+            <td>{{ sick_leave_totals.days }}</td>
+            <td>{{ sick_leave_totals.average }}</td>
+            <td>{{ sick_leave_totals.longest }}</td></tr>
+    </tbody>
+</table>
+{% if sick_leave_totals.repeat %}
+<h3>More Than One Certificate in the Period</h3>
+<table>
+    <thead><tr><th>Patient</th><th>Certificates</th><th>Total Days</th></tr></thead>
+    <tbody>
+    {% for r in sick_leave_totals.repeat %}
+        <tr><td>{{ r.patient }}</td><td>{{ r.count }}</td><td>{{ r.days }}</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+<div class="form-buttons">
+    <button type="button" onclick="window.print();">Print This Register</button>
+</div>
+{% endif %}
+
 {% elif report_type == 'internal_issues' %}
 <h2>Internal Issues for {{ start_date }} to {{ end_date }}</h2>
 <p style="font-size:13px;">Stock issued out of the store to a department rather
@@ -4628,6 +4684,8 @@ def reports():
         unmet_totals = {'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []}
         issues = []
         issue_totals = {'lines': 0, 'units': 0, 'value': 0.0, 'dept_count': 0, 'by_dept': [], 'by_med': []}
+        sick_leave = []
+        sick_leave_totals = {'patients': 0, 'days': 0, 'average': '-', 'longest': 0, 'repeat': []}
         report_type = None
         start_date = None
         end_date = None
@@ -4860,6 +4918,58 @@ def reports():
                                 {'expiry_date':    {'$regex': search, '$options': 'i'}},
                             ]
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
+
+                    elif report_type == 'sick_leave':
+                        if not start_date or not end_date:
+                            raise ValueError('Start and end dates are required for this report type.')
+                        q = {'type': 'dispense', 'outcome': 'Sick leave',
+                             'timestamp': {'$gte': start_dt, '$lte': end_dt}}
+                        if search:
+                            q['$or'] = [
+                                {'patient':    {'$regex': search, '$options': 'i'}},
+                                {'company':    {'$regex': search, '$options': 'i'}},
+                                {'prescriber': {'$regex': search, '$options': 'i'}},
+                                {'diagnoses':  {'$regex': search, '$options': 'i'}},
+                            ]
+                        raw = list(transactions.find(q).sort('timestamp', -1).limit(3000))
+                        # One line per VISIT. A dispense writes one document per
+                        # medication, so listing rows would print the same
+                        # certificate once for every item on the prescription.
+                        seen, sick_leave = set(), []
+                        per_patient = {}
+                        for t in raw:
+                            tid = t.get('transaction_id')
+                            if tid in seen:
+                                continue
+                            seen.add(tid)
+                            days = t.get('outcome_days') or 0
+                            dx = t.get('diagnoses')
+                            sick_leave.append({
+                                'date': t.get('date') or t['timestamp'].strftime('%Y-%m-%d'),
+                                'patient': t.get('patient', ''),
+                                'company': t.get('company'),
+                                'days': days,
+                                'diagnoses': ', '.join(dx) if isinstance(dx, list) else (dx or ''),
+                                'prescriber': t.get('prescriber'),
+                                'dispenser': t.get('dispenser'),
+                            })
+                            e = per_patient.setdefault(t.get('patient', ''),
+                                                       {'count': 0, 'days': 0})
+                            e['count'] += 1
+                            e['days'] += days
+                        total_days = sum(l['days'] for l in sick_leave)
+                        sick_leave_totals = {
+                            'patients': len(per_patient),
+                            'days': total_days,
+                            'average': (f'{total_days / len(sick_leave):.1f}'
+                                        if sick_leave else '-'),
+                            'longest': max((l['days'] for l in sick_leave), default=0),
+                            'repeat': sorted(
+                                ({'patient': k, **v} for k, v in per_patient.items()
+                                 if v['count'] > 1),
+                                key=lambda r: -r['days']),
+                        }
+                        report_title = 'Sick Leave Register'
 
                     elif report_type == 'internal_issues':
                         if not start_date or not end_date:
@@ -5355,6 +5465,8 @@ def reports():
                     unmet_totals = {'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []}
                     issues = []
                     issue_totals = {'lines': 0, 'units': 0, 'value': 0.0, 'dept_count': 0, 'by_dept': [], 'by_med': []}
+                    sick_leave = []
+                    sick_leave_totals = {'patients': 0, 'days': 0, 'average': '-', 'longest': 0, 'repeat': []}
             else:
                 message = 'Please select a report type.'
 
@@ -5367,6 +5479,7 @@ def reports():
             monthly=monthly, writeoffs=writeoffs, writeoff_totals=writeoff_totals,
             unmet_list=unmet_list, unmet_totals=unmet_totals,
             issues=issues, issue_totals=issue_totals,
+            sick_leave=sick_leave, sick_leave_totals=sick_leave_totals,
             start_date=start_date, end_date=end_date,
             total_transactions=total_transactions,
             nav_links=get_nav_links(), message=message,
@@ -5382,6 +5495,7 @@ def reports():
             writeoffs=[], writeoff_totals={'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []},
             unmet_list=[], unmet_totals={'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []},
             issues=[], issue_totals={'lines': 0, 'units': 0, 'value': 0.0, 'dept_count': 0, 'by_dept': [], 'by_med': []},
+            sick_leave=[], sick_leave_totals={'patients': 0, 'days': 0, 'average': '-', 'longest': 0, 'repeat': []},
             start_date=None, end_date=None,
             total_transactions=0, search=None, report_title=None, is_admin=is_admin
         ), 500
