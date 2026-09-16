@@ -737,7 +737,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
 {% if message %}
-    <p class="message {% if 'partial success' in message|lower %}partial{% elif 'successfully' in message|lower or 'updated' in message|lower or 'deleted' in message|lower or 'restored' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+    <p class="message {% if message_class %}{{ message_class }}{% elif 'partial' in message|lower %}partial{% elif 'successfully' in message|lower or 'updated' in message|lower or 'deleted' in message|lower or 'restored' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
 <h2>{% if tx_data %}Edit Dispense{% else %}Dispense Medication{% endif %}</h2>
 <form method="POST" action="{{ url_for('dispense') }}" class="dispense-form">
@@ -3573,8 +3573,11 @@ def dispense():
         transactions = db['transactions']
         # Read any flashed message from a preceding redirect (e.g. from
         # delete_dispense success/error, or access-denied from other routes).
-        flashed = get_flashed_messages()
-        message = flashed[0] if flashed else None
+        # with_categories so the banner colour is decided by the route, which
+        # knows WHY the dispense was partial, rather than by the template
+        # guessing from words in the message.
+        flashed = get_flashed_messages(with_categories=True)
+        message_class, message = flashed[0] if flashed else (None, None)
         start_date = request.values.get('start_date')
         end_date = request.values.get('end_date')
         search = request.values.get('search')
@@ -3726,12 +3729,20 @@ def dispense():
                     if len(med_names) != len(quantities) or not med_names:
                         message = 'Please provide at least one valid medication and quantity.'
                     else:
-                        error_msgs = []
+                        # NEW: the two partial outcomes mean different things and
+                        # need different urgency. Running short is routine — the
+                        # shortfall is captured as unmet demand and the order
+                        # request will act on it. A medication that is NOT ON FILE
+                        # is a data fault: nothing was recorded against it at all,
+                        # and it stays broken until someone fixes the item. Showing
+                        # both in the same amber banner buries the second.
+                        missing_msgs = []
+                        short_msgs = []
                         dispensed_meds = []
                         for med_name, quantity in zip(med_names, quantities):
                             med = medications.find_one({'name': med_name})
                             if not med:
-                                error_msgs.append(f'Medication "{med_name}" not found.')
+                                missing_msgs.append(f'"{med_name}" is not on file')
                                 write_app_warning(
                                     'medication_not_found',
                                     f'Medication "{med_name}" not found during dispense.',
@@ -3778,9 +3789,9 @@ def dispense():
                                          'dispensed_quantity': given,
                                          'patient': patient, 'transaction_id': tx_id}
                                     )
-                                    error_msgs.append(
-                                        f'{med_name}: only {given} of {quantity} available — '
-                                        f'{short} recorded as unmet demand.')
+                                    short_msgs.append(
+                                        f'{med_name}: only {given} of {quantity} available, '
+                                        f'{short} recorded as unmet demand')
                                 if given <= 0:
                                     continue
                                 quantity = given
@@ -3815,12 +3826,33 @@ def dispense():
                                 })
                                 dispensed_meds.append(med_name)
 
-                        if dispensed_meds and not error_msgs:
-                            message = f'{message_prefix} successfully: {", ".join(dispensed_meds)}'
+                        parts = []
+                        if dispensed_meds:
+                            parts.append(f'{message_prefix}: {", ".join(dispensed_meds)}')
+                        if short_msgs:
+                            parts.append('Short: ' + '; '.join(short_msgs))
+                        if missing_msgs:
+                            parts.append('NOT ON FILE: ' + '; '.join(missing_msgs)
+                                         + ' — nothing was recorded for these. '
+                                           'Add the item under Add Medication, then dispense it.')
+
+                        if missing_msgs:
+                            # Red: needs someone to fix the data before this
+                            # prescription is complete.
+                            severity = 'error'
+                            head = ('Partial — item not on file' if dispensed_meds
+                                    else 'Not dispensed — item not on file')
+                        elif short_msgs:
+                            severity = 'partial'
+                            head = ('Partial — insufficient stock' if dispensed_meds
+                                    else 'Not dispensed — no stock')
                         elif dispensed_meds:
-                            message = f'Partial success: {", ".join(dispensed_meds)}. Errors: {"; ".join(error_msgs)}'
+                            severity = 'success'
+                            head = f'{message_prefix} successfully'
                         else:
-                            message = '; '.join(error_msgs) or f'No medications {message_prefix.lower()}.'
+                            severity = 'error'
+                            head = f'No medications {message_prefix.lower()}'
+                        message = head + ('. ' + ' | '.join(parts) if parts else '.')
 
                         # FIX (Bug): this used to fall through and re-render with
                         # the transaction list that was fetched BEFORE the insert,
@@ -3830,7 +3862,7 @@ def dispense():
                         # It also left the browser sitting on a POST, so a refresh
                         # re-submitted the whole dispense and deducted the stock a
                         # second time. Redirecting after the write fixes both.
-                        flash(message)
+                        flash(message, severity)
                         return redirect(url_for('dispense'))
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
@@ -3845,6 +3877,7 @@ def dispense():
             end_date=end_date,
             search=search,
             tx_data=tx_data, current_year=datetime.utcnow().year,
+            message_class=message_class,
             birth_decades=_birth_decades(),
             pager=pager, window_defaulted=window_defaulted, unit='visits'
         )
@@ -3856,6 +3889,7 @@ def dispense():
             message="Database connection failed. Please try again later.",
             start_date='', end_date='', search='', tx_data=None,
             current_year=datetime.utcnow().year, birth_decades=_birth_decades(),
+            message_class='error',
             pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='visits'
         ), 500
 
