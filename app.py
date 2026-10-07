@@ -2284,7 +2284,10 @@ what to buy.</p>
 {% elif report_type == 'expiry_writeoffs' %}
 <h2>Stock Losses for {{ start_date }} to {{ end_date }}</h2>
 <p style="font-size:13px;">Stock that was actually removed from the shelf as
-expired, or written off as damaged or lost. This is the record of loss &mdash; distinct from
+expired, or written off as damaged or lost.{% if is_admin %} The quantity and
+unit cost of any line can be corrected here; changing a quantity moves stock on
+hand by the difference, so a figure entered in error puts the stock back.{% endif %}
+This is the record of loss &mdash; distinct from
 <em>Expired Stock on Shelf</em>, which is a work list of what still needs
 removing and empties as you deal with it. Values are at the unit price recorded
 when the stock was written off.</p>
@@ -2292,7 +2295,7 @@ when the stock was written off.</p>
     <thead>
         <tr><th>Date</th><th>Kind</th><th>Medication</th><th>Units Removed</th><th>Unit Cost</th>
             <th>Value Lost</th><th>Batch</th><th>Expiry Date</th>
-            <th>Reason</th><th>Removed By</th></tr>
+            <th>Reason</th><th>Removed By</th>{% if is_admin %}<th>Correct</th>{% endif %}</tr>
     </thead>
     <tbody>
     {% for w in writeoffs %}
@@ -2307,9 +2310,28 @@ when the stock was written off.</p>
             <td>{{ w.expiry_date or '-' }}</td>
             <td>{{ w.reason or '-' }}</td>
             <td>{{ w.user }}</td>
+            {% if is_admin %}
+            {# Correcting a quantity here moves stock by the DIFFERENCE — see
+               the note in edit_loss(). The form is per row so one correction
+               cannot accidentally rewrite another. #}
+            <td class="action-buttons">
+                <form method="POST" action="{{ url_for('edit_loss') }}" style="display:inline;">
+                    <input type="hidden" name="loss_id" value="{{ w.id }}">
+                    <input type="hidden" name="start_date" value="{{ start_date }}">
+                    <input type="hidden" name="end_date" value="{{ end_date }}">
+                    <input name="quantity" type="number" min="1" value="{{ w.units }}"
+                           style="width:5.5em;" required title="Units written off">
+                    <input name="price" type="number" step="0.0001" min="0"
+                           value="{{ "%.4f"|format(w.price) }}" style="width:7em;" required
+                           title="Unit cost used to value this loss">
+                    <button type="submit" class="edit-btn"
+                            onclick="return confirm('Correct this loss for {{ w.med_name }}? Changing the quantity will adjust stock on hand by the difference.');">Save</button>
+                </form>
+            </td>
+            {% endif %}
         </tr>
     {% else %}
-        <tr><td colspan="10">No stock was written off in this period.</td></tr>
+        <tr><td colspan="{{ 11 if is_admin else 10 }}">No stock was written off in this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -4596,6 +4618,102 @@ def _by_name(docs):
 
 
 
+@app.route('/edit-loss', methods=['POST'])
+@login_required
+def edit_loss():
+    """Correct the quantity or unit price on a recorded loss.
+
+    A loss already moved stock, so changing its quantity has to move stock by
+    the DIFFERENCE — not by the new figure. Writing off 60 when it should have
+    been 40 means 20 units are still on the shelf and must go back; the
+    reverse takes 20 more off. Overwriting the quantity without that
+    adjustment would leave the balance permanently wrong while the ledger
+    looked correct.
+
+    The price is different: it never moved stock, so correcting it only
+    revalues the loss.
+    """
+    if session['user'].get('role') != 'admin':
+        flash('Access denied. Only admins can edit a recorded loss.')
+        return redirect('/reports')
+
+    start_date = request.form.get('start_date') or ''
+    end_date = request.form.get('end_date') or ''
+
+    def back():
+        return redirect(url_for('reports', report_type='expiry_writeoffs',
+                                start_date=start_date, end_date=end_date))
+
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        try:
+            tx = db['transactions'].find_one(
+                {'_id': ObjectId(request.form.get('loss_id', '')),
+                 'type': {'$in': ['expiry_removal', 'damage']}})
+        except (InvalidId, TypeError):
+            tx = None
+        if not tx:
+            flash('That loss record was not found.')
+            return back()
+
+        try:
+            new_qty = int(request.form.get('quantity', ''))
+            new_price = float(request.form.get('price', ''))
+        except (TypeError, ValueError):
+            flash('Quantity must be a whole number and price a number.')
+            return back()
+        if new_qty < 1:
+            flash('Quantity must be at least 1. To cancel a loss entirely, '
+                  'reverse it by recording the stock back in.')
+            return back()
+        if new_price < 0:
+            flash('Price cannot be negative.')
+            return back()
+
+        med_name = tx.get('med_name')
+        med = db['medications'].find_one({'name': med_name})
+        if not med:
+            flash(f'Medication "{med_name}" is no longer on file, so this loss '
+                  f'cannot be edited.')
+            return back()
+
+        old_qty = abs(tx.get('quantity', 0) or 0)
+        old_price = tx.get('price', 0) or 0
+        delta = new_qty - old_qty          # >0 means MORE is being written off
+        balance = med.get('balance', 0) or 0
+        if delta > balance:
+            flash(f'Cannot increase this loss to {new_qty}: that needs '
+                  f'{delta} more unit(s) and only {balance} are on hand.')
+            return back()
+
+        if delta:
+            db['medications'].update_one({'name': med_name},
+                                         {'$inc': {'balance': -delta}})
+        db['transactions'].update_one(
+            {'_id': tx['_id']},
+            {'$set': {'quantity': -new_qty, 'price': new_price,
+                      'line_value': -new_qty * new_price,
+                      'edited_by': session['user']['name'],
+                      'edited_at': datetime.utcnow()}})
+
+        changes = []
+        if old_qty != new_qty:
+            changes.append(f'quantity from {old_qty} to {new_qty} '
+                           f'(stock on hand from {balance} to {balance - delta})')
+        if abs(old_price - new_price) >= 0.0001:
+            changes.append(f'unit price from R{old_price:.4f} to R{new_price:.4f}')
+        if not changes:
+            flash('Nothing was changed.')
+            return back()
+        write_audit_entry('UPDATE', 'stock_loss',
+                          f'{med_name} ({tx.get("type")})', '; '.join(changes))
+        flash(f'{med_name}: loss corrected — {"; ".join(changes)}. '
+              f'Value now R{new_qty * new_price:.2f}.')
+    except ServerSelectionTimeoutError:
+        flash('Database connection failed. Please try again later.')
+    return back()
+
+
 @app.route('/remove-expired', methods=['POST'])
 @login_required
 def remove_expired():
@@ -5113,6 +5231,7 @@ def reports():
                                 'value': value, 'batch': w.get('batch'),
                                 'expiry_date': w.get('expiry_date'),
                                 'reason': w.get('reason'),
+                                'id': str(w.get('_id')),
                                 'kind': 'Damage' if w.get('type') == 'damage' else 'Expiry',
                                 'user': w.get('user'),
                             })
