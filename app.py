@@ -2284,32 +2284,35 @@ what to buy.</p>
 {% elif report_type == 'expiry_writeoffs' %}
 <h2>Stock Losses for {{ start_date }} to {{ end_date }}</h2>
 <p style="font-size:13px;">Stock that was actually removed from the shelf as
-expired, or written off as damaged or lost.{% if is_admin %} The quantity and
-unit cost of any line can be corrected here; changing a quantity moves stock on
-hand by the difference, so a figure entered in error puts the stock back.{% endif %}
+expired, or written off as damaged or lost, listed item by item.
+Total cost is the quantity times the unit cost recorded for that write-off.{% if is_admin %}
+Quantity, unit cost and remarks on any line can be corrected here; changing a
+quantity moves stock on hand by the difference, so a figure entered in error puts
+the stock back.{% endif %}
 This is the record of loss &mdash; distinct from
 <em>Expired Stock on Shelf</em>, which is a work list of what still needs
 removing and empties as you deal with it. Values are at the unit price recorded
 when the stock was written off.</p>
 <table>
     <thead>
-        <tr><th>Date</th><th>Kind</th><th>Medication</th><th>Units Removed</th><th>Unit Cost</th>
-            <th>Value Lost</th><th>Batch</th><th>Expiry Date</th>
-            <th>Reason</th><th>Removed By</th>{% if is_admin %}<th>Correct</th>{% endif %}</tr>
+        {# Column order and headings are fixed by the register form this report
+           has to match: DATE, Item Description, QTY, EXPIRY DATE, Batch/Lot,
+           Total COST, Remarks. Kind, unit cost and the user who recorded it are
+           still held on every record and still drive the summaries below. #}
+        <tr><th>DATE</th><th>Item Description</th><th>QTY</th><th>EXPIRY DATE</th>
+            <th>Batch/Lot</th><th>Total COST</th><th>Remarks</th>
+            {% if is_admin %}<th>Correct</th>{% endif %}</tr>
     </thead>
     <tbody>
     {% for w in writeoffs %}
         <tr class="expired">
-            <td>{{ w.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td>{{ w.kind }}</td>
+            <td>{{ w.timestamp.strftime('%Y-%m-%d') }}</td>
             <td>{{ w.med_name }}</td>
             <td>{{ w.units }}</td>
-            <td>R{{ "%.4f"|format(w.price) }}</td>
-            <td>R{{ "%.2f"|format(w.value) }}</td>
-            <td>{{ w.batch or '-' }}</td>
             <td>{{ w.expiry_date or '-' }}</td>
-            <td>{{ w.reason or '-' }}</td>
-            <td>{{ w.user }}</td>
+            <td>{{ w.batch or '-' }}</td>
+            <td>R{{ "%.2f"|format(w.value) }}</td>
+            <td>{{ w.remarks or '-' }}</td>
             {% if is_admin %}
             {# Correcting a quantity here moves stock by the DIFFERENCE — see
                the note in edit_loss(). The form is per row so one correction
@@ -2324,6 +2327,9 @@ when the stock was written off.</p>
                     <input name="price" type="number" step="0.0001" min="0"
                            value="{{ "%.4f"|format(w.price) }}" style="width:7em;" required
                            title="Unit cost used to value this loss">
+                    <input name="remarks" type="text" value="{{ w.remarks }}"
+                           style="width:12em;" placeholder="Remarks"
+                           title="Free text shown in the Remarks column">
                     <button type="submit" class="edit-btn"
                             onclick="return confirm('Correct this loss for {{ w.med_name }}? Changing the quantity will adjust stock on hand by the difference.');">Save</button>
                 </form>
@@ -2331,7 +2337,7 @@ when the stock was written off.</p>
             {% endif %}
         </tr>
     {% else %}
-        <tr><td colspan="{{ 11 if is_admin else 10 }}">No stock was written off in this period.</td></tr>
+        <tr><td colspan="{{ 8 if is_admin else 7 }}">No stock was written off in this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -4669,6 +4675,10 @@ def edit_loss():
         if new_price < 0:
             flash('Price cannot be negative.')
             return back()
+        # Only touch remarks when the form actually carried the field; an edit
+        # posted without it must not silently clear what is there.
+        remarks_given = 'remarks' in request.form
+        new_remarks = (request.form.get('remarks') or '').strip()
 
         med_name = tx.get('med_name')
         med = db['medications'].find_one({'name': med_name})
@@ -4702,6 +4712,11 @@ def edit_loss():
                            f'(stock on hand from {balance} to {balance - delta})')
         if abs(old_price - new_price) >= 0.0001:
             changes.append(f'unit price from R{old_price:.4f} to R{new_price:.4f}')
+        old_remarks = tx.get('remarks') or tx.get('reason') or ''
+        if remarks_given and new_remarks != old_remarks:
+            db['transactions'].update_one({'_id': tx['_id']},
+                                          {'$set': {'remarks': new_remarks}})
+            changes.append('remarks updated')
         if not changes:
             flash('Nothing was changed.')
             return back()
@@ -5220,6 +5235,11 @@ def reports():
                                 {'batch':    {'$regex': search, '$options': 'i'}},
                             ]
                         raw = list(transactions.find(q).sort('timestamp', -1).limit(2000))
+                        # Records written before the expiry date was captured on
+                        # damage fall back to the item's recorded expiry.
+                        med_expiry = {m['name']: m.get('expiry_date') for m in
+                                      medications.find({}, {'_id': 0, 'name': 1,
+                                                            'expiry_date': 1})}
                         writeoffs, by_med = [], {}
                         for w in raw:
                             units = abs(w.get('quantity', 0) or 0)
@@ -5229,8 +5249,13 @@ def reports():
                                 'timestamp': w.get('timestamp'), 'med_name': w.get('med_name'),
                                 'units': units, 'price': w.get('price', 0) or 0,
                                 'value': value, 'batch': w.get('batch'),
-                                'expiry_date': w.get('expiry_date'),
+                                'expiry_date': (w.get('expiry_date')
+                                                or med_expiry.get(w.get('med_name'))),
                                 'reason': w.get('reason'),
+                                # Free text the admin writes. Falls back to the
+                                # recorded reason so reformatting to the register
+                                # columns drops nothing already captured.
+                                'remarks': w.get('remarks') or w.get('reason') or '',
                                 'id': str(w.get('_id')),
                                 'kind': 'Damage' if w.get('type') == 'damage' else 'Expiry',
                                 'user': w.get('user'),
@@ -6150,7 +6175,11 @@ def internal_issue():
                     'quantity': -qty,                    # signed, like expiry
                     'price': price, 'line_value': -qty * price,
                     'reason': reason, 'note': (request.form.get('note') or '').strip(),
-                    'batch': med.get('batch'), 'balance_before': balance,
+                    'batch': med.get('batch'),
+                    # The register reports an expiry date against every line, so
+                    # capture it here too — expiry removals already did.
+                    'expiry_date': med.get('expiry_date'),
+                    'balance_before': balance,
                     'user': current_user, 'timestamp': datetime.utcnow(),
                 })
                 write_audit_entry('UPDATE', 'damage', name,
