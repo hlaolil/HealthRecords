@@ -836,17 +836,23 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
                denominator. With a blank option those visits were simply absent,
                so a referral rate could not be worked out at all. #}
             <label>Outcome:</label>
-            <select name="outcome" {% if not tx_data %}required{% endif %}>
+            <select name="outcome" id="outcome-select" {% if not tx_data %}required{% endif %}
+                    onchange="toggleOutcomeDays()">
                 {% for opt in ['Outpatient', 'Sick leave', 'Referral', 'Admission'] %}
                 <option value="{{ opt }}" {% if (tx_data and tx_data.outcome == opt) or (not tx_data and opt == 'Outpatient') %}selected{% endif %}>{{ opt }}</option>
                 {% endfor %}
             </select>
         </div>
-        <div>
-            <label>Days (sick leave / admission):</label>
-            <input name="outcome_days" type="number" min="0"
+        {# Days apply to sick leave only, so the field is shown only then. It
+           starts hidden and is revealed by the script, EXCEPT when editing a
+           record that already carries sick leave — then it must be visible
+           immediately, before any script runs, or the days look lost. #}
+        <div id="outcome-days-field"
+             {% if not (tx_data and tx_data.outcome == 'Sick leave') %}style="display:none;"{% endif %}>
+            <label>Days of Sick Leave:</label>
+            <input name="outcome_days" id="outcome-days-input" type="number" min="0"
                    value="{{ tx_data.outcome_days if tx_data and tx_data.outcome_days else '' }}"
-                   placeholder="leave blank if not applicable">
+                   placeholder="number of days">
         </div>
         <div>
             <label>Prescriber (Doctor):</label>
@@ -1237,6 +1243,9 @@ function clearForm() {
 
     ['med_suggestions','diag_suggestions','company_suggestions','position_suggestions']
         .forEach(id => document.getElementById(id).innerHTML = '');
+
+    // Clearing blanks the outcome select, so the days field must hide with it.
+    toggleOutcomeDays();
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -1247,6 +1256,21 @@ document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('.med-input').forEach(i => addInputListener(i, 'medication'));
     document.querySelectorAll('.diag-input').forEach(i => addInputListener(i, 'diagnosis'));
 });
+
+// Days apply to sick leave only. Clearing the box as it is hidden means a
+// number typed against Sick leave cannot be carried into a Referral by a
+// change of mind. The server enforces the same rule, so this is convenience,
+// not the control.
+function toggleOutcomeDays() {
+    const sel = document.getElementById('outcome-select');
+    const field = document.getElementById('outcome-days-field');
+    const input = document.getElementById('outcome-days-input');
+    if (!sel || !field) return;
+    const isSickLeave = sel.value === 'Sick leave';
+    field.style.display = isSickLeave ? '' : 'none';
+    if (!isSickLeave && input) input.value = '';
+}
+document.addEventListener('DOMContentLoaded', toggleOutcomeDays);
 
 {% if message and ('successfully' in message|lower or 'updated' in message|lower) and 'partial success' not in message|lower %}
     {% if not tx_data %}
@@ -4260,6 +4284,13 @@ def dispense():
                 try:
                     outcome_days = int(request.form.get('outcome_days') or 0) or None
                 except (TypeError, ValueError):
+                    outcome_days = None
+                # Days belong to sick leave only. The field is hidden for every
+                # other outcome, but hiding it does not clear it: pick Sick
+                # leave, type 3, change to Referral, and the browser still
+                # submits 3. Enforced here as well so a referral can never
+                # carry days, whatever the form sends or whether its script ran.
+                if outcome != 'Sick leave':
                     outcome_days = None
                 diagnoses     = [d.strip() for d in request.form.getlist('diagnoses') if d.strip()]
 
