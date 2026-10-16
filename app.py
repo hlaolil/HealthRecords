@@ -1719,10 +1719,12 @@ TEMPERATURE_TEMPLATE = CSS_STYLE + """
 
 <div class="temp-entry">
 <h2>Record a Reading</h2>
-<p style="font-size:13px;">Enter the three figures the thermometer shows: the
-highest and lowest it has recorded since it was last reset, and the temperature
-now. Recording the same location, date and session again corrects the earlier
-entry rather than adding a second one.</p>
+<p style="font-size:13px;">One reading per check: the temperature the
+thermometer shows now. The morning check and the afternoon check are entered
+separately, and the chart derives its three lines from them &mdash; morning in
+blue, afternoon in red, the average of the two in black. Recording the same
+location, date and session again corrects the earlier entry rather than adding
+a second one.</p>
 <form method="POST" action="{{ url_for('temperature') }}" class="dispense-form">
     <input type="hidden" name="action" value="record">
     <div class="common-section">
@@ -1745,16 +1747,8 @@ entry rather than adding a second one.</p>
             </select>
         </div>
         <div>
-            <label>Highest Recorded (&deg;C):</label>
-            <input name="max" type="number" step="0.1" required>
-        </div>
-        <div>
-            <label>Lowest Recorded (&deg;C):</label>
-            <input name="min" type="number" step="0.1" required>
-        </div>
-        <div>
-            <label>Actual Now (&deg;C):</label>
-            <input name="actual" type="number" step="0.1" required>
+            <label>Temperature (&deg;C):</label>
+            <input name="temp" type="number" step="0.1" required>
         </div>
         <div>
             <label>Initials:</label>
@@ -1808,9 +1802,10 @@ Checks recorded: <strong>{{ recorded_count }} of {{ expected_count }}</strong>
 {% if breach_count %}<strong style="color:#c62828;">Readings outside the
 acceptable range: {{ breach_count }}.</strong>{% else %}No reading fell outside
 the acceptable range.{% endif %}
-{% if impossible_count %}<br><strong style="color:#c62828;">{{ impossible_count }}
-reading(s) have an actual temperature outside their own recorded high and low,
-which a thermometer cannot show &mdash; check those rows for a typing error.</strong>{% endif %}
+<br><span style="color:#555;">On the chart the morning reading is the blue
+line, the afternoon reading is the red line, and the black line is the average
+of the two. A day missing either check has no average, so the black line breaks
+there.</span>
 </p>
 
 <div class="temp-chart">{{ chart|safe }}</div>
@@ -1820,16 +1815,14 @@ which a thermometer cannot show &mdash; check those rows for a typing error.</st
     <thead>
         <tr>
             <th rowspan="2">Day</th>
-            <th colspan="3">Morning</th>
-            <th colspan="3">Afternoon</th>
+            <th colspan="3">Temperature &deg;C</th>
             <th rowspan="2">Initials</th>
             <th rowspan="2">Times</th>
             <th rowspan="2">Notes</th>
             {% if is_admin %}<th rowspan="2" class="no-print">Actions</th>{% endif %}
         </tr>
         <tr>
-            <th>High</th><th>Low</th><th>Actual</th>
-            <th>High</th><th>Low</th><th>Actual</th>
+            <th>Morning</th><th>Afternoon</th><th>Average</th>
         </tr>
     </thead>
     <tbody>
@@ -6797,6 +6790,12 @@ TEMP_SERIES = [
 ]
 # The legend box is worded and ordered as the printed form has it.
 TEMP_LEGEND_ORDER = ['actual', 'min', 'max']
+# What each pen actually records at this pharmacy: one check in the morning and
+# one in the afternoon, with the day's average plotted between them. The form
+# only has three pens, so they are used this way.
+TEMP_PEN_MEANING = {'min': '= morning check',
+                    'max': '= afternoon check',
+                    'actual': '= average'}
 
 
 def _month_bounds(year, month):
@@ -6839,6 +6838,26 @@ def _temp_marker(shape, x, y, colour):
     return (f'<polygon points="{x:.1f},{y - 3.8:.1f} {x + 3.4:.1f},{y + 2.5:.1f} '
             f'{x - 3.4:.1f},{y + 2.5:.1f}" fill="{colour}" '
             f'stroke="#ffffff" stroke-width="1"/>')
+
+
+def _reading_temp(r):
+    """The single temperature on a reading, or None.
+
+    One figure is recorded per check. Readings saved under the earlier
+    three-figure shape (max / min / actual per session) fall back to their
+    'actual' value, which was the reading on the dial at check time and so
+    means the same thing — otherwise anything already entered would vanish
+    from the chart the moment this changed.
+    """
+    if not r:
+        return None
+    v = r.get('temp')
+    if v is None:
+        v = r.get('actual')
+    try:
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _temperature_chart(readings, year, month, location, thermometer=''):
@@ -6966,31 +6985,55 @@ def _temperature_chart(readings, year, month, location, thermometer=''):
             txt(cx(i + 1), grid_top - 4, 'a', 8, 'middle')
 
     # ---- the plotted readings -------------------------------------------
-    # Lines break wherever a check is missing. Joining across a gap would
-    # draw readings that were never taken, and a missed check is precisely
-    # what this chart exists to show.
+    # One reading is taken each morning and each afternoon. The form has three
+    # pens, so they are used the way this pharmacy uses them: the morning
+    # reading is marked in blue in that day's 'm' column, the afternoon
+    # reading in red in the 'a' column, and the day's average in black
+    # between the two.
+    #
+    # Morning is always blue even on a day the afternoon turns out cooler, so
+    # the red line dips under the blue one. That crossing is left visible on
+    # purpose: it is a real and unusual day, and sorting the two readings by
+    # size to keep the lines apart would hide it.
+    #
+    # Lines break wherever a check is missing. Joining across a gap would draw
+    # readings that were never taken, and a missed check is precisely what
+    # this chart exists to show. The average needs BOTH readings, so a single
+    # missed check breaks the black line for that day too.
+    def _series_points(key):
+        pts = []
+        for d in range(days_in_month):
+            m = _reading_temp(by_slot.get(d * 2))
+            a = _reading_temp(by_slot.get(d * 2 + 1))
+            if key == 'min':
+                v, x = m, cx(d * 2)
+            elif key == 'max':
+                v, x = a, cx(d * 2 + 1)
+            else:
+                v = None if (m is None or a is None) else (m + a) / 2.0
+                x = gx + (d * 2 + 1) * cw        # midway between m and a
+            pts.append((x, v))
+        return pts
+
     for key, _label, colour, shape, _pen in TEMP_SERIES:
+        points = _series_points(key)
         seg, segs = [], []
-        for i in range(days_in_month * 2):
-            r = by_slot.get(i)
-            v = r.get(key) if r else None
+        for x, v in points:
             if v is None:
                 if len(seg) > 1:
                     segs.append(seg)
                 seg = []
             else:
-                seg.append((cx(i), ty(v)))
+                seg.append((x, ty(v)))
         if len(seg) > 1:
             segs.append(seg)
         for sgm in segs:
-            pts = ' '.join(f'{x:.1f},{y:.1f}' for x, y in sgm)
-            o.append(f'<polyline points="{pts}" fill="none" stroke="{colour}" '
+            pts_attr = ' '.join(f'{x:.1f},{y:.1f}' for x, y in sgm)
+            o.append(f'<polyline points="{pts_attr}" fill="none" stroke="{colour}" '
                      f'stroke-width="1.3" stroke-linejoin="round"/>')
-        for i in range(days_in_month * 2):
-            r = by_slot.get(i)
-            v = r.get(key) if r else None
+        for x, v in points:
             if v is not None:
-                o.append(_temp_marker(shape, cx(i), ty(v), colour))
+                o.append(_temp_marker(shape, x, ty(v), colour))
 
     # ---- initials and time of check, as the form provides for -----------
     for i in range(days_in_month * 2):
@@ -7009,7 +7052,7 @@ def _temperature_chart(readings, year, month, location, thermometer=''):
     # ---- footer: signing block and the form's two legend boxes ----------
     fy = table_bot + 6
     box(M, fy, W - 2 * M, H - fy - 6)
-    o.append(f'<line x1="{W - M - 450}" y1="{fy:.1f}" x2="{W - M - 450}" '
+    o.append(f'<line x1="{W - M - 560}" y1="{fy:.1f}" x2="{W - M - 560}" '
              f'y2="{H - 6}" stroke="#000000" stroke-width="1"/>')
     o.append(f'<line x1="{W - M - 230}" y1="{fy:.1f}" x2="{W - M - 230}" '
              f'y2="{H - 6}" stroke="#000000" stroke-width="1"/>')
@@ -7019,7 +7062,10 @@ def _temperature_chart(readings, year, month, location, thermometer=''):
     txt(M + 8, fy + 44, 'Reviewed by: ______________________________', 10)
     txt(M + 300, fy + 44, 'Date: ____________________', 10)
 
-    lx = W - M - 442
+    # The form's own legend wording, kept as printed. What each pen records
+    # here is spelled out beside it, because the sheet is filed on its own and
+    # "Minimum" meaning "the morning check" is not self-evident off the page.
+    lx = W - M - 552
     series_by_key = {k: (lbl, col, sh, pen) for k, lbl, col, sh, pen in TEMP_SERIES}
     for n, key in enumerate(TEMP_LEGEND_ORDER):
         label, colour, shape, pen = series_by_key[key]
@@ -7028,6 +7074,7 @@ def _temperature_chart(readings, year, month, location, thermometer=''):
         txt(lx + 66, ly, 'use', 9.5)
         txt(lx + 88, ly, f'{pen} pen....', 9.5, fill=colour)
         o.append(_temp_marker(shape, lx + 164, ly - 3, colour))
+        txt(lx + 178, ly, TEMP_PEN_MEANING[key], 8, fill='#555555')
 
     rx = W - M - 222
     txt(rx, fy + 15, f'Acceptable Range: {lo_lim:g} °C to {hi_lim:g} °C', 9)
@@ -7094,30 +7141,20 @@ def temperature():
                     flash('A reading cannot be dated in the future.')
                     return redirect(url_for('temperature', location=loc))
                 try:
-                    hi = float(request.form['max'])
-                    lo = float(request.form['min'])
-                    now_t = float(request.form['actual'])
+                    temp = float(request.form['temp'])
                 except (KeyError, ValueError):
-                    flash('All three temperatures must be numbers.')
+                    flash('The temperature must be a number.')
                     return redirect(url_for('temperature', location=loc))
 
-                for v in (hi, lo, now_t):
-                    if not (TEMP_MIN_PLAUSIBLE <= v <= TEMP_MAX_PLAUSIBLE):
-                        flash(f'{v:g}°C is outside the range a room thermometer '
-                              f'can read — check for a mistyped figure.')
-                        return redirect(url_for('temperature', location=loc))
-                if hi < lo:
-                    # Refused rather than warned: a max-min thermometer cannot
-                    # show a high below its own low, so this is always a
-                    # transposition, and storing it would corrupt the chart.
-                    flash(f'The highest recorded ({hi:g}°C) cannot be below the '
-                          f'lowest ({lo:g}°C) — the two may be swapped.')
+                if not (TEMP_MIN_PLAUSIBLE <= temp <= TEMP_MAX_PLAUSIBLE):
+                    flash(f'{temp:g}°C is outside the range a room thermometer '
+                          f'can read — check for a mistyped figure.')
                     return redirect(url_for('temperature', location=loc))
 
                 prior = logs.find_one({'location': loc, 'date': day, 'session': sess})
                 doc = {
                     'location': loc, 'date': day, 'session': sess,
-                    'max': hi, 'min': lo, 'actual': now_t,
+                    'temp': temp,
                     # The official chart has an Initials row and a Write time
                     # row under the grid, so both are captured per check.
                     'initials': (request.form.get('initials') or '').strip()[:4],
@@ -7127,32 +7164,32 @@ def temperature():
                     'recorded_by': current_user, 'timestamp': datetime.utcnow(),
                 }
                 if prior:
-                    logs.update_one({'_id': prior['_id']}, {'$set': doc})
+                    # Drop the superseded three-figure fields, so a corrected
+                    # reading cannot leave a stale 'actual' behind for the
+                    # backward-compatible reader to pick up instead.
+                    logs.update_one({'_id': prior['_id']},
+                                    {'$set': doc,
+                                     '$unset': {'max': '', 'min': '', 'actual': ''}})
                     write_audit_entry(
                         'UPDATE', 'temperature_reading',
                         f'{loc} {day:%Y-%m-%d} {sess}',
-                        f"high {prior.get('max')}->{hi}, low {prior.get('min')}->{lo}, "
-                        f"actual {prior.get('actual')}->{now_t}")
+                        f'{_reading_temp(prior)}°C -> {temp}°C')
                     verb = 'corrected'
                 else:
                     logs.insert_one(doc)
                     write_audit_entry('CREATE', 'temperature_reading',
                                       f'{loc} {day:%Y-%m-%d} {sess}',
-                                      f'high {hi}, low {lo}, actual {now_t}')
+                                      f'{temp}°C')
                     verb = 'recorded'
 
                 lo_lim, hi_lim = TEMP_LIMITS.get(loc, (15.0, 25.0))
-                notes = []
-                if hi > hi_lim or lo < lo_lim:
-                    notes.append(f'outside the acceptable {lo_lim:g}–{hi_lim:g}°C range')
-                if not (lo <= now_t <= hi):
-                    notes.append('the actual reading sits outside its own recorded '
-                                 'high and low, which a thermometer cannot show')
-                if notes:
-                    flash(f'{loc} {day:%Y-%m-%d} {sess.lower()} {verb}, but '
-                          + '; and '.join(notes) + '.', 'partial')
+                if temp > hi_lim or temp < lo_lim:
+                    flash(f'{loc} {day:%Y-%m-%d} {sess.lower()} {verb} at '
+                          f'{temp:g}°C, outside the acceptable '
+                          f'{lo_lim:g}–{hi_lim:g}°C range.', 'partial')
                 else:
-                    flash(f'{loc} {day:%Y-%m-%d} {sess.lower()} {verb}.', 'success')
+                    flash(f'{loc} {day:%Y-%m-%d} {sess.lower()} {verb} at '
+                          f'{temp:g}°C.', 'success')
                 return redirect(url_for('temperature', location=loc,
                                         month=f'{day.year:04d}-{day.month:02d}'))
 
@@ -7175,17 +7212,13 @@ def temperature():
         lo_lim, hi_lim = TEMP_LIMITS.get(location, (15.0, 25.0))
 
         per_day = {}
-        breach_count = impossible_count = 0
+        breach_count = 0
         for r in readings:
             slot = per_day.setdefault(r['date'].day, {})
             slot[r.get('session')] = r
-            if (r.get('max') is not None and r['max'] > hi_lim) or \
-               (r.get('min') is not None and r['min'] < lo_lim):
+            v = _reading_temp(r)
+            if v is not None and (v > hi_lim or v < lo_lim):
                 breach_count += 1
-            if r.get('min') is not None and r.get('max') is not None \
-                    and r.get('actual') is not None \
-                    and not (r['min'] <= r['actual'] <= r['max']):
-                impossible_count += 1
 
         # The form carries one thermometer number for the sheet. Take the most
         # recent one recorded this month; it changes only if the instrument is
@@ -7203,14 +7236,19 @@ def temperature():
             am, pm = slot.get('Morning'), slot.get('Afternoon')
             if am and pm:
                 days_complete += 1
-            cells, breach, ids, notes, by = [], False, [], [], []
+            breach, ids, notes, by = False, [], [], []
             inits, times = [], []
+            # Morning, afternoon, and the average the black line plots. The
+            # average is shown only when both checks were done — averaging one
+            # reading with nothing would invent a figure for a missed check.
+            am_t, pm_t = _reading_temp(am), _reading_temp(pm)
+            cells = [am_t, pm_t,
+                     None if (am_t is None or pm_t is None)
+                     else round((am_t + pm_t) / 2.0, 1)]
             for r in (am, pm):
-                for key in ('max', 'min', 'actual'):
-                    cells.append(r.get(key) if r else None)
+                v = _reading_temp(r)
                 if r:
-                    if (r.get('max') is not None and r['max'] > hi_lim) or \
-                       (r.get('min') is not None and r['min'] < lo_lim):
+                    if v is not None and (v > hi_lim or v < lo_lim):
                         breach = True
                     if r.get('note'):
                         notes.append(r['note'])
@@ -7237,7 +7275,7 @@ def temperature():
             limit_lo=lo_lim, limit_hi=hi_lim,
             days_in_month=days_in_month, days_complete=days_complete,
             recorded_count=len(readings), expected_count=days_in_month * 2,
-            breach_count=breach_count, impossible_count=impossible_count,
+            breach_count=breach_count,
             rows=rows, thermometer=thermometer, default_initials=default_initials,
             chart=_temperature_chart(readings, year, month, location, thermometer))
 
@@ -7252,7 +7290,7 @@ def temperature():
             month_label=today.strftime('%B %Y'),
             limit_lo=15.0, limit_hi=25.0, days_in_month=30, days_complete=0,
             recorded_count=0, expected_count=60, breach_count=0,
-            impossible_count=0, rows=[], thermometer='', default_initials='',
+            rows=[], thermometer='', default_initials='',
             chart=''), 500
 
 
