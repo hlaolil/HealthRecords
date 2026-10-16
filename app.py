@@ -106,6 +106,10 @@ def init_db_collections():
         # line items are ordinary 'receive' transactions tagged with delivery_id.
         if 'deliveries' not in existing:
             db.create_collection('deliveries')
+        # NEW (Temperature log): one document per location per date per session
+        # (morning/afternoon), holding the max-min thermometer's three figures.
+        if 'temperature_logs' not in existing:
+            db.create_collection('temperature_logs')
 
         # audit_log: /audit page sorts by timestamp desc and filters by
         # action/target_type/target_id/user via $or regex, plus an exact
@@ -144,6 +148,13 @@ def init_db_collections():
         db['stock_take_counts'].create_index([('stock_take_id', 1), ('timestamp', -1)])
         db['stock_take_counts'].create_index([('med_name', 1)])
         db['stock_take_counts'].create_index([('discrepancy_type', 1)])
+        # The register is read a month at a time for one location, and a
+        # reading is uniquely identified by location + date + session — which
+        # the unique index enforces, so a second entry corrects the first
+        # instead of silently creating a duplicate row on the chart.
+        db['temperature_logs'].create_index([('location', 1), ('date', 1)])
+        db['temperature_logs'].create_index(
+            [('location', 1), ('date', 1), ('session', 1)], unique=True)
         db['deliveries'].create_index([('status', 1), ('opened_at', -1)])
         db['deliveries'].create_index([('reference', 1)], unique=True)
         db['deliveries'].create_index([('invoice_number', 1)])
@@ -303,6 +314,7 @@ def get_nav_links():
             <a href="/dispense">Dispensing</a> |
             <a href="/receive">Receiving</a> |
             <a href="/internal-issue">Internal Issues</a> |
+            <a href="/temperature">Temperature</a> |
             {add_med_link}
             <a href="/reports">Reports</a> |
             {stock_take_link}
@@ -1337,6 +1349,177 @@ document.addEventListener('DOMContentLoaded', async function() {
     });
 });
 </script>
+"""
+
+
+TEMPERATURE_TEMPLATE = CSS_STYLE + """
+<style>
+  /* Scoped to this page: the chart and register print, the controls do not. */
+  @media print {
+    .nav-links, .no-print, form.filter-form, .temp-entry { display: none !important; }
+    body { margin: 0; }
+    @page { size: A4 landscape; margin: 10mm; }
+  }
+  .temp-chart { border: 1px solid #ccc; padding: 8px; background: #fff; margin: 10px 0; }
+  .temp-breach { background-color: #f8d7da !important; }
+</style>
+<h1>Temperature Register</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
+{{ nav_links|safe }}
+{% if message %}
+    <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+
+<div class="temp-entry">
+<h2>Record a Reading</h2>
+<p style="font-size:13px;">Enter the three figures the thermometer shows: the
+highest and lowest it has recorded since it was last reset, and the temperature
+now. Recording the same location, date and session again corrects the earlier
+entry rather than adding a second one.</p>
+<form method="POST" action="{{ url_for('temperature') }}" class="dispense-form">
+    <input type="hidden" name="action" value="record">
+    <div class="common-section">
+        <div>
+            <label>Date:</label>
+            <input name="date" type="date" value="{{ today }}" max="{{ today }}" required>
+        </div>
+        <div>
+            <label>Location:</label>
+            <select name="location" required>
+                {% for loc in locations %}
+                <option value="{{ loc }}" {% if loc == location %}selected{% endif %}>{{ loc }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Session:</label>
+            <select name="session" required>
+                {% for s in sessions %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Highest Recorded (&deg;C):</label>
+            <input name="max" type="number" step="0.1" required>
+        </div>
+        <div>
+            <label>Lowest Recorded (&deg;C):</label>
+            <input name="min" type="number" step="0.1" required>
+        </div>
+        <div>
+            <label>Actual Now (&deg;C):</label>
+            <input name="actual" type="number" step="0.1" required>
+        </div>
+        <div>
+            <label>Initials:</label>
+            <input name="initials" type="text" maxlength="4" size="4"
+                   value="{{ default_initials }}" required>
+        </div>
+        <div>
+            <label>Time of Check:</label>
+            <input name="check_time" type="time" required>
+        </div>
+        <div>
+            <label>Thermometer No.:</label>
+            <input name="thermometer" type="text" value="{{ thermometer }}">
+        </div>
+        <div>
+            <label>Note (optional):</label>
+            <input name="note" type="text" placeholder="Thermometer reset, remarks">
+        </div>
+    </div>
+    <div class="form-buttons"><input type="submit" value="Save Reading"></div>
+</form>
+</div>
+
+<form method="GET" action="{{ url_for('temperature') }}" class="filter-form">
+    <div class="filter-section">
+        <div>
+            <label>Location:</label>
+            <select name="location">
+                {% for loc in locations %}
+                <option value="{{ loc }}" {% if loc == location %}selected{% endif %}>{{ loc }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Month:</label>
+            <input name="month" type="month" value="{{ month_value }}">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Show Month">
+            <button type="button" onclick="window.print();">Print Chart &amp; Register</button>
+        </div>
+    </div>
+</form>
+
+<h2>{{ location }} &mdash; {{ month_label }}</h2>
+<p style="font-size:13px;">
+Acceptable range for this location: <strong>{{ "%g"|format(limit_lo) }}&deg;C to
+{{ "%g"|format(limit_hi) }}&deg;C</strong>.
+Checks recorded: <strong>{{ recorded_count }} of {{ expected_count }}</strong>
+({{ days_complete }} of {{ days_in_month }} days with both checks).
+{% if breach_count %}<strong style="color:#c62828;">Readings outside the
+acceptable range: {{ breach_count }}.</strong>{% else %}No reading fell outside
+the acceptable range.{% endif %}
+{% if impossible_count %}<br><strong style="color:#c62828;">{{ impossible_count }}
+reading(s) have an actual temperature outside their own recorded high and low,
+which a thermometer cannot show &mdash; check those rows for a typing error.</strong>{% endif %}
+</p>
+
+<div class="temp-chart">{{ chart|safe }}</div>
+
+<h3>Register</h3>
+<table>
+    <thead>
+        <tr>
+            <th rowspan="2">Day</th>
+            <th colspan="3">Morning</th>
+            <th colspan="3">Afternoon</th>
+            <th rowspan="2">Initials</th>
+            <th rowspan="2">Times</th>
+            <th rowspan="2">Notes</th>
+            {% if is_admin %}<th rowspan="2" class="no-print">Actions</th>{% endif %}
+        </tr>
+        <tr>
+            <th>High</th><th>Low</th><th>Actual</th>
+            <th>High</th><th>Low</th><th>Actual</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+        <tr class="{% if row.breach %}temp-breach{% endif %}">
+            <td>{{ row.day }}</td>
+            {% for cell in row.cells %}
+            <td>{% if cell is not none %}{{ "%g"|format(cell) }}{% else %}&ndash;{% endif %}</td>
+            {% endfor %}
+            <td>{{ row.initials or '-' }}</td>
+            <td>{{ row.times or '-' }}</td>
+            <td>{{ row.note or '-' }}</td>
+            {% if is_admin %}
+            <td class="action-buttons no-print">
+            {% if row.ids %}
+                {% for s, rid in row.ids %}
+                <form method="POST" action="{{ url_for('temperature') }}" style="display:inline;">
+                    <input type="hidden" name="action" value="delete">
+                    <input type="hidden" name="reading_id" value="{{ rid }}">
+                    <input type="hidden" name="location" value="{{ location }}">
+                    <input type="hidden" name="month" value="{{ month_value }}">
+                    <button type="submit" class="delete-btn"
+                            onclick="return confirm('Delete the {{ s|lower }} reading for day {{ row.day }}?');">{{ s[0] }}</button>
+                </form>
+                {% endfor %}
+            {% else %}<span>-</span>{% endif %}
+            </td>
+            {% endif %}
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+<p style="font-size:13px;">A dash means no reading was recorded for that check.
+Gaps are left as gaps on the chart rather than joined up, so a missed check stays
+visible.</p>
+<p style="margin-top:18px;">Checked by: ______________________ &nbsp;&nbsp;
+Signature: ______________________ &nbsp;&nbsp; Date: ______________</p>
 """
 
 
@@ -6204,6 +6387,528 @@ def internal_issue():
             INTERNAL_ISSUE_TEMPLATE, nav_links=get_nav_links(),
             message='Database connection failed. Please try again later.',
             departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=[]), 500
+
+
+# =======================================================================
+# NEW (Temperature log): monthly max-min thermometer register.
+#
+# A max-min thermometer gives THREE figures at each check — the highest and
+# lowest it has seen since it was last reset, and the temperature right now.
+# All three are recorded, morning and afternoon, for each monitored location,
+# and the month's chart plots them as max (red), min (blue) and actual
+# (black), which is the form an inspector expects to see.
+# =======================================================================
+TEMP_LOCATIONS = ['Dispensary', 'Store 1', 'Store 2', 'Fridge']
+TEMP_SESSIONS = ['Morning', 'Afternoon']
+
+# Acceptable storage range per location, and the "cold spot"/"hot spot" warning
+# bands the official chart names in its legend box.
+TEMP_LIMITS = {
+    'Dispensary': (15.0, 25.0),
+    'Store 1': (15.0, 25.0),
+    'Store 2': (15.0, 25.0),
+    'Fridge': (2.0, 8.0),
+}
+TEMP_SPOTS = {
+    'Dispensary': ((15.0, 17.5), (23.0, 25.0)),
+    'Store 1': ((15.0, 17.5), (23.0, 25.0)),
+    'Store 2': ((15.0, 17.5), (23.0, 25.0)),
+    'Fridge': ((2.0, 3.0), (7.0, 8.0)),
+}
+TEMP_MIN_PLAUSIBLE, TEMP_MAX_PLAUSIBLE = -50.0, 80.0
+
+# The temperature axis of SR-TC-001 is a stack of 14 cells with only five of
+# them labelled: +30, +26, +22, +18, +15. Note the spacing is NOT uniform —
+# the first three gaps span 4 degrees over three rows, the last spans 3. That
+# is deliberate on the form: +15 is the lower acceptable limit, so it was put
+# on a row line rather than left to fall between two. Positions are therefore
+# interpolated BETWEEN the printed labels, which puts a reading exactly where a
+# person reading the same labels would place it by hand.
+#
+# The store-room scale is the official one. The fridge scale is the same grid
+# re-labelled for 2-8 degree storage, since the reference chart covers store
+# rooms only.
+TEMP_SCALES = {
+    'room': {'anchors': [(0, 30.0), (3, 26.0), (6, 22.0), (9, 18.0),
+                         (12, 15.0), (13, 14.0)],
+             'labelled': {0: '+30°C', 3: '+26°C', 6: '+22°C',
+                          9: '+18°C', 12: '+15°C'}},
+    'fridge': {'anchors': [(0, 10.0), (3, 8.0), (6, 6.0), (9, 4.0),
+                           (12, 2.0), (13, 1.0)],
+               'labelled': {0: '+10°C', 3: '+8°C', 6: '+6°C',
+                            9: '+4°C', 12: '+2°C'}},
+}
+TEMP_ROWS = 14
+
+# The chart's own convention, printed in its legend: actual in black pen,
+# minimum in blue, maximum in red. Each series also carries its own marker
+# shape — these charts are photocopied, and once the colour is gone red and
+# blue are the same grey. Shape survives that; colour does not.
+TEMP_SERIES = [
+    ('max', 'Maximum', '#cc0000', 'circle', 'Red'),
+    ('min', 'Minimum', '#0047b3', 'square', 'Blue'),
+    ('actual', 'Actual', '#000000', 'triangle', 'Black'),
+]
+# The legend box is worded and ordered as the printed form has it.
+TEMP_LEGEND_ORDER = ['actual', 'min', 'max']
+
+
+def _month_bounds(year, month):
+    start = datetime(year, month, 1)
+    end = datetime(year + (month == 12), 1 if month == 12 else month + 1, 1)
+    return start, end, (end - start).days
+
+
+def _temp_scale(location):
+    return TEMP_SCALES['fridge' if location == 'Fridge' else 'room']
+
+
+def _temp_row(value, anchors):
+    """Row position (fractional, 0 at the top) for a temperature.
+
+    Interpolates between the printed labels, so a value lands where a person
+    reading the same labels would put it. Out-of-scale values clamp to the end
+    rows rather than being dropped — a reading off the top of the chart is
+    exactly the one that must not go missing.
+    """
+    if value >= anchors[0][1]:
+        return 0.0
+    if value <= anchors[-1][1]:
+        return float(anchors[-1][0])
+    for (r1, t1), (r2, t2) in zip(anchors, anchors[1:]):
+        if t2 <= value <= t1:
+            if t1 == t2:
+                return float(r1)
+            return r1 + (t1 - value) / (t1 - t2) * (r2 - r1)
+    return float(anchors[-1][0])
+
+
+def _temp_marker(shape, x, y, colour):
+    if shape == 'circle':
+        return (f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.2" fill="{colour}" '
+                f'stroke="#ffffff" stroke-width="1"/>')
+    if shape == 'square':
+        return (f'<rect x="{x - 2.9:.1f}" y="{y - 2.9:.1f}" width="5.8" height="5.8" '
+                f'fill="{colour}" stroke="#ffffff" stroke-width="1"/>')
+    return (f'<polygon points="{x:.1f},{y - 3.8:.1f} {x + 3.4:.1f},{y + 2.5:.1f} '
+            f'{x - 3.4:.1f},{y + 2.5:.1f}" fill="{colour}" '
+            f'stroke="#ffffff" stroke-width="1"/>')
+
+
+def _temperature_chart(readings, year, month, location, thermometer=''):
+    """SR-TC-001 reproduced as SVG, already filled in from the recorded data.
+
+    Server-rendered with no JavaScript, so the printed sheet is exactly what
+    the screen shows. Everything interpolated into the output is either a
+    number, a fixed constant, or escaped.
+    """
+    start, _, days_in_month = _month_bounds(year, month)
+    lo_lim, hi_lim = TEMP_LIMITS.get(location, (15.0, 25.0))
+    cold, hot = TEMP_SPOTS.get(location, ((15.0, 17.5), (23.0, 25.0)))
+    scale = _temp_scale(location)
+    anchors, labelled = scale['anchors'], scale['labelled']
+
+    by_slot = {}
+    for r in readings:
+        idx = (r['date'].day - 1) * 2 + (1 if r.get('session') == 'Afternoon' else 0)
+        by_slot[idx] = r
+
+    W, H = 1190, 648
+    M = 8                      # page margin
+    LBL = 104                  # left label column
+    DAYS, COLS = 31, 62        # the form always prints 31 days
+    gx, gw = M + LBL, W - 2 * M - LBL
+    cw = gw / COLS
+    head_y, head_h = 96, 22    # "Days of the month" strip
+    ti_h = 15                  # "Time interval" strip
+    row_h = 26
+    grid_top = head_y + head_h + ti_h
+    grid_bot = grid_top + TEMP_ROWS * row_h
+    init_y, time_y = grid_bot, grid_bot + 20
+    table_bot = time_y + 20
+
+    def cx(i):
+        return gx + (i + 0.5) * cw
+
+    def ry(row):
+        return grid_top + (row + 0.5) * row_h
+
+    def ty(value):
+        return ry(_temp_row(value, anchors))
+
+    o = [f'<svg viewBox="0 0 {W} {H}" width="100%" '
+         f'role="img" aria-label="Store room temperature chart" '
+         f'style="background:#ffffff;font-family:Arial,Helvetica,sans-serif">',
+         f'<rect x="0" y="0" width="{W}" height="{H}" fill="#ffffff"/>']
+
+    def box(x, y, w, h, sw=1):
+        o.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" '
+                 f'fill="none" stroke="#000000" stroke-width="{sw}"/>')
+
+    def txt(x, y, s, size=10, anchor='start', weight='normal', fill='#000000'):
+        o.append(f'<text x="{x:.1f}" y="{y:.1f}" font-size="{size}" '
+                 f'text-anchor="{anchor}" font-weight="{weight}" fill="{fill}">'
+                 f'{escape(str(s))}</text>')
+
+    # ---- title block, matching the form's own header --------------------
+    box(M, 8, W - 2 * M, 56)
+    o.append(f'<line x1="{M + 86}" y1="8" x2="{M + 86}" y2="64" '
+             f'stroke="#000000" stroke-width="1"/>')
+    o.append(f'<line x1="{W - M - 196}" y1="8" x2="{W - M - 196}" y2="64" '
+             f'stroke="#000000" stroke-width="1"/>')
+    o.append(f'<line x1="{W - M - 196}" y1="36" x2="{W - M}" y2="36" '
+             f'stroke="#000000" stroke-width="1"/>')
+    txt(M + 43, 40, 'Lesotho', 8, 'middle', fill='#666666')
+    txt(M + 43, 50, 'Ministry of Health', 7, 'middle', fill='#666666')
+    txt(M + 98, 32, 'STORE ROOM TEMPERATURE CHART', 16, weight='bold')
+    txt(M + 98, 54, f'Month: {start:%B}', 11)
+    txt(M + 260, 54, f'Year: {year}', 11)
+    txt(M + 400, 54, f'Location: {location}', 11, weight='bold')
+    txt(M + 660, 40, 'M – Morning', 10)
+    txt(M + 660, 54, 'A – Afternoon', 10)
+    txt(W - M - 188, 26, 'Document no: SR-TC-001', 9.5)
+    txt(W - M - 188, 54, 'Effective date: 12/2018', 9.5)
+
+    # ---- out-of-range tint, so a breach is visible at a glance ----------
+    # Very light: it must not survive a photocopy as anything that could be
+    # mistaken for a mark.
+    top_lim_y, bot_lim_y = ty(hi_lim), ty(lo_lim)
+    o.append(f'<rect x="{gx:.1f}" y="{grid_top:.1f}" width="{gw:.1f}" '
+             f'height="{top_lim_y - grid_top:.1f}" fill="#fdf0f0"/>')
+    o.append(f'<rect x="{gx:.1f}" y="{bot_lim_y:.1f}" width="{gw:.1f}" '
+             f'height="{grid_bot - bot_lim_y:.1f}" fill="#eef3fb"/>')
+
+    # ---- the grid -------------------------------------------------------
+    box(M, head_y, W - 2 * M, table_bot - head_y)
+    for y in (head_y + head_h, grid_top, grid_bot, init_y + 20):
+        o.append(f'<line x1="{M}" y1="{y:.1f}" x2="{W - M}" y2="{y:.1f}" '
+                 f'stroke="#000000" stroke-width="1"/>')
+    o.append(f'<line x1="{gx:.1f}" y1="{head_y}" x2="{gx:.1f}" '
+             f'y2="{table_bot:.1f}" stroke="#000000" stroke-width="1"/>')
+    for row in range(1, TEMP_ROWS):
+        y = grid_top + row * row_h
+        o.append(f'<line x1="{M}" y1="{y:.1f}" x2="{W - M}" y2="{y:.1f}" '
+                 f'stroke="#9e9e9e" stroke-width="0.5"/>')
+
+    txt(M + 4, head_y + 10, 'Days of the', 8.5)
+    txt(M + 4, head_y + 19, 'month', 8.5)
+    txt(M + 4, grid_top - 4, 'Time interval', 8.5)
+    txt(M + 4, init_y + 14, 'Initials', 9)
+    txt(M + 4, time_y + 14, 'Write time', 9)
+
+    for row, label in labelled.items():
+        txt(M + 4, ry(row) + 4, label, 9.5)
+
+    for d in range(1, DAYS + 1):
+        i = (d - 1) * 2
+        x0, x1 = gx + i * cw, gx + (i + 2) * cw
+        real = d <= days_in_month
+        if not real:
+            # The form always has 31 columns; a short month greys the surplus
+            # so nobody reads a blank column as a missed check.
+            o.append(f'<rect x="{x0:.1f}" y="{head_y:.1f}" width="{2 * cw:.1f}" '
+                     f'height="{table_bot - head_y:.1f}" fill="#f0f0f0"/>')
+        o.append(f'<line x1="{x1:.1f}" y1="{head_y}" x2="{x1:.1f}" '
+                 f'y2="{table_bot:.1f}" stroke="#000000" stroke-width="1"/>')
+        o.append(f'<line x1="{gx + (i + 1) * cw:.1f}" y1="{head_y + head_h:.1f}" '
+                 f'x2="{gx + (i + 1) * cw:.1f}" y2="{table_bot:.1f}" '
+                 f'stroke="#9e9e9e" stroke-width="0.5"/>')
+        txt((x0 + x1) / 2, head_y + 16, d, 9.5, 'middle', 'bold',
+            '#000000' if real else '#999999')
+        if real:
+            txt(cx(i), grid_top - 4, 'm', 8, 'middle')
+            txt(cx(i + 1), grid_top - 4, 'a', 8, 'middle')
+
+    # ---- the plotted readings -------------------------------------------
+    # Lines break wherever a check is missing. Joining across a gap would
+    # draw readings that were never taken, and a missed check is precisely
+    # what this chart exists to show.
+    for key, _label, colour, shape, _pen in TEMP_SERIES:
+        seg, segs = [], []
+        for i in range(days_in_month * 2):
+            r = by_slot.get(i)
+            v = r.get(key) if r else None
+            if v is None:
+                if len(seg) > 1:
+                    segs.append(seg)
+                seg = []
+            else:
+                seg.append((cx(i), ty(v)))
+        if len(seg) > 1:
+            segs.append(seg)
+        for sgm in segs:
+            pts = ' '.join(f'{x:.1f},{y:.1f}' for x, y in sgm)
+            o.append(f'<polyline points="{pts}" fill="none" stroke="{colour}" '
+                     f'stroke-width="1.3" stroke-linejoin="round"/>')
+        for i in range(days_in_month * 2):
+            r = by_slot.get(i)
+            v = r.get(key) if r else None
+            if v is not None:
+                o.append(_temp_marker(shape, cx(i), ty(v), colour))
+
+    # ---- initials and time of check, as the form provides for -----------
+    for i in range(days_in_month * 2):
+        r = by_slot.get(i)
+        if not r:
+            continue
+        if r.get('initials'):
+            txt(cx(i), init_y + 14, str(r['initials'])[:4], 7.5, 'middle')
+        if r.get('check_time'):
+            # Rotated: at 62 columns two horizontal times per day overlap.
+            tx_, ty_ = cx(i), time_y + 17
+            o.append(f'<text x="{tx_:.1f}" y="{ty_:.1f}" font-size="7" '
+                     f'text-anchor="start" transform="rotate(-90 {tx_:.1f} {ty_:.1f})" '
+                     f'fill="#000000">{escape(str(r["check_time"])[:5])}</text>')
+
+    # ---- footer: signing block and the form's two legend boxes ----------
+    fy = table_bot + 6
+    box(M, fy, W - 2 * M, H - fy - 6)
+    o.append(f'<line x1="{W - M - 450}" y1="{fy:.1f}" x2="{W - M - 450}" '
+             f'y2="{H - 6}" stroke="#000000" stroke-width="1"/>')
+    o.append(f'<line x1="{W - M - 230}" y1="{fy:.1f}" x2="{W - M - 230}" '
+             f'y2="{H - 6}" stroke="#000000" stroke-width="1"/>')
+    txt(M + 8, fy + 20, f'Thermometer Number: {thermometer or "____________________"}', 10)
+    txt(M + 300, fy + 20, f'Month: {start:%B}', 10)
+    txt(M + 430, fy + 20, f'Year: {year}', 10)
+    txt(M + 8, fy + 44, 'Reviewed by: ______________________________', 10)
+    txt(M + 300, fy + 44, 'Date: ____________________', 10)
+
+    lx = W - M - 442
+    series_by_key = {k: (lbl, col, sh, pen) for k, lbl, col, sh, pen in TEMP_SERIES}
+    for n, key in enumerate(TEMP_LEGEND_ORDER):
+        label, colour, shape, pen = series_by_key[key]
+        ly = fy + 17 + n * 15
+        txt(lx, ly, f'{label}....', 9.5, weight='bold')
+        txt(lx + 66, ly, 'use', 9.5)
+        txt(lx + 88, ly, f'{pen} pen....', 9.5, fill=colour)
+        o.append(_temp_marker(shape, lx + 164, ly - 3, colour))
+
+    rx = W - M - 222
+    txt(rx, fy + 15, f'Acceptable Range: {lo_lim:g} °C to {hi_lim:g} °C', 9)
+    txt(rx, fy + 29, f'Cold spot + {cold[0]:g}°C to + {cold[1]:g}°C', 9)
+    txt(rx, fy + 43, f'Hot spot + {hot[0]:g}°C to + {hot[1]:g}°C', 9)
+
+    o.append('</svg>')
+    return '\n'.join(o)
+
+
+@app.route('/temperature', methods=['GET', 'POST'])
+@login_required
+def temperature():
+    current_user = session['user']['name']
+    flashed = get_flashed_messages(with_categories=True)
+    message_class, message = flashed[0] if flashed else (None, None)
+    is_admin = session['user'].get('role') == 'admin'
+    today = datetime.utcnow().date()
+
+    def chosen_location(src):
+        loc = (src.get('location') or '').strip()
+        return loc if loc in TEMP_LOCATIONS else TEMP_LOCATIONS[0]
+
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        logs = db['temperature_logs']
+
+        if request.method == 'POST':
+            action = request.form.get('action')
+            loc = chosen_location(request.form)
+
+            if action == 'delete':
+                if not is_admin:
+                    flash('Access denied. Only admins can delete a reading.')
+                    return redirect(url_for('temperature'))
+                try:
+                    doc = logs.find_one({'_id': ObjectId(request.form.get('reading_id', ''))})
+                except (InvalidId, TypeError):
+                    doc = None
+                if not doc:
+                    flash('That reading was not found.')
+                else:
+                    logs.delete_one({'_id': doc['_id']})
+                    write_audit_entry(
+                        'DELETE', 'temperature_reading',
+                        f"{doc.get('location')} {doc['date']:%Y-%m-%d} {doc.get('session')}",
+                        f"removed reading high {doc.get('max')} low {doc.get('min')} "
+                        f"actual {doc.get('actual')}")
+                    flash(f"Reading deleted for {doc.get('location')} on "
+                          f"{doc['date']:%Y-%m-%d} ({doc.get('session')}).", 'success')
+                return redirect(url_for('temperature', location=loc,
+                                        month=request.form.get('month') or ''))
+
+            if action == 'record':
+                sess = (request.form.get('session') or '').strip()
+                if sess not in TEMP_SESSIONS:
+                    flash('Choose morning or afternoon.')
+                    return redirect(url_for('temperature', location=loc))
+                try:
+                    day = datetime.strptime(request.form['date'], '%Y-%m-%d')
+                except (KeyError, ValueError):
+                    flash('Enter a valid date.')
+                    return redirect(url_for('temperature', location=loc))
+                if day.date() > today:
+                    flash('A reading cannot be dated in the future.')
+                    return redirect(url_for('temperature', location=loc))
+                try:
+                    hi = float(request.form['max'])
+                    lo = float(request.form['min'])
+                    now_t = float(request.form['actual'])
+                except (KeyError, ValueError):
+                    flash('All three temperatures must be numbers.')
+                    return redirect(url_for('temperature', location=loc))
+
+                for v in (hi, lo, now_t):
+                    if not (TEMP_MIN_PLAUSIBLE <= v <= TEMP_MAX_PLAUSIBLE):
+                        flash(f'{v:g}°C is outside the range a room thermometer '
+                              f'can read — check for a mistyped figure.')
+                        return redirect(url_for('temperature', location=loc))
+                if hi < lo:
+                    # Refused rather than warned: a max-min thermometer cannot
+                    # show a high below its own low, so this is always a
+                    # transposition, and storing it would corrupt the chart.
+                    flash(f'The highest recorded ({hi:g}°C) cannot be below the '
+                          f'lowest ({lo:g}°C) — the two may be swapped.')
+                    return redirect(url_for('temperature', location=loc))
+
+                prior = logs.find_one({'location': loc, 'date': day, 'session': sess})
+                doc = {
+                    'location': loc, 'date': day, 'session': sess,
+                    'max': hi, 'min': lo, 'actual': now_t,
+                    # The official chart has an Initials row and a Write time
+                    # row under the grid, so both are captured per check.
+                    'initials': (request.form.get('initials') or '').strip()[:4],
+                    'check_time': (request.form.get('check_time') or '').strip()[:5],
+                    'thermometer': (request.form.get('thermometer') or '').strip(),
+                    'note': (request.form.get('note') or '').strip(),
+                    'recorded_by': current_user, 'timestamp': datetime.utcnow(),
+                }
+                if prior:
+                    logs.update_one({'_id': prior['_id']}, {'$set': doc})
+                    write_audit_entry(
+                        'UPDATE', 'temperature_reading',
+                        f'{loc} {day:%Y-%m-%d} {sess}',
+                        f"high {prior.get('max')}->{hi}, low {prior.get('min')}->{lo}, "
+                        f"actual {prior.get('actual')}->{now_t}")
+                    verb = 'corrected'
+                else:
+                    logs.insert_one(doc)
+                    write_audit_entry('CREATE', 'temperature_reading',
+                                      f'{loc} {day:%Y-%m-%d} {sess}',
+                                      f'high {hi}, low {lo}, actual {now_t}')
+                    verb = 'recorded'
+
+                lo_lim, hi_lim = TEMP_LIMITS.get(loc, (15.0, 25.0))
+                notes = []
+                if hi > hi_lim or lo < lo_lim:
+                    notes.append(f'outside the acceptable {lo_lim:g}–{hi_lim:g}°C range')
+                if not (lo <= now_t <= hi):
+                    notes.append('the actual reading sits outside its own recorded '
+                                 'high and low, which a thermometer cannot show')
+                if notes:
+                    flash(f'{loc} {day:%Y-%m-%d} {sess.lower()} {verb}, but '
+                          + '; and '.join(notes) + '.', 'partial')
+                else:
+                    flash(f'{loc} {day:%Y-%m-%d} {sess.lower()} {verb}.', 'success')
+                return redirect(url_for('temperature', location=loc,
+                                        month=f'{day.year:04d}-{day.month:02d}'))
+
+            flash('Unknown action.')
+            return redirect(url_for('temperature'))
+
+        # ----- GET: one location, one calendar month --------------------
+        location = chosen_location(request.args)
+        raw_month = (request.args.get('month') or '').strip()
+        try:
+            year, month = int(raw_month[:4]), int(raw_month[5:7])
+            datetime(year, month, 1)
+        except (ValueError, IndexError):
+            year, month = today.year, today.month
+        start, end, days_in_month = _month_bounds(year, month)
+
+        readings = list(logs.find({'location': location,
+                                   'date': {'$gte': start, '$lt': end}})
+                        .sort([('date', 1), ('session', 1)]))
+        lo_lim, hi_lim = TEMP_LIMITS.get(location, (15.0, 25.0))
+
+        per_day = {}
+        breach_count = impossible_count = 0
+        for r in readings:
+            slot = per_day.setdefault(r['date'].day, {})
+            slot[r.get('session')] = r
+            if (r.get('max') is not None and r['max'] > hi_lim) or \
+               (r.get('min') is not None and r['min'] < lo_lim):
+                breach_count += 1
+            if r.get('min') is not None and r.get('max') is not None \
+                    and r.get('actual') is not None \
+                    and not (r['min'] <= r['actual'] <= r['max']):
+                impossible_count += 1
+
+        # The form carries one thermometer number for the sheet. Take the most
+        # recent one recorded this month; it changes only if the instrument is
+        # replaced, in which case the latest is the one now in the room.
+        thermometer = ''
+        for r in sorted(readings, key=lambda r: r['timestamp'], reverse=True):
+            if r.get('thermometer'):
+                thermometer = r['thermometer']
+                break
+        default_initials = ''.join(w[0] for w in current_user.split() if w)[:4].upper()
+
+        rows, days_complete = [], 0
+        for d in range(1, days_in_month + 1):
+            slot = per_day.get(d, {})
+            am, pm = slot.get('Morning'), slot.get('Afternoon')
+            if am and pm:
+                days_complete += 1
+            cells, breach, ids, notes, by = [], False, [], [], []
+            inits, times = [], []
+            for r in (am, pm):
+                for key in ('max', 'min', 'actual'):
+                    cells.append(r.get(key) if r else None)
+                if r:
+                    if (r.get('max') is not None and r['max'] > hi_lim) or \
+                       (r.get('min') is not None and r['min'] < lo_lim):
+                        breach = True
+                    if r.get('note'):
+                        notes.append(r['note'])
+                    if r.get('recorded_by') and r['recorded_by'] not in by:
+                        by.append(r['recorded_by'])
+                    if r.get('initials'):
+                        inits.append(r['initials'])
+                    if r.get('check_time'):
+                        times.append(r['check_time'])
+            for label, r in (('Morning', am), ('Afternoon', pm)):
+                if r:
+                    ids.append((label, str(r['_id'])))
+            rows.append({'day': d, 'cells': cells, 'breach': breach, 'ids': ids,
+                         'note': '; '.join(notes), 'by': ', '.join(by),
+                         'initials': ' / '.join(inits), 'times': ' / '.join(times)})
+
+        return render_template_string(
+            TEMPERATURE_TEMPLATE, nav_links=get_nav_links(), message=message,
+            message_class=message_class, is_admin=is_admin,
+            locations=TEMP_LOCATIONS, sessions=TEMP_SESSIONS,
+            location=location, today=today.strftime('%Y-%m-%d'),
+            month_value=f'{year:04d}-{month:02d}',
+            month_label=start.strftime('%B %Y'),
+            limit_lo=lo_lim, limit_hi=hi_lim,
+            days_in_month=days_in_month, days_complete=days_complete,
+            recorded_count=len(readings), expected_count=days_in_month * 2,
+            breach_count=breach_count, impossible_count=impossible_count,
+            rows=rows, thermometer=thermometer, default_initials=default_initials,
+            chart=_temperature_chart(readings, year, month, location, thermometer))
+
+    except ServerSelectionTimeoutError:
+        return render_template_string(
+            TEMPERATURE_TEMPLATE, nav_links=get_nav_links(),
+            message='Database connection failed. Please try again later.',
+            message_class='error', is_admin=is_admin,
+            locations=TEMP_LOCATIONS, sessions=TEMP_SESSIONS,
+            location=TEMP_LOCATIONS[0], today=today.strftime('%Y-%m-%d'),
+            month_value=f'{today.year:04d}-{today.month:02d}',
+            month_label=today.strftime('%B %Y'),
+            limit_lo=15.0, limit_hi=25.0, days_in_month=30, days_complete=0,
+            recorded_count=0, expected_count=60, breach_count=0,
+            impossible_count=0, rows=[], thermometer='', default_initials='',
+            chart=''), 500
 
 
 @app.route('/dashboard', methods=['GET'])
