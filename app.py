@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 from flask import Flask, request, render_template_string, jsonify, redirect, url_for, session, flash, get_flashed_messages
 from functools import wraps
@@ -110,6 +111,18 @@ def init_db_collections():
         # (morning/afternoon), holding the max-min thermometer's three figures.
         if 'temperature_logs' not in existing:
             db.create_collection('temperature_logs')
+        # NEW (Equipment loans): crutches, moon boots and arm slings are lent
+        # out and come back, so they are NOT stock. A consumable leaves and is
+        # gone; a loaned item is still owned by the pharmacy while it is off
+        # the shelf. Holding them in `medications` would give them a balance
+        # that drops on issue, an AMC, a reorder level and an expiry date, all
+        # of which are meaningless here and would corrupt the stock reports.
+        # loan_items is the asset register, one document per physical item;
+        # loans is the lending ledger, one document per issue.
+        if 'loan_items' not in existing:
+            db.create_collection('loan_items')
+        if 'loans' not in existing:
+            db.create_collection('loans')
 
         # audit_log: /audit page sorts by timestamp desc and filters by
         # action/target_type/target_id/user via $or regex, plus an exact
@@ -155,6 +168,21 @@ def init_db_collections():
         db['temperature_logs'].create_index([('location', 1), ('date', 1)])
         db['temperature_logs'].create_index(
             [('location', 1), ('date', 1), ('session', 1)], unique=True)
+
+        # loan_items: the asset register. item_code is how staff refer to a
+        # physical item ("CR-003"), so it must be unique or two crutch pairs
+        # share an identity and the loan history becomes unreadable.
+        db['loan_items'].create_index([('item_code', 1)], unique=True)
+        db['loan_items'].create_index([('item_type', 1), ('status', 1)])
+
+        # loans: the lending ledger. The hot query is "what is still out",
+        # which is status + due_date for the overdue list, and item_code for
+        # the double-issue guard and an item's own history.
+        db['loans'].create_index([('status', 1), ('due_date', 1)])
+        db['loans'].create_index([('item_code', 1), ('issued_date', -1)])
+        db['loans'].create_index([('patient_name', 1)])
+        db['loans'].create_index([('issued_date', -1)])
+        db['loans'].create_index([('loan_ref', 1)], unique=True)
         db['deliveries'].create_index([('status', 1), ('opened_at', -1)])
         db['deliveries'].create_index([('reference', 1)], unique=True)
         db['deliveries'].create_index([('invoice_number', 1)])
@@ -308,6 +336,9 @@ def get_nav_links():
         audit_link = '<a href="/audit">Audit Log</a> | ' if is_admin else ''
         # NEW (Stock Take): admin-only physical count page.
         stock_take_link = '<a href="/stock-take">Stock Take</a> | ' if is_admin else ''
+        # NEW (Equipment loans): the lending desk is counter work, so everyone
+        # reaches it; the asset register is an admin decision.
+        loan_items_link = '<a href="/loan-items">Equipment Register</a> | ' if is_admin else ''
         return f"""
         <p class="nav-links"><strong>Navigate:</strong>
             <a href="/dashboard">Dashboard</a> |
@@ -315,7 +346,9 @@ def get_nav_links():
             <a href="/receive">Receiving</a> |
             <a href="/internal-issue">Internal Issues</a> |
             <a href="/temperature">Temperature</a> |
+            <a href="/loans">Loans</a> |
             {add_med_link}
+            {loan_items_link}
             <a href="/reports">Reports</a> |
             {stock_take_link}
             {audit_link}
@@ -1349,6 +1382,320 @@ document.addEventListener('DOMContentLoaded', async function() {
     });
 });
 </script>
+"""
+
+
+LOAN_ITEMS_TEMPLATE = CSS_STYLE + """
+<style>
+  @media print { .nav-links, .no-print, form { display: none !important; } }
+  .loan-out { background-color: #fff3cd !important; }
+  .loan-overdue { background-color: #f8d7da !important; }
+  .loan-off { color: #777; }
+  .loan-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
+  /* Keep the inline status form inside its column: the page's form styling
+     is full-width and would otherwise push it out of the cell. */
+  .loan-actions { display: flex; gap: 6px; align-items: center; }
+  .loan-actions form { display: inline; margin: 0; padding: 0;
+                       background: none; box-shadow: none; }
+  .loan-actions select { width: auto; min-width: 96px; padding: 5px; margin: 0; }
+  .loan-actions button { padding: 6px 10px; font-size: 13px; margin: 0; }
+</style>
+<h1>Equipment Register</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
+{{ nav_links|safe }}
+{% if message %}
+    <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+
+<h2>Add an Item</h2>
+<p class="loan-hint">One entry per physical item. Two pairs of crutches are two
+entries, each with its own code, so you can tell which one is with which
+patient and which one keeps coming back damaged. Leave the code blank and one
+is generated for you.</p>
+<form method="POST" action="{{ url_for('loan_items') }}" class="dispense-form">
+    <input type="hidden" name="action" value="add_item">
+    <div class="common-section">
+        <div>
+            <label>Item Type:</label>
+            <select name="item_type" required>
+                {% for t in item_types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Item Code:</label>
+            <input name="item_code" type="text" maxlength="20" placeholder="auto">
+        </div>
+        <div>
+            <label>Size / Description:</label>
+            <input name="size" type="text" maxlength="40" placeholder="Adult L">
+        </div>
+        <div>
+            <label>Condition:</label>
+            <select name="condition">
+                {% for ccc in conditions %}<option value="{{ ccc }}">{{ ccc }}</option>{% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Note:</label>
+            <input name="note" type="text" maxlength="120">
+        </div>
+    </div>
+    <button type="submit">Add Item</button>
+</form>
+
+<h2>Register &mdash; {{ rows|length }} item{{ '' if rows|length == 1 else 's' }}</h2>
+<p class="loan-hint">Availability is worked out from the loan ledger, not
+stored on the item, so this table cannot disagree with what is actually out.</p>
+<table>
+    <tr>
+        <th>Code</th><th>Type</th><th>Size</th><th>Condition</th>
+        <th>State</th><th>With</th><th>Due</th><th>Note</th><th>Action</th>
+    </tr>
+    {% for r in rows %}
+    <tr class="{% if r.overdue %}loan-overdue{% elif r.loan %}loan-out{% endif %}">
+        <td>{{ r.code }}</td>
+        <td>{{ r.item_type }}</td>
+        <td>{{ r.size or '-' }}</td>
+        <td>{{ r.condition or '-' }}</td>
+        <td{% if r.shelf in ['Retired', 'Lost'] and not r.loan %} class="loan-off"{% endif %}>{{ r.state }}</td>
+        <td>{{ r.loan.patient_name if r.loan else '-' }}</td>
+        <td>{{ r.loan.due_date.strftime('%Y-%m-%d') if r.loan and r.loan.due_date else '-' }}</td>
+        <td>{{ r.note or '-' }}</td>
+        <td>
+            {% if not r.loan %}
+            <div class="loan-actions">
+            <form method="POST" action="{{ url_for('loan_items') }}">
+                <input type="hidden" name="action" value="set_status">
+                <input type="hidden" name="item_id" value="{{ r.id }}">
+                <select name="status">
+                    {% for s in shelf_statuses %}
+                    <option value="{{ s }}" {% if s == r.shelf %}selected{% endif %}>{{ s }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit">Set</button>
+            </form>
+            </div>
+            {% else %}
+            <span class="loan-hint">out &mdash; cannot change</span>
+            {% endif %}
+        </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="9">No items yet. Add the first one above.</td></tr>
+    {% endfor %}
+</table>
+"""
+
+
+LOANS_TEMPLATE = CSS_STYLE + """
+<style>
+  @media print {
+    .nav-links, .no-print, form { display: none !important; }
+    body { margin: 0; }
+    @page { size: A4 landscape; margin: 10mm; }
+  }
+  .loan-overdue { background-color: #f8d7da !important; }
+  .loan-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
+  .loan-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                gap: 12px; margin: 14px 0 20px; }
+  .loan-tile { background: #fff; border-radius: 8px; padding: 12px;
+               box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center; }
+  .loan-tile .n { font-size: 26px; font-weight: bold; display: block; }
+  .loan-tile.alert { background: #f8d7da; }
+  .loan-tile.warn { background: #fff3cd; }
+  /* The two inline forms in the Return cell inherit the page's full-width
+     form styling and spill out of the column. Keep them on one line and
+     sized to their content. */
+  .loan-actions { display: flex; gap: 6px; align-items: center; }
+  .loan-actions form { display: inline; margin: 0; padding: 0;
+                       background: none; box-shadow: none; }
+  .loan-actions select { width: auto; min-width: 80px; padding: 5px;
+                         margin: 0; }
+  .loan-actions button { padding: 6px 10px; font-size: 13px; margin: 0;
+                         white-space: nowrap; }
+</style>
+<h1>Equipment Loans</h1>
+<p>LD-HSE/NMC/HRD/6.1.3.3</p>
+{{ nav_links|safe }}
+{% if message %}
+    <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+
+<div class="loan-tiles">
+    <div class="loan-tile"><span class="n">{{ tiles.available }}</span>Available</div>
+    <div class="loan-tile {% if tiles.out %}warn{% endif %}"><span class="n">{{ tiles.out }}</span>On loan</div>
+    <div class="loan-tile {% if tiles.overdue %}alert{% endif %}"><span class="n">{{ tiles.overdue }}</span>Overdue</div>
+    <div class="loan-tile"><span class="n">{{ tiles.unusable }}</span>Damaged / Retired / Lost</div>
+</div>
+
+<div class="no-print">
+<h2>Issue an Item</h2>
+{% if available %}
+<form method="POST" action="{{ url_for('loans') }}" class="dispense-form">
+    <input type="hidden" name="action" value="issue">
+    <div class="common-section">
+        <div>
+            <label>Item:</label>
+            <select name="item_code" required>
+                {% for it in available %}
+                <option value="{{ it.item_code }}">{{ it.item_code }} &mdash; {{ it.item_type }}{% if it.size %} ({{ it.size }}){% endif %}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Patient Name:</label>
+            <input name="patient_name" type="text" maxlength="80" required>
+        </div>
+        <div>
+            <label>Contact Number:</label>
+            <input name="patient_contact" type="text" maxlength="30">
+        </div>
+        <div>
+            <label>OPD / File No:</label>
+            <input name="patient_id" type="text" maxlength="30">
+        </div>
+        <div>
+            <label>Date Issued:</label>
+            <input name="issued_date" type="date" value="{{ today }}" max="{{ today }}" required>
+        </div>
+        <div>
+            <label>Due Back:</label>
+            <input name="due_date" type="date" value="{{ default_due }}" required>
+        </div>
+        <div>
+            <label>Condition Out:</label>
+            <select name="condition_out">
+                {% for ccc in conditions %}<option value="{{ ccc }}">{{ ccc }}</option>{% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Note:</label>
+            <input name="note" type="text" maxlength="120">
+        </div>
+    </div>
+    <button type="submit">Issue</button>
+</form>
+{% else %}
+<p class="loan-hint">Nothing is available to lend. Every item is either out,
+damaged, retired or lost &mdash; or the register is empty.</p>
+{% endif %}
+</div>
+
+<h2>Currently Out &mdash; {{ out_rows|length }}</h2>
+{% if overdue_count %}
+<p class="loan-hint"><strong>{{ overdue_count }}</strong> past due. Those rows are red.</p>
+{% endif %}
+<table>
+    <tr>
+        <th>Item</th><th>Type</th><th>Patient</th><th>Contact</th><th>OPD No</th>
+        <th>Issued</th><th>Due</th><th>Days Out</th><th>Issued By</th>
+        <th class="no-print">Return</th>
+    </tr>
+    {% for r in out_rows %}
+    <tr class="{% if r.overdue %}loan-overdue{% endif %}">
+        <td>{{ r.item_code }}</td>
+        <td>{{ r.item_type }}</td>
+        <td>{{ r.patient_name }}</td>
+        <td>{{ r.patient_contact or '-' }}</td>
+        <td>{{ r.patient_id or '-' }}</td>
+        <td>{{ r.issued_date.strftime('%Y-%m-%d') }}</td>
+        <td>{{ r.due_date.strftime('%Y-%m-%d') if r.due_date else '-' }}</td>
+        <td>{{ r.days_out }}{% if r.overdue %} ({{ r.days_over }} over){% endif %}</td>
+        <td>{{ r.issued_by }}</td>
+        <td class="no-print">
+          <div class="loan-actions">
+            <form method="POST" action="{{ url_for('loans') }}">
+                <input type="hidden" name="action" value="return">
+                <input type="hidden" name="loan_id" value="{{ r.id }}">
+                <select name="condition_in">
+                    {% for ccc in conditions %}<option value="{{ ccc }}">{{ ccc }}</option>{% endfor %}
+                </select>
+                <button type="submit">Returned</button>
+            </form>
+            {% if is_admin %}
+            <form method="POST" action="{{ url_for('loans') }}"
+                  onsubmit="return confirm('Write this item off as lost? It will leave the available pool.');">
+                <input type="hidden" name="action" value="mark_lost">
+                <input type="hidden" name="loan_id" value="{{ r.id }}">
+                <button type="submit">Lost</button>
+            </form>
+            {% endif %}
+          </div>
+        </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="10">Nothing is out.</td></tr>
+    {% endfor %}
+</table>
+
+<h2>Loan History</h2>
+<p class="loan-hint">This filter narrows the history table below. The
+&ldquo;Currently Out&rdquo; list above always shows everything that is out
+&mdash; a filtered list of what is outstanding can look empty when it is not.</p>
+<form method="GET" action="{{ url_for('loans') }}" class="filter-form no-print">
+    <div class="filter-section">
+        <div>
+            <label>Search patient, item or OPD no:</label>
+            <input name="q" type="text" value="{{ q }}">
+        </div>
+        <div>
+            <label>Status:</label>
+            <select name="status">
+                <option value="">All</option>
+                {% for s in ['Out', 'Returned', 'Lost'] %}
+                <option value="{{ s }}" {% if s == status_filter %}selected{% endif %}>{{ s }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>&nbsp;</label>
+            <button type="submit">Filter</button>
+            <button type="button" onclick="window.print()">Print</button>
+        </div>
+    </div>
+</form>
+<table>
+    <tr>
+        <th>Ref</th><th>Item</th><th>Patient</th><th>Issued</th><th>Due</th>
+        <th>Returned</th><th>Days</th><th>Out</th><th>Back</th>
+        <th>Status</th><th>By</th><th>Note</th>
+    </tr>
+    {% for r in history %}
+    <tr>
+        <td>{{ r.loan_ref }}</td>
+        <td>{{ r.item_code }}</td>
+        <td>{{ r.patient_name }}</td>
+        <td>{{ r.issued_date.strftime('%Y-%m-%d') }}</td>
+        <td>{{ r.due_date.strftime('%Y-%m-%d') if r.due_date else '-' }}</td>
+        <td>{{ r.returned_date.strftime('%Y-%m-%d') if r.returned_date else '-' }}</td>
+        <td>{{ r.days if r.days is not none else '-' }}</td>
+        <td>{{ r.condition_out or '-' }}</td>
+        <td>{{ r.condition_in or '-' }}</td>
+        <td>{{ r.status }}</td>
+        <td>{{ r.issued_by }}</td>
+        <td>{{ r.note or '-' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="12">No loans match.</td></tr>
+    {% endfor %}
+</table>
+
+<h2>Activity by Month</h2>
+<table>
+    <tr><th>Month</th><th>Issued</th><th>Returned</th><th>Average Days Out</th></tr>
+    {% for r in activity %}
+    <tr>
+        <td>{{ r.label }}</td>
+        <td>{{ r.issued }}</td>
+        <td>{{ r.returned }}</td>
+        <td>{{ r.avg_days if r.avg_days is not none else '-' }}</td>
+    </tr>
+    {% endfor %}
+</table>
+<p class="loan-hint">Average days out counts loans by the month they came
+back, so a long loan is measured against the month it ended.</p>
+<p style="margin-top:24px;">Checked by: ____________________________
+&nbsp;&nbsp;&nbsp; Date: ____________________</p>
 """
 
 
@@ -3787,8 +4134,7 @@ def dispense():
         # with_categories so the banner colour is decided by the route, which
         # knows WHY the dispense was partial, rather than by the template
         # guessing from words in the message.
-        flashed = get_flashed_messages(with_categories=True)
-        message_class, message = flashed[0] if flashed else (None, None)
+        message_class, message = _flashed_banner()
         start_date = request.values.get('start_date')
         end_date = request.values.get('end_date')
         search = request.values.get('search')
@@ -6696,8 +7042,7 @@ def _temperature_chart(readings, year, month, location, thermometer=''):
 @login_required
 def temperature():
     current_user = session['user']['name']
-    flashed = get_flashed_messages(with_categories=True)
-    message_class, message = flashed[0] if flashed else (None, None)
+    message_class, message = _flashed_banner()
     is_admin = session['user'].get('role') == 'admin'
     today = datetime.utcnow().date()
 
@@ -6909,6 +7254,473 @@ def temperature():
             recorded_count=0, expected_count=60, breach_count=0,
             impossible_count=0, rows=[], thermometer='', default_initials='',
             chart=''), 500
+
+
+# ============================================================================
+# EQUIPMENT LOANS — crutches, moon boots, arm slings
+# ============================================================================
+# These are NOT stock. A dispensed tablet is gone; a loaned crutch is still
+# owned by the pharmacy while it sits in a patient's house. That difference
+# drives every design decision here:
+#
+#   * Items live in their own register (loan_items), one document per physical
+#     item, so "who has CR-003 and since when" is answerable. A pool count
+#     cannot answer it, and a pool count is useless the moment something is
+#     six weeks overdue and you need to go and find it.
+#
+#   * Availability is DERIVED, never stored. loan_items.status holds only the
+#     shelf states (Available / Damaged / Retired / Lost). Whether an item is
+#     out is decided by the loans ledger alone. Storing an "on loan" flag as
+#     well would give two sources of truth that drift the first time a request
+#     fails halfway, and the register would start lying about what is on the
+#     shelf. This is the same rule the stock ledger follows.
+
+LOAN_ITEM_TYPES = ['Crutches', 'Moon Boot', 'Arm Sling',
+                   'Walking Frame', 'Wheelchair', 'Other']
+# Prefix for auto-generated item codes, so a code reads as what it is.
+LOAN_TYPE_PREFIX = {'Crutches': 'CR', 'Moon Boot': 'MB', 'Arm Sling': 'AS',
+                    'Walking Frame': 'WF', 'Wheelchair': 'WC', 'Other': 'EQ'}
+LOAN_CONDITIONS = ['Good', 'Fair', 'Damaged']
+# Shelf states. "On loan" is deliberately absent — see the note above.
+LOAN_SHELF_STATUSES = ['Available', 'Damaged', 'Retired', 'Lost']
+LOAN_STATUS_OUT, LOAN_STATUS_RETURNED = 'Out', 'Returned'
+LOAN_STATUS_LOST = 'Lost'
+LOAN_DEFAULT_DAYS = 14          # typical fracture follow-up interval
+LOAN_MAX_DAYS = 365
+
+
+def _loan_next_code(items, item_type):
+    """Next free code for a type, e.g. CR-004.
+
+    Scans existing codes rather than keeping a counter, so a deleted or
+    manually-typed code can never cause a collision with a generated one.
+    """
+    prefix = LOAN_TYPE_PREFIX.get(item_type, 'EQ')
+    used = set()
+    for doc in items.find({'item_code': {'$regex': f'^{prefix}-'}},
+                          {'item_code': 1}):
+        tail = str(doc.get('item_code', '')).split('-', 1)[-1]
+        if tail.isdigit():
+            used.add(int(tail))
+    n = 1
+    while n in used:
+        n += 1
+    return f'{prefix}-{n:03d}'
+
+
+def _open_loans_by_code(loans):
+    """{item_code: open loan} — the single source of truth for 'is it out'."""
+    return {doc['item_code']: doc
+            for doc in loans.find({'status': LOAN_STATUS_OUT})}
+
+
+def _loan_rows(items, loans, today):
+    """The asset register with availability folded in.
+
+    One pass over each collection, so the page cost does not grow with the
+    number of items the way a per-item lookup would.
+    """
+    open_by_code = _open_loans_by_code(loans)
+    rows = []
+    for it in items.find().sort('item_code', 1):
+        code = it.get('item_code', '')
+        loan = open_by_code.get(code)
+        shelf = it.get('status', 'Available')
+        if loan:
+            due = loan.get('due_date')
+            overdue = bool(due and due.date() < today)
+            state = 'Overdue' if overdue else 'On loan'
+        else:
+            state = shelf
+            overdue = False
+        rows.append({
+            'code': code,
+            'item_type': it.get('item_type', ''),
+            'description': it.get('description', ''),
+            'size': it.get('size', ''),
+            'condition': it.get('condition', ''),
+            'shelf': shelf,
+            'state': state,
+            'overdue': overdue,
+            'loan': loan,
+            'note': it.get('note', ''),
+            'id': str(it['_id']),
+        })
+    return rows
+
+
+def _loan_available(items, loans):
+    """Items that can be lent right now: on the shelf AND not already out."""
+    out = set(_open_loans_by_code(loans))
+    return [it for it in items.find({'status': 'Available'}).sort('item_code', 1)
+            if it.get('item_code') not in out]
+
+
+def _loan_activity(loans, months=6):
+    """Loans issued / returned / still out, by month, in one aggregation."""
+    today = datetime.utcnow().date()
+    first = today.replace(day=1)
+    span = []
+    y, m = first.year, first.month
+    for _ in range(months):
+        span.append((y, m))
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    span.reverse()
+    start = datetime(span[0][0], span[0][1], 1)
+
+    issued, returned, days_out = {}, {}, {}
+    for doc in loans.find({'issued_date': {'$gte': start}}):
+        d = doc.get('issued_date')
+        if not d:
+            continue
+        key = (d.year, d.month)
+        issued[key] = issued.get(key, 0) + 1
+    for doc in loans.find({'returned_date': {'$gte': start}}):
+        d = doc.get('returned_date')
+        if not d:
+            continue
+        key = (d.year, d.month)
+        returned[key] = returned.get(key, 0) + 1
+        iss = doc.get('issued_date')
+        if iss:
+            days_out.setdefault(key, []).append((d - iss).days)
+
+    rows = []
+    for key in span:
+        spans = days_out.get(key, [])
+        rows.append({
+            'label': datetime(key[0], key[1], 1).strftime('%b %Y'),
+            'issued': issued.get(key, 0),
+            'returned': returned.get(key, 0),
+            'avg_days': round(sum(spans) / len(spans), 1) if spans else None,
+        })
+    return rows
+
+
+@app.route('/loan-items', methods=['GET', 'POST'])
+@login_required
+def loan_items():
+    if session['user'].get('role') != 'admin':
+        flash('Access denied. Only admins can change the equipment register.')
+        return redirect(url_for('loans'))
+
+    message_class, message = _flashed_banner()
+    today = datetime.utcnow().date()
+
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        items, loans_col = db['loan_items'], db['loans']
+
+        if request.method == 'POST':
+            action = request.form.get('action')
+
+            if action == 'add_item':
+                item_type = (request.form.get('item_type') or '').strip()
+                if item_type not in LOAN_ITEM_TYPES:
+                    flash('Choose a valid item type.')
+                    return redirect(url_for('loan_items'))
+                condition = (request.form.get('condition') or 'Good').strip()
+                if condition not in LOAN_CONDITIONS:
+                    condition = 'Good'
+                code = (request.form.get('item_code') or '').strip().upper()
+                if not code:
+                    code = _loan_next_code(items, item_type)
+                # A duplicate code would give two physical items one identity,
+                # and every loan against it would be ambiguous from then on.
+                if items.find_one({'item_code': code}):
+                    flash(f'Item code {code} is already in the register.')
+                    return redirect(url_for('loan_items'))
+                items.insert_one({
+                    'item_code': code,
+                    'item_type': item_type,
+                    'size': (request.form.get('size') or '').strip(),
+                    'condition': condition,
+                    'status': 'Damaged' if condition == 'Damaged' else 'Available',
+                    'note': (request.form.get('note') or '').strip(),
+                    'created_by': session['user']['name'],
+                    'created_at': datetime.utcnow(),
+                })
+                write_audit_entry('CREATE', 'loan_item', code,
+                                  f'added {item_type} condition {condition}')
+                flash(f'{item_type} {code} added to the register.', 'success')
+                return redirect(url_for('loan_items'))
+
+            if action == 'set_status':
+                try:
+                    doc = items.find_one({'_id': ObjectId(request.form.get('item_id', ''))})
+                except (InvalidId, TypeError):
+                    doc = None
+                if not doc:
+                    flash('That item was not found.')
+                    return redirect(url_for('loan_items'))
+                new_status = (request.form.get('status') or '').strip()
+                if new_status not in LOAN_SHELF_STATUSES:
+                    flash('Choose a valid status.')
+                    return redirect(url_for('loan_items'))
+                # An item that is physically with a patient cannot be retired
+                # or marked available — its state is the loan's to decide until
+                # it comes back.
+                if loans_col.find_one({'item_code': doc['item_code'],
+                                       'status': LOAN_STATUS_OUT}):
+                    flash(f"{doc['item_code']} is out on loan. Take it back in "
+                          f'first, then change its status.')
+                    return redirect(url_for('loan_items'))
+                was = doc.get('status', 'Available')
+                items.update_one({'_id': doc['_id']},
+                                 {'$set': {'status': new_status}})
+                write_audit_entry('UPDATE', 'loan_item', doc['item_code'],
+                                  f'status {was} -> {new_status}')
+                flash(f"{doc['item_code']} set to {new_status}.", 'success')
+                return redirect(url_for('loan_items'))
+
+            flash('Unknown action.')
+            return redirect(url_for('loan_items'))
+
+        return render_template_string(
+            LOAN_ITEMS_TEMPLATE,
+            nav_links=get_nav_links(),
+            message=message, message_class=message_class,
+            rows=_loan_rows(items, loans_col, today),
+            item_types=LOAN_ITEM_TYPES,
+            conditions=LOAN_CONDITIONS,
+            shelf_statuses=LOAN_SHELF_STATUSES,
+        )
+    except Exception as e:
+        app.logger.error(f'loan_items failed: {e}')
+        flash('Could not load the equipment register.')
+        return redirect(url_for('loans'))
+
+
+@app.route('/loans', methods=['GET', 'POST'])
+@login_required
+def loans():
+    current_user = session['user']['name']
+    message_class, message = _flashed_banner()
+    is_admin = session['user'].get('role') == 'admin'
+    today = datetime.utcnow().date()
+
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        items, loans_col = db['loan_items'], db['loans']
+
+        if request.method == 'POST':
+            action = request.form.get('action')
+
+            if action == 'issue':
+                code = (request.form.get('item_code') or '').strip().upper()
+                item = items.find_one({'item_code': code})
+                if not item:
+                    flash(f'Item code {code} is not in the equipment register.')
+                    return redirect(url_for('loans'))
+                if item.get('status') != 'Available':
+                    flash(f"{code} is marked {item.get('status')} and cannot "
+                          f'be lent out.')
+                    return redirect(url_for('loans'))
+                # The double-issue guard. Without it a refreshed POST, or two
+                # staff at two screens, lends one physical crutch pair to two
+                # patients and the register can never be reconciled again.
+                if loans_col.find_one({'item_code': code, 'status': LOAN_STATUS_OUT}):
+                    flash(f'{code} is already out on loan. Take it back in first.')
+                    return redirect(url_for('loans'))
+
+                patient = (request.form.get('patient_name') or '').strip()
+                if not patient:
+                    flash('A patient name is required — the loan has to be '
+                          'traceable to someone.')
+                    return redirect(url_for('loans'))
+                try:
+                    issued = datetime.strptime(request.form['issued_date'], '%Y-%m-%d')
+                    due = datetime.strptime(request.form['due_date'], '%Y-%m-%d')
+                except (KeyError, ValueError):
+                    flash('Enter valid issue and due dates.')
+                    return redirect(url_for('loans'))
+                if issued.date() > today:
+                    flash('A loan cannot be dated in the future.')
+                    return redirect(url_for('loans'))
+                if due < issued:
+                    flash('The due date cannot be before the issue date.')
+                    return redirect(url_for('loans'))
+                if (due - issued).days > LOAN_MAX_DAYS:
+                    flash(f'A loan longer than {LOAN_MAX_DAYS} days is probably '
+                          f'a typing error. Shorten it or write the item off.')
+                    return redirect(url_for('loans'))
+
+                condition_out = (request.form.get('condition_out') or 'Good').strip()
+                if condition_out not in LOAN_CONDITIONS:
+                    condition_out = 'Good'
+                ref = f"LN-{datetime.utcnow():%Y%m%d}-{uuid4().hex[:4].upper()}"
+                loans_col.insert_one({
+                    'loan_ref': ref,
+                    'item_code': code,
+                    'item_type': item.get('item_type', ''),
+                    'patient_name': patient,
+                    'patient_contact': (request.form.get('patient_contact') or '').strip(),
+                    'patient_id': (request.form.get('patient_id') or '').strip(),
+                    'issued_date': issued,
+                    'due_date': due,
+                    'issued_by': current_user,
+                    'condition_out': condition_out,
+                    'returned_date': None,
+                    'returned_to': None,
+                    'condition_in': None,
+                    'status': LOAN_STATUS_OUT,
+                    'note': (request.form.get('note') or '').strip(),
+                    'created_at': datetime.utcnow(),
+                })
+                write_audit_entry('CREATE', 'loan', ref,
+                                  f'{code} issued to {patient}, due {due:%Y-%m-%d}')
+                flash(f'{code} issued to {patient}. Due back {due:%Y-%m-%d}. '
+                      f'Reference {ref}.', 'success')
+                return redirect(url_for('loans'))
+
+            if action == 'return':
+                try:
+                    loan = loans_col.find_one({'_id': ObjectId(request.form.get('loan_id', ''))})
+                except (InvalidId, TypeError):
+                    loan = None
+                if not loan:
+                    flash('That loan was not found.')
+                    return redirect(url_for('loans'))
+                if loan.get('status') != LOAN_STATUS_OUT:
+                    flash(f"That loan is already closed ({loan.get('status')}).")
+                    return redirect(url_for('loans'))
+                condition_in = (request.form.get('condition_in') or 'Good').strip()
+                if condition_in not in LOAN_CONDITIONS:
+                    condition_in = 'Good'
+                now = datetime.utcnow()
+                loans_col.update_one({'_id': loan['_id']}, {'$set': {
+                    'returned_date': now,
+                    'returned_to': current_user,
+                    'condition_in': condition_in,
+                    'status': LOAN_STATUS_RETURNED,
+                }})
+                # An item that comes back broken must not fall straight back
+                # into the available pool, or it gets lent to the next patient.
+                shelf = 'Damaged' if condition_in == 'Damaged' else 'Available'
+                items.update_one({'item_code': loan['item_code']},
+                                 {'$set': {'status': shelf,
+                                           'condition': condition_in}})
+                days = (now - loan['issued_date']).days
+                write_audit_entry('UPDATE', 'loan', loan['loan_ref'],
+                                  f"returned by {loan['patient_name']} after "
+                                  f'{days} days, condition {condition_in}')
+                extra = (' It is marked damaged and will not be offered for '
+                         'loan until you clear it.' if condition_in == 'Damaged' else '')
+                flash(f"{loan['item_code']} returned after {days} days.{extra}",
+                      'success' if condition_in != 'Damaged' else 'partial')
+                return redirect(url_for('loans'))
+
+            if action == 'mark_lost':
+                if not is_admin:
+                    flash('Access denied. Only admins can write an item off as lost.')
+                    return redirect(url_for('loans'))
+                try:
+                    loan = loans_col.find_one({'_id': ObjectId(request.form.get('loan_id', ''))})
+                except (InvalidId, TypeError):
+                    loan = None
+                if not loan:
+                    flash('That loan was not found.')
+                    return redirect(url_for('loans'))
+                if loan.get('status') != LOAN_STATUS_OUT:
+                    flash(f"That loan is already closed ({loan.get('status')}).")
+                    return redirect(url_for('loans'))
+                now = datetime.utcnow()
+                loans_col.update_one({'_id': loan['_id']}, {'$set': {
+                    'returned_date': None,
+                    'status': LOAN_STATUS_LOST,
+                    'closed_date': now,
+                    'closed_by': current_user,
+                }})
+                items.update_one({'item_code': loan['item_code']},
+                                 {'$set': {'status': 'Lost'}})
+                write_audit_entry('UPDATE', 'loan', loan['loan_ref'],
+                                  f"written off as lost with {loan['patient_name']}")
+                flash(f"{loan['item_code']} written off as lost.", 'partial')
+                return redirect(url_for('loans'))
+
+            flash('Unknown action.')
+            return redirect(url_for('loans'))
+
+        # ---- GET ----------------------------------------------------------
+        q = (request.args.get('q') or '').strip()
+        status_filter = (request.args.get('status') or '').strip()
+
+        rows = _loan_rows(items, loans_col, today)
+        out_rows = []
+        for doc in loans_col.find({'status': LOAN_STATUS_OUT}).sort('due_date', 1):
+            due = doc.get('due_date')
+            overdue = bool(due and due.date() < today)
+            out_rows.append({
+                'id': str(doc['_id']),
+                'loan_ref': doc.get('loan_ref', ''),
+                'item_code': doc.get('item_code', ''),
+                'item_type': doc.get('item_type', ''),
+                'patient_name': doc.get('patient_name', ''),
+                'patient_contact': doc.get('patient_contact', ''),
+                'patient_id': doc.get('patient_id', ''),
+                'issued_date': doc['issued_date'],
+                'due_date': due,
+                'issued_by': doc.get('issued_by', ''),
+                'days_out': (datetime.utcnow() - doc['issued_date']).days,
+                'days_over': (today - due.date()).days if overdue else 0,
+                'overdue': overdue,
+            })
+
+        query = {}
+        if status_filter in (LOAN_STATUS_OUT, LOAN_STATUS_RETURNED, LOAN_STATUS_LOST):
+            query['status'] = status_filter
+        if q:
+            rx = {'$regex': re.escape(q), '$options': 'i'}
+            query['$or'] = [{'patient_name': rx}, {'item_code': rx},
+                            {'patient_id': rx}, {'loan_ref': rx}]
+        history = []
+        for doc in loans_col.find(query).sort('issued_date', -1).limit(300):
+            ret = doc.get('returned_date')
+            history.append({
+                'loan_ref': doc.get('loan_ref', ''),
+                'item_code': doc.get('item_code', ''),
+                'patient_name': doc.get('patient_name', ''),
+                'issued_date': doc['issued_date'],
+                'due_date': doc.get('due_date'),
+                'returned_date': ret,
+                'days': (ret - doc['issued_date']).days if ret else None,
+                'condition_out': doc.get('condition_out'),
+                'condition_in': doc.get('condition_in'),
+                'status': doc.get('status', ''),
+                'issued_by': doc.get('issued_by', ''),
+                'note': doc.get('note', ''),
+            })
+
+        tiles = {
+            'available': sum(1 for r in rows if r['state'] == 'Available'),
+            'out': sum(1 for r in rows if r['loan']),
+            'overdue': sum(1 for r in rows if r['overdue']),
+            'unusable': sum(1 for r in rows
+                            if not r['loan'] and r['shelf'] in ('Damaged', 'Retired', 'Lost')),
+        }
+
+        return render_template_string(
+            LOANS_TEMPLATE,
+            nav_links=get_nav_links(),
+            message=message, message_class=message_class,
+            is_admin=is_admin,
+            today=today.strftime('%Y-%m-%d'),
+            default_due=(today + timedelta(days=LOAN_DEFAULT_DAYS)).strftime('%Y-%m-%d'),
+            available=_loan_available(items, loans_col),
+            conditions=LOAN_CONDITIONS,
+            out_rows=out_rows,
+            overdue_count=tiles['overdue'],
+            history=history,
+            activity=_loan_activity(loans_col),
+            tiles=tiles,
+            q=q, status_filter=status_filter,
+        )
+    except Exception as e:
+        app.logger.error(f'loans failed: {e}')
+        flash('Could not load the loans page.')
+        return redirect('/reports')
 
 
 @app.route('/dashboard', methods=['GET'])
@@ -7254,6 +8066,23 @@ def classify_variance(variance):
     if variance > 0:
         return DISCREPANCY_RECORDED_NOT_ISSUED
     return DISCREPANCY_NONE
+
+
+def _flashed_banner():
+    """(css_class, message) for the banner, with Flask's default normalised.
+
+    flash('text') with no category stores the category as the literal string
+    'message'. The templates then render class="message message", which is
+    truthy, so the {% else %}error{% endif %} fallback never fired and every
+    plain error banner rendered unstyled instead of red. Mapping the default
+    onto 'error' here fixes it once for every page rather than in each
+    template, and routes that pass a category keep it.
+    """
+    flashed = get_flashed_messages(with_categories=True)
+    if not flashed:
+        return None, None
+    category, text = flashed[0]
+    return ('error' if category in (None, '', 'message') else category), text
 
 
 def write_audit_entry(action, target_type, target_id, changes):
