@@ -2515,9 +2515,9 @@ there.</span>
     </tbody>
 </table>
 <p style="font-size:13px;">A dash means no reading was recorded for that check.
-On the chart a missed check is bridged with a thin dashed line rather than a
-solid one, so the trace still reads as a line while the gap stays visible, and
-no mark is made where nothing was recorded.</p>
+Each line on the chart runs straight through the readings that exist, with a
+mark only where one was taken; a missed check shows as a blank column in the
+Initials and Write time rows and as a dash in this table.</p>
 <p style="margin-top:18px;">Checked by: ______________________ &nbsp;&nbsp;
 Signature: ______________________ &nbsp;&nbsp; Date: ______________</p>
 """
@@ -7886,43 +7886,18 @@ def _temperature_chart(readings, year, month, location, thermometer=''):
         return pts
 
     for key, _label, colour, shape, _pen in TEMP_SERIES:
-        points = _series_points(key)
-        # Runs of consecutive checks, split wherever one was missed.
-        runs, cur = [], []
-        for x, v in points:
-            if v is None:
-                if cur:
-                    runs.append(cur)
-                    cur = []
-            else:
-                cur.append((x, ty(v)))
-        if cur:
-            runs.append(cur)
-
-        # Bridge the gaps with a thin dashed line, so the trace reads as one
-        # continuous line rather than islands of marks — while still saying
-        # plainly that nothing was recorded in between. A solid bridge would
-        # claim readings that were never taken; no bridge at all left a
-        # fortnight's chart looking like scattered dots. The dash is the only
-        # dashed thing on this chart, so it cannot be mistaken for a limit.
-        for before, after in zip(runs, runs[1:]):
-            x1, y1 = before[-1]
-            x2, y2 = after[0]
-            o.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" '
-                     f'y2="{y2:.1f}" stroke="{colour}" stroke-width="0.9" '
-                     f'stroke-dasharray="3 3" opacity="0.65"/>')
-
-        for run in runs:
-            if len(run) > 1:
-                pts_attr = ' '.join(f'{x:.1f},{y:.1f}' for x, y in run)
-                o.append(f'<polyline points="{pts_attr}" fill="none" '
-                         f'stroke="{colour}" stroke-width="1.3" '
-                         f'stroke-linejoin="round"/>')
-
-        # Markers only where a reading actually exists.
-        for x, v in points:
-            if v is not None:
-                o.append(_temp_marker(shape, x, ty(v), colour))
+        # One line per series, drawn straight through every reading there is.
+        # A missed check is not marked on the line itself — it shows up as a
+        # blank column in the Initials and Write time rows underneath, and as
+        # a dash in the register table below the chart.
+        plotted = [(x, ty(v)) for x, v in _series_points(key) if v is not None]
+        if len(plotted) > 1:
+            pts_attr = ' '.join(f'{x:.1f},{y:.1f}' for x, y in plotted)
+            o.append(f'<polyline points="{pts_attr}" fill="none" '
+                     f'stroke="{colour}" stroke-width="1.3" '
+                     f'stroke-linejoin="round"/>')
+        for x, y in plotted:
+            o.append(_temp_marker(shape, x, y, colour))
 
     # ---- initials and time of check, as the form provides for -----------
     for i in range(days_in_month * 2):
