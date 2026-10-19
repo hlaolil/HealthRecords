@@ -45,6 +45,31 @@ ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
 SESSION_TIMEOUT_MINUTES = 60
 app.permanent_session_lifetime = timedelta(minutes=SESSION_TIMEOUT_MINUTES)
 
+# -----------------------------------------------------------------------
+# Local time at the pharmacy.
+#
+# The server runs in UTC. Lesotho keeps South African Standard Time, UTC+2
+# all year with no daylight saving, so a fixed offset is exact rather than an
+# approximation and needs no timezone database.
+#
+# This matters for anything that reads a wall clock. A check done at 13:30
+# local is 11:30 UTC, so deciding "morning or afternoon" from UTC would file
+# every early-afternoon reading as a morning one — silently, and on a
+# compliance record.
+# -----------------------------------------------------------------------
+PHARMACY_UTC_OFFSET_HOURS = float(os.environ.get('PHARMACY_UTC_OFFSET', '2'))
+PHARMACY_TZ = timezone(timedelta(hours=PHARMACY_UTC_OFFSET_HOURS))
+
+
+def local_now():
+    """Wall-clock time at the pharmacy, naive, to match stored datetimes."""
+    return datetime.now(timezone.utc).astimezone(PHARMACY_TZ).replace(tzinfo=None)
+
+
+def local_session():
+    """Which round a check done right now belongs to."""
+    return 'Morning' if local_now().hour < TEMP_NOON_HOUR else 'Afternoon'
+
 # NEW: passwords expire after this many days; checked at login time.
 PASSWORD_MAX_AGE_DAYS = 365
 
@@ -1733,6 +1758,12 @@ TEMPERATURE_TEMPLATE = CSS_STYLE + """
   }
   .temp-chart { border: 1px solid #ccc; padding: 8px; background: #fff; margin: 10px 0; }
   .temp-breach { background-color: #f8d7da !important; }
+  .temp-round { max-width: 760px; margin-bottom: 8px; }
+  .temp-round-input { width: 110px; font-size: 20px; padding: 8px; text-align: center; }
+  .temp-round-note { font-size: 13px; margin: 4px 0 14px; }
+  .temp-already { font-size: 12px; color: #856404; }
+  .temp-manual { margin-top: 18px; }
+  .temp-manual summary { cursor: pointer; font-weight: bold; padding: 8px 0; }
 </style>
 <h1>Temperature Register</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
@@ -1742,13 +1773,45 @@ TEMPERATURE_TEMPLATE = CSS_STYLE + """
 {% endif %}
 
 <div class="temp-entry">
-<h2>Record a Reading</h2>
-<p style="font-size:13px;">One reading per check: the temperature the
-thermometer shows now. The morning check and the afternoon check are entered
-separately, and the chart derives its three lines from them &mdash; morning in
-blue, afternoon in red, the average of the two in black. Recording the same
-location, date and session again corrects the earlier entry rather than adding
-a second one.</p>
+<h2>{{ round_session }} Round &mdash; {{ round_date_label }}</h2>
+<p class="temp-round-note">Everything except the readings is filled in for you:
+today's date, the <strong>{{ round_session|lower }}</strong> round from the
+current time ({{ round_time }}), each room's own thermometer, and your initials.
+Type the four temperatures and save. Leave a box empty if that room was not
+checked &mdash; nothing is recorded for it.</p>
+<form method="POST" action="{{ url_for('temperature') }}" class="dispense-form">
+    <input type="hidden" name="action" value="record_round">
+    <input type="hidden" name="month" value="{{ month_value }}">
+    <input type="hidden" name="location" value="{{ location }}">
+    <table class="temp-round">
+        <tr>
+            <th>Room</th><th>Thermometer</th><th>Temperature &deg;C</th>
+            <th>Acceptable</th><th>Already recorded</th>
+        </tr>
+        {% for r in round_rows %}
+        <tr>
+            <td><strong>{{ r.location }}</strong></td>
+            <td>{{ r.thermometer }}</td>
+            <td><input name="temp_{{ loop.index0 }}" type="number" step="0.1"
+                       class="temp-round-input" inputmode="decimal"
+                       {% if loop.first %}autofocus{% endif %}
+                       placeholder="{{ r.existing if r.existing is not none else '' }}"></td>
+            <td>{{ "%g"|format(r.lo) }} to {{ "%g"|format(r.hi) }}</td>
+            <td>{% if r.existing is not none %}<span class="temp-already">{{ "%g"|format(r.existing) }}&deg;C
+                &mdash; typing here corrects it</span>{% else %}&ndash;{% endif %}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    <div class="form-buttons">
+        <input type="submit" value="Save {{ round_session }} Round">
+    </div>
+</form>
+
+<details class="temp-manual">
+<summary>Record or correct a single reading (another day, or the other round)</summary>
+<p style="font-size:13px;">Use this to catch up a missed check or fix an earlier
+one. Recording the same room, date and round again corrects that entry rather
+than adding a second.</p>
 <form method="POST" action="{{ url_for('temperature') }}" class="dispense-form">
     <input type="hidden" name="action" value="record">
     <div class="common-section">
@@ -1767,7 +1830,9 @@ a second one.</p>
         <div>
             <label>Session:</label>
             <select name="session" required>
-                {% for s in sessions %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+                {% for s in sessions %}
+                <option value="{{ s }}" {% if s == round_session %}selected{% endif %}>{{ s }}</option>
+                {% endfor %}
             </select>
         </div>
         <div>
@@ -1781,11 +1846,7 @@ a second one.</p>
         </div>
         <div>
             <label>Time of Check:</label>
-            <input name="check_time" type="time" required>
-        </div>
-        <div>
-            <label>Thermometer No.:</label>
-            <input name="thermometer" type="text" value="{{ thermometer }}">
+            <input name="check_time" type="time" value="{{ round_time }}" required>
         </div>
         <div>
             <label>Note (optional):</label>
@@ -1794,6 +1855,7 @@ a second one.</p>
     </div>
     <div class="form-buttons"><input type="submit" value="Save Reading"></div>
 </form>
+</details>
 </div>
 
 <form method="GET" action="{{ url_for('temperature') }}" class="filter-form">
@@ -6770,6 +6832,13 @@ def internal_issue():
 # =======================================================================
 TEMP_LOCATIONS = ['Dispensary', 'Store 1', 'Store 2', 'Fridge']
 TEMP_SESSIONS = ['Morning', 'Afternoon']
+# Each room keeps its own instrument permanently, so the number is a property
+# of the location and never has to be typed. If an instrument is ever replaced
+# by one with a different number, change it here rather than on every reading.
+TEMP_THERMOMETERS = {'Dispensary': '1', 'Store 1': '2',
+                     'Store 2': '3', 'Fridge': '4'}
+# Before noon is the morning round, noon onwards is the afternoon round.
+TEMP_NOON_HOUR = 12
 
 # Acceptable storage range per location, and the "cold spot"/"hot spot" warning
 # bands the official chart names in its legend box.
@@ -7224,6 +7293,84 @@ def temperature():
                 return redirect(url_for('temperature', location=loc,
                                         month=f'{day.year:04d}-{day.month:02d}'))
 
+            if action == 'record_round':
+                # The whole round in one submission. Date, session, time,
+                # thermometer and initials are all derived, so the only thing
+                # typed is the temperatures themselves.
+                now = local_now()
+                sess = local_session()
+                day = datetime(now.year, now.month, now.day)
+                stamp = now.strftime('%H:%M')
+                inits = ''.join(w[0] for w in current_user.split() if w)[:4].upper()
+
+                saved, corrected, breaches, rejected = [], [], [], []
+                for idx, loc_name in enumerate(TEMP_LOCATIONS):
+                    raw = (request.form.get(f'temp_{idx}') or '').strip()
+                    if not raw:
+                        continue          # not checked: record nothing
+                    try:
+                        temp = float(raw)
+                    except ValueError:
+                        rejected.append(f'{loc_name} ("{raw}" is not a number)')
+                        continue
+                    if not (TEMP_MIN_PLAUSIBLE <= temp <= TEMP_MAX_PLAUSIBLE):
+                        rejected.append(f'{loc_name} ({temp:g}°C is not a '
+                                        f'reading a thermometer can give)')
+                        continue
+
+                    prior = logs.find_one({'location': loc_name, 'date': day,
+                                           'session': sess})
+                    doc = {
+                        'location': loc_name, 'date': day, 'session': sess,
+                        'temp': temp,
+                        'initials': inits,
+                        'check_time': stamp,
+                        'thermometer': TEMP_THERMOMETERS.get(loc_name, ''),
+                        'note': '',
+                        'recorded_by': current_user,
+                        'timestamp': datetime.utcnow(),
+                    }
+                    if prior:
+                        logs.update_one(
+                            {'_id': prior['_id']},
+                            {'$set': doc,
+                             '$unset': {'max': '', 'min': '', 'actual': ''}})
+                        write_audit_entry(
+                            'UPDATE', 'temperature_reading',
+                            f'{loc_name} {day:%Y-%m-%d} {sess}',
+                            f'{_reading_temp(prior)}°C -> {temp}°C (round entry)')
+                        corrected.append(f'{loc_name} {temp:g}°C')
+                    else:
+                        logs.insert_one(doc)
+                        write_audit_entry(
+                            'CREATE', 'temperature_reading',
+                            f'{loc_name} {day:%Y-%m-%d} {sess}',
+                            f'{temp}°C (round entry)')
+                        saved.append(f'{loc_name} {temp:g}°C')
+                    lo_lim, hi_lim = TEMP_LIMITS.get(loc_name, (15.0, 25.0))
+                    if temp > hi_lim or temp < lo_lim:
+                        breaches.append(f'{loc_name} {temp:g}°C')
+
+                parts = []
+                if saved:
+                    parts.append(f"{sess} round recorded: {', '.join(saved)}")
+                if corrected:
+                    parts.append(f"corrected: {', '.join(corrected)}")
+                if rejected:
+                    parts.append(f"not recorded: {'; '.join(rejected)}")
+                if not parts:
+                    flash('Nothing was entered, so nothing was recorded.')
+                    tone = None
+                else:
+                    if breaches:
+                        parts.append('OUTSIDE RANGE: ' + ', '.join(breaches))
+                    tone = 'error' if rejected else (
+                        'partial' if breaches else 'success')
+                    flash('. '.join(parts) + '.', tone)
+                return redirect(url_for('temperature',
+                                        location=chosen_location(request.form),
+                                        month=request.form.get('month') or ''))
+
             flash('Unknown action.')
             return redirect(url_for('temperature'))
 
@@ -7251,15 +7398,33 @@ def temperature():
             if v is not None and (v > hi_lim or v < lo_lim):
                 breach_count += 1
 
-        # The form carries one thermometer number for the sheet. Take the most
-        # recent one recorded this month; it changes only if the instrument is
-        # replaced, in which case the latest is the one now in the room.
-        thermometer = ''
-        for r in sorted(readings, key=lambda r: r['timestamp'], reverse=True):
-            if r.get('thermometer'):
-                thermometer = r['thermometer']
-                break
+        # Each room keeps its own instrument, so the sheet's thermometer number
+        # comes from the location rather than from whatever was last typed.
+        # Readings entered before that mapping existed fall back to their own
+        # stored number, so an older month still prints what it was checked on.
+        thermometer = TEMP_THERMOMETERS.get(location, '')
+        if not thermometer:
+            for r in sorted(readings, key=lambda r: r['timestamp'], reverse=True):
+                if r.get('thermometer'):
+                    thermometer = r['thermometer']
+                    break
         default_initials = ''.join(w[0] for w in current_user.split() if w)[:4].upper()
+
+        # ----- the round panel: one box per room, everything else derived ---
+        now_local = local_now()
+        round_session = local_session()
+        round_day = datetime(now_local.year, now_local.month, now_local.day)
+        already = {d['location']: _reading_temp(d) for d in logs.find(
+            {'date': round_day, 'session': round_session})}
+        round_rows = []
+        for loc_name in TEMP_LOCATIONS:
+            lo_l, hi_l = TEMP_LIMITS.get(loc_name, (15.0, 25.0))
+            round_rows.append({
+                'location': loc_name,
+                'thermometer': TEMP_THERMOMETERS.get(loc_name, '-'),
+                'lo': lo_l, 'hi': hi_l,
+                'existing': already.get(loc_name),
+            })
 
         rows, days_complete = [], 0
         for d in range(1, days_in_month + 1):
@@ -7308,6 +7473,9 @@ def temperature():
             recorded_count=len(readings), expected_count=days_in_month * 2,
             breach_count=breach_count,
             rows=rows, thermometer=thermometer, default_initials=default_initials,
+            round_rows=round_rows, round_session=round_session,
+            round_time=now_local.strftime('%H:%M'),
+            round_date_label=now_local.strftime('%A %d %B %Y'),
             chart=_temperature_chart(readings, year, month, location, thermometer))
 
     except ServerSelectionTimeoutError:
@@ -7322,6 +7490,9 @@ def temperature():
             limit_lo=15.0, limit_hi=25.0, days_in_month=30, days_complete=0,
             recorded_count=0, expected_count=60, breach_count=0,
             rows=[], thermometer='', default_initials='',
+            round_rows=[], round_session=local_session(),
+            round_time=local_now().strftime('%H:%M'),
+            round_date_label=local_now().strftime('%A %d %B %Y'),
             chart=''), 500
 
 
