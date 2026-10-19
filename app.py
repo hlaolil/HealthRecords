@@ -1308,6 +1308,10 @@ function clearForm() {
     toggleOutcomeDays();
     const recall = document.getElementById('patient_recall');
     if (recall) { recall.textContent = ''; recall.className = 'patient-recall'; }
+    RECALL_FIELDS.forEach(function (pair) {
+        const el = recallField(pair[0]);
+        if (el) delete el.dataset.autofilled;
+    });
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -1322,17 +1326,47 @@ document.addEventListener('DOMContentLoaded', function() {
 // A returning patient's employer, position, birth decade and gender are the
 // same as last time, so they are filled from that visit rather than retyped.
 //
-// Only EMPTY fields are filled: whatever is already typed wins. And the note
-// says which visit the details came from, because two people really can share
-// a name and a silently inherited employer would look exactly like a fact.
+// The app must be able to tell its OWN fill apart from what the user typed.
+// Without that, changing the name after a first lookup left the previous
+// patient's details sitting in the form, because the fields were no longer
+// empty and so were never refreshed. That is how one patient's visit ends up
+// recorded against another's employer.
+//
+// So each field this fills is marked. On every new lookup the marked ones are
+// cleared first — including when the new name has no record at all, which is
+// the case that would otherwise leave the most convincing wrong data. Typing
+// in a field removes the mark: from then on it is the user's, and is left
+// alone.
+var RECALL_FIELDS = [['company', 'Company'], ['position', 'Position'],
+                     ['birth_decade', 'Birth decade'], ['gender', 'Gender']];
+
+function recallField(f) {
+    return document.querySelector('.common-section [name="' + f + '"]');
+}
+
+function clearRecalled() {
+    RECALL_FIELDS.forEach(function (pair) {
+        var el = recallField(pair[0]);
+        if (el && el.dataset.autofilled === '1') {
+            el.value = '';
+            delete el.dataset.autofilled;
+        }
+    });
+}
+
 async function recallPatient() {
     const nameEl = document.getElementById('patient');
     const note = document.getElementById('patient_recall');
     if (!nameEl || !note) return;
     const name = nameEl.value.trim();
+
+    // Always first, and before any early return: a name that matches nothing
+    // must not leave the last patient's details behind.
+    clearRecalled();
     note.className = 'patient-recall';
     note.textContent = '';
     if (name.length < 3) return;
+
     let d;
     try {
         const res = await fetch('/api/patient-lookup?name=' + encodeURIComponent(name));
@@ -1342,10 +1376,14 @@ async function recallPatient() {
     if (!d || !d.patient) return;
 
     const filled = [];
-    [['company', 'Company'], ['position', 'Position'],
-     ['birth_decade', 'Birth decade'], ['gender', 'Gender']].forEach(([f, label]) => {
-        const el = document.querySelector('.common-section [name="' + f + '"]');
-        if (el && !el.value && d[f]) { el.value = d[f]; filled.push(label); }
+    RECALL_FIELDS.forEach(function (pair) {
+        const f = pair[0], label = pair[1];
+        const el = recallField(f);
+        if (el && !el.value && d[f]) {
+            el.value = d[f];
+            el.dataset.autofilled = '1';
+            filled.push(label);
+        }
     });
     if (filled.length) {
         note.textContent = 'Filled from the last visit on ' +
@@ -1354,12 +1392,23 @@ async function recallPatient() {
         note.className = 'patient-recall shown';
     }
 }
+
 document.addEventListener('DOMContentLoaded', function () {
     const nameEl = document.getElementById('patient');
     if (nameEl) {
         nameEl.addEventListener('change', recallPatient);
         nameEl.addEventListener('blur', recallPatient);
     }
+    // Once the user edits one of these, it is theirs and is never cleared.
+    RECALL_FIELDS.forEach(function (pair) {
+        const el = recallField(pair[0]);
+        if (!el) return;
+        ['input', 'change'].forEach(function (evt) {
+            el.addEventListener(evt, function () {
+                if (el.dataset.autofilled === '1') delete el.dataset.autofilled;
+            });
+        });
+    });
 });
 
 // Days apply to sick leave only. Clearing the box as it is hidden means a
