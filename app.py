@@ -2169,12 +2169,14 @@ the officer in charge. The change and what it replaced both go to the audit log.
 {% endif %}
 
 <h2>Register &mdash; {{ start_date }} to {{ end_date }}</h2>
-<p class="key-hint no-print">This register writes itself from who is logged in:
+<p class="key-hint no-print">The pharmacist signs twice &mdash; column 4 for
+the issue and column 13 for the return &mdash; and both print empty for a wet
+signature, as do the recipient's and the two officers'.<br>
+This register writes itself from who is logged in:
 when the pharmacist logs out, whoever logs in next is recorded as holding the
 key until he takes it back. One issue covers the whole absence; anybody else
 who logs in while it is out is noted against that same row as also on duty,
 rather than splitting it. Nobody has to fill a form in.<br>
-The four signature columns print empty so the filed copy can be signed by hand.
 The app records the names, the times and who was logged in; it does not record
 a signature it never saw.</p>
 <table>
@@ -2192,7 +2194,7 @@ a signature it never saw.</p>
         <th class="key-sign">Returning officer's signature</th>
         <th>Receiving officer</th>
         <th class="key-sign">Receiving officer's signature</th>
-        <th>Pharmacist</th>
+        <th class="key-sign">Pharmacist signature</th>
         <th>Comments</th>
         <th class="no-print">Entered by</th>
         {% if is_admin %}<th class="no-print">Action</th>{% endif %}
@@ -2213,11 +2215,16 @@ a signature it never saw.</p>
         <td class="key-sign">&nbsp;</td>
         <td>{{ r.receiving_officer or '' }}</td>
         <td class="key-sign">&nbsp;</td>
-        <td>{{ r.return_pharmacist or '' }}</td>
+        {# Column 13 is the pharmacist's signature on the RETURN, the
+           counterpart of column 4 on the issue. It prints empty to be signed
+           by hand. Who oversaw the return is still recorded electronically
+           and shown in the on-screen column at the end of the row. #}
+        <td class="key-sign">&nbsp;</td>
         <td>{{ r.comments or '' }}
             {%- if r.also_on_duty %}{% if r.comments %}; {% endif %}also on duty: {{ r.also_on_duty|join(', ') }}{% endif %}
             {%- if r.status == 'Out' %}<em> (still out{% if r.weekend %}, weekend{% endif %})</em>{% endif %}</td>
         <td class="no-print">{{ r.entered_by or '-' }}
+            {%- if r.return_pharmacist %}<br><small>return overseen by {{ r.return_pharmacist }}</small>{% endif %}
             {%- if r.auto_source %}<br><span class="key-auto">from {{ 'their login' if r.auto_source in ['login', 'away-window'] else 'shift handover' }}</span>{% endif %}
             {%- if r.auto_closed %}<br><span class="key-auto">closed by handover</span>{% endif %}
             {%- if r.off_roster %}<br><span class="key-tag key-tag-warn">not in charge</span>{% endif %}
