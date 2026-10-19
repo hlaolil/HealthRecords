@@ -153,6 +153,16 @@ def init_db_collections():
         # form — who took it and when, who brought it back and who received it.
         if 'key_register' not in existing:
             db.create_collection('key_register')
+        # NEW: who may hold the key. A Nurse Assistant may well be the person
+        # at the counter entering the record, but is not an officer in charge,
+        # so the two things are kept apart by an explicit flag rather than by
+        # anyone remembering.
+        if 'key_officers' not in existing:
+            db.create_collection('key_officers')
+        # NEW: one small document recording that the key is up for handover,
+        # set when the pharmacist logs out and cleared when somebody takes it.
+        if 'key_control' not in existing:
+            db.create_collection('key_control')
 
         # audit_log: /audit page sorts by timestamp desc and filters by
         # action/target_type/target_id/user via $or regex, plus an exact
@@ -220,6 +230,8 @@ def init_db_collections():
         db['key_register'].create_index([('issued_at', -1)])
         db['key_register'].create_index([('recipient_name', 1)])
         db['key_register'].create_index([('ref', 1)], unique=True)
+        db['key_officers'].create_index([('name', 1)], unique=True)
+        db['key_officers'].create_index([('active', 1), ('in_charge', 1)])
         db['deliveries'].create_index([('status', 1), ('opened_at', -1)])
         db['deliveries'].create_index([('reference', 1)], unique=True)
         db['deliveries'].create_index([('invoice_number', 1)])
@@ -1776,6 +1788,21 @@ KEY_REGISTER_TEMPLATE = CSS_STYLE + """
   .key-out { background: #fff3cd; border: 2px solid #ffc107; }
   .key-in { background: #d4edda; border: 2px solid #28a745; }
   .key-late { background: #f8d7da; border: 2px solid #dc3545; }
+  .key-weekend { background: #e2e3f3; border: 2px solid #6f76c9; }
+  .key-tag { display: inline-block; font-size: 12px; font-weight: bold;
+             background: #fff; border: 1px solid #999; border-radius: 10px;
+             padding: 2px 9px; margin-left: 6px; vertical-align: middle; }
+  .key-tag-warn { background: #f8d7da; border-color: #dc3545; color: #721c24; }
+  .key-roster summary, .key-edit summary { cursor: pointer; font-weight: bold;
+                                           padding: 8px 0; }
+  .key-roster { margin-top: 20px; }
+  .key-big-btn { font-size: 19px; padding: 14px 34px; margin: 6px 0 14px;
+                 cursor: pointer; }
+  .key-manual summary { cursor: pointer; font-weight: bold; padding: 8px 0;
+                        color: #555; font-size: 14px; }
+  .key-auto { font-size: 11px; color: #666; font-style: italic; }
+  .key-roster table { max-width: 820px; }
+  .key-off-roster td { background-color: #fdecea !important; }
   .key-state strong { font-size: 21px; }
   .key-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
   /* Signature columns are deliberately empty: the app records names and
@@ -1795,14 +1822,18 @@ KEY_REGISTER_TEMPLATE = CSS_STYLE + """
 {% endif %}
 
 {% if open_entry %}
-<div class="key-state {% if open_entry.overdue %}key-late{% else %}key-out{% endif %}">
+<div class="key-state {% if open_entry.overdue %}key-late{% elif open_entry.weekend %}key-weekend{% else %}key-out{% endif %}">
     The store key is <strong>OUT</strong> with
-    <strong>{{ open_entry.recipient_name }}</strong><br>
+    <strong>{{ open_entry.recipient_name }}</strong>
+    {% if open_entry.weekend %}<span class="key-tag">weekend handover</span>{% endif %}
+    {% if open_entry.off_roster %}<span class="key-tag key-tag-warn">not on the roster as in charge</span>{% endif %}
+    <br>
     Given {{ open_entry.issued_date.strftime('%a %d %b') }} at
     {{ open_entry.issued_time }} by {{ open_entry.pharmacist }}
-    &mdash; {{ open_entry.held_for }} ago.
+    &mdash; {{ open_entry.held_for }} ago.<br>
+    Due back {{ open_entry.due_back.strftime('%a %d %b at %H:%M') }}.
     {% if open_entry.overdue %}<br>
-    <strong>It has not been returned since the day it was issued.</strong>
+    <strong>That has passed &mdash; the key is overdue.</strong>
     {% endif %}
 </div>
 {% else %}
@@ -1815,9 +1846,27 @@ KEY_REGISTER_TEMPLATE = CSS_STYLE + """
 <div class="no-print">
 {% if open_entry %}
 <h2>Record the Key Coming Back</h2>
-<p class="key-hint">Today's date, the time now, you as receiving officer and
-you as pharmacist are all filled in. Change the returning officer only if
-somebody other than {{ open_entry.recipient_name }} is handing it back.</p>
+{% if user_in_charge %}
+<p class="key-hint">One click. The date, the time now,
+{{ open_entry.recipient_name }} as returning officer and you as receiving
+officer and pharmacist are all taken from the record and the clock.</p>
+<form method="POST" action="{{ url_for('key_register') }}">
+    <input type="hidden" name="action" value="return_key">
+    <input type="hidden" name="entry_id" value="{{ open_entry.id }}">
+    <input type="hidden" name="returning_officer" value="{{ open_entry.recipient_name }}">
+    <input type="hidden" name="receiving_officer" value="{{ current_user }}">
+    <input type="hidden" name="return_pharmacist" value="{{ current_user }}">
+    <button type="submit" class="key-big-btn">Key Returned</button>
+</form>
+{% endif %}
+
+<details class="key-manual"{% if not user_in_charge %} open{% endif %}>
+<summary>{% if user_in_charge %}Record the return with different details{% else %}Record the return{% endif %}</summary>
+<p class="key-hint">Change the returning officer if somebody other than
+{{ open_entry.recipient_name }} is handing it back.{% if not user_in_charge %}
+Your own name is not offered as receiving officer, because you are not on the
+roster as in charge &mdash; name the officer who is taking the key back. The
+entry still records that you typed it.{% endif %}</p>
 <form method="POST" action="{{ url_for('key_register') }}" class="dispense-form">
     <input type="hidden" name="action" value="return_key">
     <input type="hidden" name="entry_id" value="{{ open_entry.id }}">
@@ -1829,13 +1878,31 @@ somebody other than {{ open_entry.recipient_name }} is handing it back.</p>
         </div>
         <div>
             <label>Receiving Officer:</label>
+            {% if user_in_charge %}
             <input name="receiving_officer" type="text" maxlength="80"
                    value="{{ current_user }}" required>
+            {% else %}
+            <select name="receiving_officer" required>
+                <option value="">-- who is receiving it? --</option>
+                {% for n in officer_names %}
+                <option value="{{ n }}">{{ n }}</option>
+                {% endfor %}
+            </select>
+            {% endif %}
         </div>
         <div>
             <label>Pharmacist:</label>
+            {% if user_in_charge %}
             <input name="return_pharmacist" type="text" maxlength="80"
                    value="{{ current_user }}" required>
+            {% else %}
+            <select name="return_pharmacist" required>
+                <option value="">-- officer in charge --</option>
+                {% for n in officer_names %}
+                <option value="{{ n }}">{{ n }}</option>
+                {% endfor %}
+            </select>
+            {% endif %}
         </div>
         <div>
             <label>Comments (optional):</label>
@@ -1844,21 +1911,51 @@ somebody other than {{ open_entry.recipient_name }} is handing it back.</p>
     </div>
     <div class="form-buttons"><input type="submit" value="Record Return"></div>
 </form>
+</details>
 {% else %}
-<h2>Issue the Key</h2>
-<p class="key-hint">Type who is taking it and save. The date, the time now and
-your name as the issuing pharmacist are filled in for you.</p>
+<h2>The Key Is In</h2>
+<p class="key-hint">Nothing to do. When you log out, whoever logs in next is
+recorded as holding the key &mdash; you do not need to fill anything in. Use
+the form below only if somebody takes the key without logging in.</p>
+<details class="key-manual">
+<summary>Hand the key over without a login</summary>
+<p class="key-hint">Choose who is taking it and save. The date and the time now
+are filled in for you.{% if not user_in_charge %} Your own name is not offered
+as the officer in charge, because you are not on the roster as in charge &mdash;
+name the officer who actually handed the key over. The entry still records that
+you were the one who typed it.{% endif %}</p>
 <form method="POST" action="{{ url_for('key_register') }}" class="dispense-form">
     <input type="hidden" name="action" value="issue_key">
     <div class="common-section">
         <div>
-            <label>Recipient's Name:</label>
-            <input name="recipient_name" type="text" maxlength="80" autofocus required>
+            <label>Key Given To:</label>
+            <select name="recipient_name" id="key-recipient" autofocus required
+                    onchange="toggleKeyOther()">
+                <option value="">-- choose the officer in charge --</option>
+                {% for n in officer_names %}
+                <option value="{{ n }}">{{ n }}</option>
+                {% endfor %}
+                <option value="__other__">Someone else (not on the roster)</option>
+            </select>
+        </div>
+        <div id="key-other-field" style="display:none;">
+            <label>Their Name:</label>
+            <input name="recipient_other" type="text" maxlength="80"
+                   id="key-recipient-other">
         </div>
         <div>
             <label>Issuing Pharmacist:</label>
+            {% if user_in_charge %}
             <input name="pharmacist" type="text" maxlength="80"
                    value="{{ current_user }}" required>
+            {% else %}
+            <select name="pharmacist" required>
+                <option value="">-- who handed it over? --</option>
+                {% for n in officer_names %}
+                <option value="{{ n }}">{{ n }}</option>
+                {% endfor %}
+            </select>
+            {% endif %}
         </div>
         <div>
             <label>Comments (optional):</label>
@@ -1867,6 +1964,7 @@ your name as the issuing pharmacist are filled in for you.</p>
     </div>
     <div class="form-buttons"><input type="submit" value="Issue Key"></div>
 </form>
+</details>
 {% endif %}
 </div>
 
@@ -1892,10 +1990,75 @@ your name as the issuing pharmacist are filled in for you.</p>
     </div>
 </form>
 
+{% if edit_entry %}
+<div class="key-edit no-print">
+<h2>Correct Entry &mdash; {{ edit_entry.recipient_name }},
+    {{ edit_entry.issued_date.strftime('%d %b %Y') }}</h2>
+<p class="key-hint">Put the names right where the person at the counter was not
+the officer in charge. The change and what it replaced both go to the audit log.</p>
+<form method="POST" action="{{ url_for('key_register') }}" class="dispense-form">
+    <input type="hidden" name="action" value="edit_entry">
+    <input type="hidden" name="entry_id" value="{{ edit_entry.id }}">
+    <div class="common-section">
+        <div>
+            <label>Issuing Pharmacist:</label>
+            <input name="pharmacist" type="text" maxlength="80"
+                   value="{{ edit_entry.pharmacist }}">
+        </div>
+        <div>
+            <label>Key Given To:</label>
+            <input name="recipient_name" type="text" maxlength="80"
+                   value="{{ edit_entry.recipient_name }}" list="key-officer-list">
+        </div>
+        <div>
+            <label>Time Given:</label>
+            <input name="issued_time" type="time" value="{{ edit_entry.issued_time_raw }}">
+        </div>
+        <div>
+            <label>Returning Officer:</label>
+            <input name="returning_officer" type="text" maxlength="80"
+                   value="{{ edit_entry.returning_officer or '' }}" list="key-officer-list">
+        </div>
+        <div>
+            <label>Receiving Officer:</label>
+            <input name="receiving_officer" type="text" maxlength="80"
+                   value="{{ edit_entry.receiving_officer or '' }}" list="key-officer-list">
+        </div>
+        <div>
+            <label>Pharmacist (return):</label>
+            <input name="return_pharmacist" type="text" maxlength="80"
+                   value="{{ edit_entry.return_pharmacist or '' }}" list="key-officer-list">
+        </div>
+        <div>
+            <label>Time Returned:</label>
+            <input name="returned_time" type="time" value="{{ edit_entry.returned_time_raw }}">
+        </div>
+        <div>
+            <label>Comments:</label>
+            <input name="comments" type="text" maxlength="200"
+                   value="{{ edit_entry.comments or '' }}">
+        </div>
+    </div>
+    <div class="form-buttons">
+        <input type="submit" value="Save Correction">
+        <a href="{{ url_for('key_register') }}">Cancel</a>
+    </div>
+</form>
+</div>
+<datalist id="key-officer-list">
+    {% for n in officer_names %}<option value="{{ n }}">{% endfor %}
+</datalist>
+{% endif %}
+
 <h2>Register &mdash; {{ start_date }} to {{ end_date }}</h2>
-<p class="key-hint no-print">The four signature columns print empty so the
-filed copy can be signed by hand. The app records the names, the times and who
-was logged in; it does not record a signature it never saw.</p>
+<p class="key-hint no-print">This register writes itself from who is logged in:
+when the pharmacist logs out, whoever logs in next is recorded as holding the
+key until he takes it back. One issue covers the whole absence; anybody else
+who logs in while it is out is noted against that same row as also on duty,
+rather than splitting it. Nobody has to fill a form in.<br>
+The four signature columns print empty so the filed copy can be signed by hand.
+The app records the names, the times and who was logged in; it does not record
+a signature it never saw.</p>
 <table>
     <thead>
     <tr>
@@ -1913,12 +2076,13 @@ was logged in; it does not record a signature it never saw.</p>
         <th class="key-sign">Receiving officer's signature</th>
         <th>Pharmacist</th>
         <th>Comments</th>
+        <th class="no-print">Entered by</th>
         {% if is_admin %}<th class="no-print">Action</th>{% endif %}
     </tr>
     </thead>
     <tbody>
     {% for r in entries %}
-    <tr class="{% if r.overdue %}key-overdue{% endif %}">
+    <tr class="{% if r.overdue %}key-overdue{% elif r.off_roster %}key-off-roster{% endif %}">
         <td>{{ r.issued_date.strftime('%Y-%m-%d') }}</td>
         <td>{{ r.issued_time }}</td>
         <td>{{ r.pharmacist }}</td>
@@ -1932,9 +2096,17 @@ was logged in; it does not record a signature it never saw.</p>
         <td>{{ r.receiving_officer or '' }}</td>
         <td class="key-sign">&nbsp;</td>
         <td>{{ r.return_pharmacist or '' }}</td>
-        <td>{{ r.comments or '' }}{% if r.status == 'Out' %}<em> (still out)</em>{% endif %}</td>
+        <td>{{ r.comments or '' }}
+            {%- if r.also_on_duty %}{% if r.comments %}; {% endif %}also on duty: {{ r.also_on_duty|join(', ') }}{% endif %}
+            {%- if r.status == 'Out' %}<em> (still out{% if r.weekend %}, weekend{% endif %})</em>{% endif %}</td>
+        <td class="no-print">{{ r.entered_by or '-' }}
+            {%- if r.auto_source %}<br><span class="key-auto">from {{ 'their login' if r.auto_source in ['login', 'away-window'] else 'shift handover' }}</span>{% endif %}
+            {%- if r.auto_closed %}<br><span class="key-auto">closed by handover</span>{% endif %}
+            {%- if r.off_roster %}<br><span class="key-tag key-tag-warn">not in charge</span>{% endif %}
+            {%- if r.corrected_by %}<br><small>corrected by {{ r.corrected_by }}</small>{% endif %}</td>
         {% if is_admin %}
         <td class="no-print">
+            <a href="{{ url_for('key_register', edit=r.id, start_date=start_date, end_date=end_date) }}">Edit</a>
             <form method="POST" action="{{ url_for('key_register') }}" style="display:inline"
                   onsubmit="return confirm('Delete this key register entry?');">
                 <input type="hidden" name="action" value="delete_entry">
@@ -1945,7 +2117,7 @@ was logged in; it does not record a signature it never saw.</p>
         {% endif %}
     </tr>
     {% else %}
-    <tr><td colspan="{{ 15 if is_admin else 14 }}">No key movements in this period.</td></tr>
+    <tr><td colspan="{{ 16 if is_admin else 15 }}">No key movements in this period.</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -1954,6 +2126,80 @@ in this period{% if still_out_count %}, {{ still_out_count }} not returned{% end
 <p style="margin-top:20px;">Checked by: ______________________________
 &nbsp;&nbsp;&nbsp; Signature: __________________
 &nbsp;&nbsp;&nbsp; Date: ____________________</p>
+
+{% if is_admin %}
+<details class="key-roster no-print">
+<summary>Nursing officer roster &mdash; who may hold the key</summary>
+<p class="key-hint">Only people marked <strong>in charge</strong> are offered
+when the key is issued. Somebody can be on the roster, and use the app, without
+being in charge &mdash; that is what the flag is for.</p>
+<table>
+    <tr><th>Name</th><th>Role</th><th>In charge</th><th>Active</th><th>Set</th></tr>
+    {% for o in roster %}
+    <tr>
+        <td>{{ o.name }}</td>
+        <td>{{ o.role }}</td>
+        <td>{{ 'Yes' if o.in_charge else 'No' }}</td>
+        <td>{{ 'Yes' if o.active else 'No' }}</td>
+        <td>
+            <form method="POST" action="{{ url_for('key_register') }}" style="display:inline">
+                <input type="hidden" name="action" value="set_officer">
+                <input type="hidden" name="officer_id" value="{{ o._id }}">
+                <select name="in_charge">
+                    <option value="yes" {% if o.in_charge %}selected{% endif %}>In charge</option>
+                    <option value="no" {% if not o.in_charge %}selected{% endif %}>Not in charge</option>
+                </select>
+                <select name="active">
+                    <option value="yes" {% if o.active %}selected{% endif %}>Active</option>
+                    <option value="no" {% if not o.active %}selected{% endif %}>Inactive</option>
+                </select>
+                <button type="submit">Set</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+<h3>Add Someone</h3>
+<form method="POST" action="{{ url_for('key_register') }}" class="dispense-form">
+    <input type="hidden" name="action" value="add_officer">
+    <div class="common-section">
+        <div>
+            <label>Name:</label>
+            <input name="officer_name" type="text" maxlength="80" required>
+        </div>
+        <div>
+            <label>Role:</label>
+            <input name="officer_role" type="text" maxlength="40"
+                   placeholder="Nursing Officer">
+        </div>
+        <div>
+            <label>In charge?</label>
+            <select name="in_charge">
+                <option value="yes">Yes &mdash; may hold the key</option>
+                <option value="no">No &mdash; may use the app only</option>
+            </select>
+        </div>
+    </div>
+    <div class="form-buttons"><input type="submit" value="Add to Roster"></div>
+</form>
+</details>
+{% endif %}
+
+<script>
+// The recipient is chosen from the roster. "Someone else" reveals a text box
+// so an off-roster holder can still be recorded — the register has to be able
+// to say what actually happened, and the row is flagged for review.
+function toggleKeyOther() {
+    var sel = document.getElementById('key-recipient');
+    var field = document.getElementById('key-other-field');
+    var box = document.getElementById('key-recipient-other');
+    if (!sel || !field) return;
+    var other = sel.value === '__other__';
+    field.style.display = other ? '' : 'none';
+    if (box) { box.required = other; if (!other) box.value = ''; }
+}
+document.addEventListener('DOMContentLoaded', toggleKeyOther);
+</script>
 """
 
 
@@ -4223,6 +4469,15 @@ def login():
                 }
                 session.permanent = True
                 session['last_active'] = datetime.now(timezone.utc).isoformat()
+                # Keep the store key register in step with who is on duty.
+                # Guarded here as well as inside: this is the login path, and
+                # no change to the key register should ever be able to lock
+                # everybody out of the app.
+                try:
+                    _key_on_login(session['user']['name'],
+                                  session['user'].get('role') == 'admin')
+                except Exception as e:
+                    app.logger.warning(f'key register login hook failed: {e}')
 
                 if password_expired:
                     session['must_change_password'] = True
@@ -4404,6 +4659,14 @@ def register():
 
 @app.route('/logout', methods=['GET'])
 def logout():
+    # The pharmacist logging out IS the key handover: whoever logs in next is
+    # holding it. Arming here means nobody has to record anything.
+    user = session.get('user') or {}
+    if user.get('role') == 'admin':
+        try:
+            _key_arm_handover(user.get('name', ''))
+        except Exception as e:
+            app.logger.warning(f'key handover arm failed: {e}')
     session.pop('user', None)
     session.pop('admin_access', None)
     return redirect('/login')
@@ -8172,6 +8435,97 @@ def loans():
         return redirect('/reports')
 
 
+# ---------------------------------------------------------------------------
+# The pharmacist is away from Friday late morning until Monday midday, and the
+# store key stays with whichever nursing officer locks up. That is the normal
+# arrangement, not an exception, so the register must not raise an alarm every
+# single weekend — an alarm that cries wolf weekly is one nobody reads.
+#
+# Any key issued on a Friday, Saturday or Sunday is therefore expected back
+# when he returns, and only counts as overdue after that. The cost of this is
+# that a Friday-MORNING issue is not chased until Monday either; that is the
+# deliberate trade, because he is still on the premises until he leaves and
+# would see it himself, whereas a false alarm every weekend costs the flag its
+# meaning. Public holidays are not modelled.
+# ---------------------------------------------------------------------------
+# Seeded on first use so the roster is usable immediately. Everyone here is
+# marked an officer in charge EXCEPT the Nurse Assistant, who may operate the
+# app but is not in charge. These names were taken from the staff already
+# named elsewhere in the app, so the roles are a starting guess — an admin
+# edits them on the page.
+KEY_OFFICER_SEED = [
+    ('Malesoetsa Leohla', 'Nursing Officer', True),
+    ('Mamosaase Nqosa', 'Nursing Officer', True),
+    ('Mapalo Mapesela', 'Nursing Officer', True),
+    ('Mathuto Kutoane', 'Nursing Officer', True),
+    ('Thapelo Mphole', 'Nursing Officer', True),
+    ('Locum Nurse', 'Nursing Officer', True),
+    ('Mamosa Seetsa', 'Nurse Assistant', False),
+]
+
+
+def _seed_key_officers(officers):
+    """Put the roster in place once, if it has never been set up."""
+    if officers.count_documents({}) == 0:
+        officers.insert_many([
+            {'name': n, 'role': r, 'in_charge': c, 'active': True,
+             'created_at': datetime.utcnow(), 'seeded': True}
+            for n, r, c in KEY_OFFICER_SEED])
+
+
+def _officer_names(officers, in_charge_only=True):
+    q = {'active': True}
+    if in_charge_only:
+        q['in_charge'] = True
+    return [d['name'] for d in officers.find(q).sort('name', 1)]
+
+
+def _is_in_charge(officers, name):
+    """Is this person an officer in charge? Unknown names are not."""
+    if not name:
+        return False
+    doc = officers.find_one({'name': name, 'active': True})
+    return bool(doc and doc.get('in_charge'))
+
+
+def _user_in_charge(officers, name, is_admin):
+    """Whether the logged-in user may be named as the officer in charge.
+
+    The roster decides for anybody on it — that is the point of the flag, and
+    it must hold even if such a person also has an admin login. Somebody not
+    on the roster at all falls back to their role, so the pharmacist and
+    managers are not locked out of their own key register for want of a
+    roster entry.
+    """
+    doc = officers.find_one({'name': name, 'active': True})
+    if doc:
+        return bool(doc.get('in_charge'))
+    return bool(is_admin)
+
+
+KEY_AWAY_WEEKDAY = 4          # Friday (Monday = 0)
+KEY_RETURN_WEEKDAY = 0        # Monday
+KEY_AWAY_TIME = (11, 30)      # he leaves
+KEY_RETURN_TIME = (12, 0)     # he is back
+
+
+def _key_due_back(issued_at):
+    """When an issue is expected back."""
+    wd = issued_at.weekday()
+    if wd in (KEY_AWAY_WEEKDAY, 5, 6):           # Fri, Sat, Sun
+        days_ahead = {KEY_AWAY_WEEKDAY: 3, 5: 2, 6: 1}[wd]
+        monday = issued_at + timedelta(days=days_ahead)
+        return monday.replace(hour=KEY_RETURN_TIME[0], minute=KEY_RETURN_TIME[1],
+                              second=0, microsecond=0)
+    # Any other day: back before the day is out.
+    return issued_at.replace(hour=23, minute=59, second=59, microsecond=0)
+
+
+def _key_is_weekend_hold(issued_at):
+    """True when this issue spans the pharmacist's absence."""
+    return issued_at.weekday() in (KEY_AWAY_WEEKDAY, 5, 6)
+
+
 def _held_for(since, now):
     """Plain-language gap, e.g. '4h 20m' or '2 days 3h'."""
     secs = max(0, int((now - since).total_seconds()))
@@ -8185,6 +8539,143 @@ def _held_for(since, now):
     return f'{mins}m'
 
 
+# ---------------------------------------------------------------------------
+# The register writes itself from who is logged in.
+#
+# In practice nobody fills this form in. The pharmacist logs out on Friday,
+# whoever logs in next is holding the key, and when he comes back he clicks
+# Returned. So the login and logout are the handover, and the register simply
+# records what they already say.
+#
+# Everything here is best-effort and wrapped: a key register that could stop
+# somebody logging in would be a far worse problem than a missing row, so a
+# failure in here is logged and swallowed.
+# ---------------------------------------------------------------------------
+def _key_control(db):
+    return db['key_control']
+
+
+def _key_arm_handover(user_name):
+    """The pharmacist has logged out, so the key is up for handover."""
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        if db['key_register'].find_one({'status': 'Out'}):
+            return                      # already with somebody
+        _key_control(db).update_one(
+            {'_id': 'state'},
+            {'$set': {'armed': True, 'armed_by': user_name,
+                      'armed_at': local_now()}},
+            upsert=True)
+    except Exception as e:
+        app.logger.warning(f'key handover arm failed: {e}')
+
+
+def _key_in_away_window(now):
+    """Between the pharmacist leaving on Friday and returning on Monday.
+
+    A safety net for the Friday he closes the browser instead of logging out,
+    which will happen. Without it the weekend handover simply would not be
+    recorded, which is the one it most matters for.
+    """
+    wd = now.weekday()
+    if wd == KEY_AWAY_WEEKDAY:
+        return (now.hour, now.minute) >= KEY_AWAY_TIME
+    if wd in (5, 6):
+        return True
+    if wd == KEY_RETURN_WEEKDAY:
+        return (now.hour, now.minute) < KEY_RETURN_TIME
+    return False
+
+
+def _key_open_issue(keys, officers, holder, pharmacist, now, source):
+    """Start a row for `holder`, filled in from what the login already says."""
+    ref = f"KEY-{now:%Y%m%d}-{uuid4().hex[:4].upper()}"
+    keys.insert_one({
+        'ref': ref,
+        'issued_date': datetime(now.year, now.month, now.day),
+        'issued_time': now.strftime('%H:%M'),
+        'issued_at': now,
+        'pharmacist': pharmacist,
+        'recipient_name': holder,
+        'returned_date': None, 'returned_time': None, 'returned_at': None,
+        'returning_officer': None, 'receiving_officer': None,
+        'return_pharmacist': None,
+        'comments': '',
+        'status': 'Out',
+        'issued_by_user': holder,
+        'due_back': _key_due_back(now),
+        'weekend_hold': _key_is_weekend_hold(now),
+        'recipient_off_roster': not _is_in_charge(officers, holder),
+        'auto_source': source,
+        'created_at': datetime.utcnow(),
+    })
+    write_audit_entry('CREATE', 'store_key', ref,
+                      f'key recorded to {holder} automatically ({source}) '
+                      f'at {now:%Y-%m-%d %H:%M}')
+    return ref
+
+
+def _key_on_login(user_name, is_admin):
+    """Called once per successful login. Keeps the register in step."""
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        keys, officers = db['key_register'], db['key_officers']
+        _seed_key_officers(officers)
+        now = local_now()
+        open_doc = keys.find_one({'status': 'Out'})
+
+        if open_doc:
+            holder = open_doc.get('recipient_name')
+            if holder == user_name:
+                return                  # same person, still holding it
+            if is_admin:
+                # He is back. The key is not his again until he says so, so
+                # the row stays open and he closes it with one click.
+                return
+            # Somebody else has come on duty. One issue covers the whole
+            # absence, so the row stays as it is and is NOT split: the key
+            # was handed over once, when the pharmacist left.
+            #
+            # Their name is still noted against that row, though. The app
+            # knows they were on duty, and quietly dropping it would leave
+            # the register asserting that one person held the key for three
+            # days when it knows others were there too.
+            already = open_doc.get('also_on_duty') or []
+            if user_name not in already:
+                keys.update_one(
+                    {'_id': open_doc['_id']},
+                    {'$addToSet': {'also_on_duty': user_name}})
+                write_audit_entry(
+                    'UPDATE', 'store_key', open_doc.get('ref', ''),
+                    f'{user_name} also on duty during this issue '
+                    f'(key remains recorded to {holder})')
+            return
+
+        # Key is not out.
+        state = _key_control(db).find_one({'_id': 'state'}) or {}
+        if is_admin:
+            # He is here, so he has it; nothing is outstanding.
+            if state.get('armed'):
+                _key_control(db).update_one({'_id': 'state'},
+                                            {'$set': {'armed': False}})
+            return
+        if state.get('armed') or _key_in_away_window(now):
+            _key_open_issue(keys, officers, user_name,
+                            state.get('armed_by') or _key_last_pharmacist(keys),
+                            now, 'login' if state.get('armed') else 'away-window')
+            _key_control(db).update_one({'_id': 'state'},
+                                        {'$set': {'armed': False}}, upsert=True)
+    except Exception as e:
+        app.logger.warning(f'key register login hook failed: {e}')
+
+
+def _key_last_pharmacist(keys):
+    """Whoever last handed the key over, for filling the pharmacist column."""
+    last = keys.find_one({'pharmacist': {'$nin': [None, '']}},
+                         sort=[('issued_at', -1)])
+    return (last or {}).get('pharmacist', '')
+
+
 @app.route('/key-register', methods=['GET', 'POST'])
 @login_required
 def key_register():
@@ -8195,6 +8686,12 @@ def key_register():
     try:
         db = get_mongo_client()['pharmacy_db']
         keys = db['key_register']
+        officers = db['key_officers']
+        _seed_key_officers(officers)
+        # Whoever is logged in may be entering the record without being an
+        # officer in charge. Their name is kept as the person who typed it,
+        # but it is never dropped into a field that asserts authority.
+        user_in_charge = _user_in_charge(officers, current_user, is_admin)
 
         if request.method == 'POST':
             action = request.form.get('action')
@@ -8215,11 +8712,26 @@ def key_register():
                     return redirect(url_for('key_register'))
 
                 recipient = (request.form.get('recipient_name') or '').strip()
+                if recipient == '__other__':
+                    recipient = (request.form.get('recipient_other') or '').strip()
                 if not recipient:
                     flash('A recipient name is required — the key has to be '
                           'traceable to someone.')
                     return redirect(url_for('key_register'))
-                pharmacist = (request.form.get('pharmacist') or '').strip() or current_user
+                # Only default the pharmacist to the logged-in user when that
+                # user is actually an officer in charge. Otherwise the field
+                # must be filled in explicitly, so a Nurse Assistant entering
+                # the record is never recorded as the one in charge of it.
+                pharmacist = (request.form.get('pharmacist') or '').strip()
+                if not pharmacist:
+                    if user_in_charge:
+                        pharmacist = current_user
+                    else:
+                        flash('Name the officer in charge who handed the key '
+                              'over — your own name cannot be used, because '
+                              'you are not on the roster as in charge.')
+                        return redirect(url_for('key_register'))
+                off_roster = not _is_in_charge(officers, recipient)
 
                 ref = f"KEY-{now:%Y%m%d}-{uuid4().hex[:4].upper()}"
                 keys.insert_one({
@@ -8236,12 +8748,29 @@ def key_register():
                     'comments': (request.form.get('comments') or '').strip(),
                     'status': 'Out',
                     'issued_by_user': current_user,
+                    'due_back': _key_due_back(now),
+                    'weekend_hold': _key_is_weekend_hold(now),
+                    'recipient_off_roster': off_roster,
                     'created_at': datetime.utcnow(),
                 })
                 write_audit_entry('CREATE', 'store_key', ref,
                                   f'key issued to {recipient} by {pharmacist} '
-                                  f'at {now:%Y-%m-%d %H:%M}')
-                flash(f'Key issued to {recipient} at {now:%H:%M}.', 'success')
+                                  f'at {now:%Y-%m-%d %H:%M}'
+                                  + (f' [entered by {current_user}]'
+                                     if current_user != pharmacist else ''))
+                note = ''
+                if off_roster:
+                    note = (f' {recipient} is not on the roster as an officer '
+                            f'in charge — this entry is flagged for review.')
+                if _key_is_weekend_hold(now):
+                    due = _key_due_back(now)
+                    flash(f'Key issued to {recipient} at {now:%H:%M} as a '
+                          f'weekend handover, due back {due:%A} '
+                          f'{due:%H:%M}.{note}',
+                          'partial' if off_roster else 'success')
+                else:
+                    flash(f'Key issued to {recipient} at {now:%H:%M}.{note}',
+                          'partial' if off_roster else 'success')
                 return redirect(url_for('key_register'))
 
             if action == 'return_key':
@@ -8259,10 +8788,19 @@ def key_register():
 
                 returning = (request.form.get('returning_officer') or '').strip() \
                     or doc.get('recipient_name', '')
-                receiving = (request.form.get('receiving_officer') or '').strip() \
-                    or current_user
-                ret_pharm = (request.form.get('return_pharmacist') or '').strip() \
-                    or current_user
+                # Same rule as on issue: the logged-in user is only defaulted
+                # into an officer field when they are an officer in charge.
+                receiving = (request.form.get('receiving_officer') or '').strip()
+                ret_pharm = (request.form.get('return_pharmacist') or '').strip()
+                if not receiving or not ret_pharm:
+                    if user_in_charge:
+                        receiving = receiving or current_user
+                        ret_pharm = ret_pharm or current_user
+                    else:
+                        flash('Name the officer in charge receiving the key — '
+                              'your own name cannot be used, because you are '
+                              'not on the roster as in charge.')
+                        return redirect(url_for('key_register'))
                 extra = (request.form.get('comments') or '').strip()
                 comments = '; '.join(x for x in (doc.get('comments'), extra) if x)
 
@@ -8283,6 +8821,106 @@ def key_register():
                                   f'{receiving} after {held}')
                 flash(f'Key returned by {returning} at {now:%H:%M}, '
                       f'out for {held}.', 'success')
+                return redirect(url_for('key_register'))
+
+            if action == 'edit_entry':
+                # An entry made by whoever was at the counter may need the
+                # officer names put right afterwards. Admin only, and the
+                # before-and-after goes to the audit log so the correction is
+                # itself on the record.
+                if not is_admin:
+                    flash('Access denied. Only admins can correct a register entry.')
+                    return redirect(url_for('key_register'))
+                try:
+                    doc = keys.find_one({'_id': ObjectId(request.form.get('entry_id', ''))})
+                except (InvalidId, TypeError):
+                    doc = None
+                if not doc:
+                    flash('That key register entry was not found.')
+                    return redirect(url_for('key_register'))
+
+                fields = ['pharmacist', 'recipient_name', 'returning_officer',
+                          'receiving_officer', 'return_pharmacist', 'comments']
+                updates, changes = {}, []
+                for f in fields:
+                    if f not in request.form:
+                        continue
+                    new_val = (request.form.get(f) or '').strip()
+                    old_val = doc.get(f) or ''
+                    if new_val != old_val:
+                        updates[f] = new_val or None
+                        changes.append(f"{f}: '{old_val}' -> '{new_val}'")
+                for f, label in (('issued_time', 'issued time'),
+                                 ('returned_time', 'returned time')):
+                    if f not in request.form:
+                        continue
+                    new_val = (request.form.get(f) or '').strip()[:5]
+                    old_val = doc.get(f) or ''
+                    if new_val != old_val:
+                        updates[f] = new_val or None
+                        changes.append(f"{label}: '{old_val}' -> '{new_val}'")
+
+                if not updates:
+                    flash('Nothing was changed.')
+                    return redirect(url_for('key_register'))
+                if 'recipient_name' in updates:
+                    updates['recipient_off_roster'] = not _is_in_charge(
+                        officers, updates['recipient_name'])
+                updates['corrected_by'] = current_user
+                updates['corrected_at'] = datetime.utcnow()
+                keys.update_one({'_id': doc['_id']}, {'$set': updates})
+                write_audit_entry('UPDATE', 'store_key', doc.get('ref', ''),
+                                  'entry corrected — ' + '; '.join(changes))
+                flash(f"Entry corrected: {'; '.join(changes)}.", 'success')
+                return redirect(url_for('key_register'))
+
+            if action == 'add_officer':
+                if not is_admin:
+                    flash('Access denied. Only admins can change the roster.')
+                    return redirect(url_for('key_register'))
+                name = (request.form.get('officer_name') or '').strip()
+                if not name:
+                    flash('A name is required.')
+                    return redirect(url_for('key_register'))
+                if officers.find_one({'name': name}):
+                    flash(f'{name} is already on the roster.')
+                    return redirect(url_for('key_register'))
+                in_charge = request.form.get('in_charge') == 'yes'
+                officers.insert_one({
+                    'name': name,
+                    'role': (request.form.get('officer_role') or '').strip()
+                            or ('Nursing Officer' if in_charge else 'Nurse Assistant'),
+                    'in_charge': in_charge, 'active': True,
+                    'created_by': current_user, 'created_at': datetime.utcnow(),
+                })
+                write_audit_entry('CREATE', 'key_officer', name,
+                                  f"added, in charge: {'yes' if in_charge else 'no'}")
+                flash(f"{name} added to the roster"
+                      f"{'' if in_charge else ' (not an officer in charge)'}.",
+                      'success')
+                return redirect(url_for('key_register'))
+
+            if action == 'set_officer':
+                if not is_admin:
+                    flash('Access denied. Only admins can change the roster.')
+                    return redirect(url_for('key_register'))
+                try:
+                    doc = officers.find_one({'_id': ObjectId(request.form.get('officer_id', ''))})
+                except (InvalidId, TypeError):
+                    doc = None
+                if not doc:
+                    flash('That person was not found on the roster.')
+                    return redirect(url_for('key_register'))
+                in_charge = request.form.get('in_charge') == 'yes'
+                active = request.form.get('active') == 'yes'
+                officers.update_one({'_id': doc['_id']},
+                                    {'$set': {'in_charge': in_charge,
+                                              'active': active}})
+                write_audit_entry(
+                    'UPDATE', 'key_officer', doc['name'],
+                    f"in charge {doc.get('in_charge')} -> {in_charge}, "
+                    f"active {doc.get('active')} -> {active}")
+                flash(f"{doc['name']} updated.", 'success')
                 return redirect(url_for('key_register'))
 
             if action == 'delete_entry':
@@ -8334,9 +8972,14 @@ def key_register():
         entries, still_out_count = [], 0
         for doc in keys.find(query).sort('issued_at', -1).limit(500):
             out = doc.get('status') == 'Out'
-            # Still out, and not issued today: it has been held overnight,
-            # which for a store key is the thing worth noticing.
-            overdue = out and doc['issued_date'].date() < today
+            # Overdue is measured against when the key was actually expected
+            # back, which over a weekend is Monday midday, not the same night.
+            issued_at = doc.get('issued_at') or doc['issued_date']
+            due = doc.get('due_back') or _key_due_back(issued_at)
+            weekend = doc.get('weekend_hold')
+            if weekend is None:
+                weekend = _key_is_weekend_hold(issued_at)
+            overdue = out and now > due
             if out:
                 still_out_count += 1
             entries.append({
@@ -8354,12 +8997,26 @@ def key_register():
                 'comments': doc.get('comments', ''),
                 'status': doc.get('status', ''),
                 'overdue': overdue,
+                'weekend': weekend,
+                'due_back': due,
+                'entered_by': doc.get('issued_by_user', ''),
+                'auto_source': doc.get('auto_source', ''),
+                'auto_closed': doc.get('auto_closed', ''),
+                'also_on_duty': doc.get('also_on_duty') or [],
+                'off_roster': doc.get('recipient_off_roster', False),
+                'corrected_by': doc.get('corrected_by', ''),
+                'issued_time_raw': doc.get('issued_time', ''),
+                'returned_time_raw': doc.get('returned_time', ''),
             })
 
         open_doc = keys.find_one({'status': 'Out'})
         open_entry = None
         if open_doc:
             since = open_doc.get('issued_at') or open_doc['issued_date']
+            due = open_doc.get('due_back') or _key_due_back(since)
+            weekend = open_doc.get('weekend_hold')
+            if weekend is None:
+                weekend = _key_is_weekend_hold(since)
             open_entry = {
                 'id': str(open_doc['_id']),
                 'recipient_name': open_doc.get('recipient_name', ''),
@@ -8367,7 +9024,10 @@ def key_register():
                 'issued_time': open_doc.get('issued_time', ''),
                 'pharmacist': open_doc.get('pharmacist', ''),
                 'held_for': _held_for(since, now),
-                'overdue': open_doc['issued_date'].date() < today,
+                'overdue': now > due,
+                'weekend': weekend,
+                'due_back': due,
+                'off_roster': open_doc.get('recipient_off_roster', False),
             }
 
         last_return = ''
@@ -8378,12 +9038,20 @@ def key_register():
                                f"{last.get('returned_time', '')} by "
                                f"{last.get('returning_officer', '')}")
 
+        edit_entry = None
+        raw_edit = (request.args.get('edit') or '').strip()
+        if raw_edit and is_admin:
+            edit_entry = next((e for e in entries if e['id'] == raw_edit), None)
+
         return render_template_string(
             KEY_REGISTER_TEMPLATE, nav_links=get_nav_links(),
             message=message, message_class=message_class, is_admin=is_admin,
-            current_user=current_user,
+            current_user=current_user, user_in_charge=user_in_charge,
+            officer_names=_officer_names(officers),
+            roster=list(officers.find().sort([('in_charge', -1), ('name', 1)])),
             open_entry=open_entry, last_return=last_return,
             entries=entries, still_out_count=still_out_count,
+            edit_entry=edit_entry,
             start_date=start.strftime('%Y-%m-%d'),
             end_date=end.strftime('%Y-%m-%d'), q=q)
 
