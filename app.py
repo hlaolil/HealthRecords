@@ -148,6 +148,11 @@ def init_db_collections():
             db.create_collection('loan_items')
         if 'loans' not in existing:
             db.create_collection('loans')
+        # NEW (Store key register, LD-HSE/NMC/PSKR/6.1.3.3): one document per
+        # issue of the pharmacy store key, carrying both sides of the paper
+        # form — who took it and when, who brought it back and who received it.
+        if 'key_register' not in existing:
+            db.create_collection('key_register')
 
         # audit_log: /audit page sorts by timestamp desc and filters by
         # action/target_type/target_id/user via $or regex, plus an exact
@@ -208,6 +213,13 @@ def init_db_collections():
         db['loans'].create_index([('patient_name', 1)])
         db['loans'].create_index([('issued_date', -1)])
         db['loans'].create_index([('loan_ref', 1)], unique=True)
+
+        # key_register: the hot query is "is the key out right now", which is
+        # status alone; the register itself reads newest-first by issue time.
+        db['key_register'].create_index([('status', 1)])
+        db['key_register'].create_index([('issued_at', -1)])
+        db['key_register'].create_index([('recipient_name', 1)])
+        db['key_register'].create_index([('ref', 1)], unique=True)
         db['deliveries'].create_index([('status', 1), ('opened_at', -1)])
         db['deliveries'].create_index([('reference', 1)], unique=True)
         db['deliveries'].create_index([('invoice_number', 1)])
@@ -372,6 +384,7 @@ def get_nav_links():
             <a href="/internal-issue">Internal Issues</a> |
             <a href="/temperature">Temperature</a> |
             <a href="/loans">Loans</a> |
+            <a href="/key-register">Store Key</a> |
             {add_med_link}
             {loan_items_link}
             <a href="/reports">Reports</a> |
@@ -1744,6 +1757,202 @@ damaged, retired or lost &mdash; or the register is empty.</p>
 <p class="loan-hint">Average days out counts loans by the month they came
 back, so a long loan is measured against the month it ended.</p>
 <p style="margin-top:24px;">Checked by: ____________________________
+&nbsp;&nbsp;&nbsp; Date: ____________________</p>
+"""
+
+
+KEY_REGISTER_TEMPLATE = CSS_STYLE + """
+<style>
+  @media print {
+    .nav-links, .no-print { display: none !important; }
+    body { margin: 0; }
+    @page { size: A4 landscape; margin: 8mm; }
+    table { font-size: 10px; }
+    table th, table td { padding: 3px 4px; }
+    .key-sign { min-width: 70px; }
+  }
+  .key-state { padding: 16px; border-radius: 8px; margin: 12px 0 18px;
+               font-size: 17px; }
+  .key-out { background: #fff3cd; border: 2px solid #ffc107; }
+  .key-in { background: #d4edda; border: 2px solid #28a745; }
+  .key-late { background: #f8d7da; border: 2px solid #dc3545; }
+  .key-state strong { font-size: 21px; }
+  .key-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
+  /* Signature columns are deliberately empty: the app records names and
+     times, it does not claim anybody signed. They print as ruled space.
+     The tint is on the body cells only: on a header cell it would overpaint
+     the dark header background and hide its white text. */
+  td.key-sign { background: #fcfcfc; }
+  .key-sign { min-width: 90px; }
+  .key-overdue td { background-color: #f8d7da !important; }
+</style>
+<h1>Pharmacy Store Key Register</h1>
+<p>LD-HSE/NMC/PSKR/6.1.3.3 &nbsp;&middot;&nbsp; Revision 2 of 2018
+&nbsp;&middot;&nbsp; Responsible: SNO</p>
+{{ nav_links|safe }}
+{% if message %}
+    <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+
+{% if open_entry %}
+<div class="key-state {% if open_entry.overdue %}key-late{% else %}key-out{% endif %}">
+    The store key is <strong>OUT</strong> with
+    <strong>{{ open_entry.recipient_name }}</strong><br>
+    Given {{ open_entry.issued_date.strftime('%a %d %b') }} at
+    {{ open_entry.issued_time }} by {{ open_entry.pharmacist }}
+    &mdash; {{ open_entry.held_for }} ago.
+    {% if open_entry.overdue %}<br>
+    <strong>It has not been returned since the day it was issued.</strong>
+    {% endif %}
+</div>
+{% else %}
+<div class="key-state key-in">
+    The store key is <strong>IN</strong> the pharmacy.
+    {% if last_return %}Last returned {{ last_return }}.{% endif %}
+</div>
+{% endif %}
+
+<div class="no-print">
+{% if open_entry %}
+<h2>Record the Key Coming Back</h2>
+<p class="key-hint">Today's date, the time now, you as receiving officer and
+you as pharmacist are all filled in. Change the returning officer only if
+somebody other than {{ open_entry.recipient_name }} is handing it back.</p>
+<form method="POST" action="{{ url_for('key_register') }}" class="dispense-form">
+    <input type="hidden" name="action" value="return_key">
+    <input type="hidden" name="entry_id" value="{{ open_entry.id }}">
+    <div class="common-section">
+        <div>
+            <label>Returning Officer:</label>
+            <input name="returning_officer" type="text" maxlength="80"
+                   value="{{ open_entry.recipient_name }}" required>
+        </div>
+        <div>
+            <label>Receiving Officer:</label>
+            <input name="receiving_officer" type="text" maxlength="80"
+                   value="{{ current_user }}" required>
+        </div>
+        <div>
+            <label>Pharmacist:</label>
+            <input name="return_pharmacist" type="text" maxlength="80"
+                   value="{{ current_user }}" required>
+        </div>
+        <div>
+            <label>Comments (optional):</label>
+            <input name="comments" type="text" maxlength="120">
+        </div>
+    </div>
+    <div class="form-buttons"><input type="submit" value="Record Return"></div>
+</form>
+{% else %}
+<h2>Issue the Key</h2>
+<p class="key-hint">Type who is taking it and save. The date, the time now and
+your name as the issuing pharmacist are filled in for you.</p>
+<form method="POST" action="{{ url_for('key_register') }}" class="dispense-form">
+    <input type="hidden" name="action" value="issue_key">
+    <div class="common-section">
+        <div>
+            <label>Recipient's Name:</label>
+            <input name="recipient_name" type="text" maxlength="80" autofocus required>
+        </div>
+        <div>
+            <label>Issuing Pharmacist:</label>
+            <input name="pharmacist" type="text" maxlength="80"
+                   value="{{ current_user }}" required>
+        </div>
+        <div>
+            <label>Comments (optional):</label>
+            <input name="comments" type="text" maxlength="120">
+        </div>
+    </div>
+    <div class="form-buttons"><input type="submit" value="Issue Key"></div>
+</form>
+{% endif %}
+</div>
+
+<form method="GET" action="{{ url_for('key_register') }}" class="filter-form no-print">
+    <div class="filter-section">
+        <div>
+            <label>From:</label>
+            <input name="start_date" type="date" value="{{ start_date }}">
+        </div>
+        <div>
+            <label>To:</label>
+            <input name="end_date" type="date" value="{{ end_date }}">
+        </div>
+        <div>
+            <label>Search name:</label>
+            <input name="q" type="text" value="{{ q }}">
+        </div>
+        <div>
+            <label>&nbsp;</label>
+            <input type="submit" value="Show">
+            <button type="button" onclick="window.print()">Print Register</button>
+        </div>
+    </div>
+</form>
+
+<h2>Register &mdash; {{ start_date }} to {{ end_date }}</h2>
+<p class="key-hint no-print">The four signature columns print empty so the
+filed copy can be signed by hand. The app records the names, the times and who
+was logged in; it does not record a signature it never saw.</p>
+<table>
+    <thead>
+    <tr>
+        <th>Date Key given</th>
+        <th>Time</th>
+        <th>Pharmacist</th>
+        <th class="key-sign">Pharmacist signature</th>
+        <th>Recipient's Name</th>
+        <th class="key-sign">Recipient's signature</th>
+        <th>Date returned</th>
+        <th>Time</th>
+        <th>Returning officer's name</th>
+        <th class="key-sign">Returning officer's signature</th>
+        <th>Receiving officer</th>
+        <th class="key-sign">Receiving officer's signature</th>
+        <th>Pharmacist</th>
+        <th>Comments</th>
+        {% if is_admin %}<th class="no-print">Action</th>{% endif %}
+    </tr>
+    </thead>
+    <tbody>
+    {% for r in entries %}
+    <tr class="{% if r.overdue %}key-overdue{% endif %}">
+        <td>{{ r.issued_date.strftime('%Y-%m-%d') }}</td>
+        <td>{{ r.issued_time }}</td>
+        <td>{{ r.pharmacist }}</td>
+        <td class="key-sign">&nbsp;</td>
+        <td>{{ r.recipient_name }}</td>
+        <td class="key-sign">&nbsp;</td>
+        <td>{{ r.returned_date.strftime('%Y-%m-%d') if r.returned_date else '' }}</td>
+        <td>{{ r.returned_time or '' }}</td>
+        <td>{{ r.returning_officer or '' }}</td>
+        <td class="key-sign">&nbsp;</td>
+        <td>{{ r.receiving_officer or '' }}</td>
+        <td class="key-sign">&nbsp;</td>
+        <td>{{ r.return_pharmacist or '' }}</td>
+        <td>{{ r.comments or '' }}{% if r.status == 'Out' %}<em> (still out)</em>{% endif %}</td>
+        {% if is_admin %}
+        <td class="no-print">
+            <form method="POST" action="{{ url_for('key_register') }}" style="display:inline"
+                  onsubmit="return confirm('Delete this key register entry?');">
+                <input type="hidden" name="action" value="delete_entry">
+                <input type="hidden" name="entry_id" value="{{ r.id }}">
+                <button type="submit" class="delete-btn">Delete</button>
+            </form>
+        </td>
+        {% endif %}
+    </tr>
+    {% else %}
+    <tr><td colspan="{{ 15 if is_admin else 14 }}">No key movements in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+<p class="key-hint">{{ entries|length }} movement{{ '' if entries|length == 1 else 's' }}
+in this period{% if still_out_count %}, {{ still_out_count }} not returned{% endif %}.</p>
+<p style="margin-top:20px;">Checked by: ______________________________
+&nbsp;&nbsp;&nbsp; Signature: __________________
 &nbsp;&nbsp;&nbsp; Date: ____________________</p>
 """
 
@@ -7960,6 +8169,227 @@ def loans():
     except Exception as e:
         app.logger.error(f'loans failed: {e}')
         flash('Could not load the loans page.')
+        return redirect('/reports')
+
+
+def _held_for(since, now):
+    """Plain-language gap, e.g. '4h 20m' or '2 days 3h'."""
+    secs = max(0, int((now - since).total_seconds()))
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins = rem // 60
+    if days:
+        return f"{days} day{'' if days == 1 else 's'} {hours}h"
+    if hours:
+        return f'{hours}h {mins}m'
+    return f'{mins}m'
+
+
+@app.route('/key-register', methods=['GET', 'POST'])
+@login_required
+def key_register():
+    current_user = session['user']['name']
+    message_class, message = _flashed_banner()
+    is_admin = session['user'].get('role') == 'admin'
+
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        keys = db['key_register']
+
+        if request.method == 'POST':
+            action = request.form.get('action')
+            now = local_now()
+
+            if action == 'issue_key':
+                # There is ONE physical key. If it is out, it cannot be given
+                # to a second person — and a register that allowed it would be
+                # unreconcilable afterwards, with two people each believing
+                # they held it. This is the whole control.
+                open_doc = keys.find_one({'status': 'Out'})
+                if open_doc:
+                    flash(f"The key is already out with "
+                          f"{open_doc.get('recipient_name')} since "
+                          f"{open_doc['issued_date']:%Y-%m-%d} "
+                          f"{open_doc.get('issued_time')}. Record its return "
+                          f"before issuing it again.")
+                    return redirect(url_for('key_register'))
+
+                recipient = (request.form.get('recipient_name') or '').strip()
+                if not recipient:
+                    flash('A recipient name is required — the key has to be '
+                          'traceable to someone.')
+                    return redirect(url_for('key_register'))
+                pharmacist = (request.form.get('pharmacist') or '').strip() or current_user
+
+                ref = f"KEY-{now:%Y%m%d}-{uuid4().hex[:4].upper()}"
+                keys.insert_one({
+                    'ref': ref,
+                    'issued_date': datetime(now.year, now.month, now.day),
+                    'issued_time': now.strftime('%H:%M'),
+                    'issued_at': now,
+                    'pharmacist': pharmacist,
+                    'recipient_name': recipient,
+                    'returned_date': None, 'returned_time': None,
+                    'returned_at': None,
+                    'returning_officer': None, 'receiving_officer': None,
+                    'return_pharmacist': None,
+                    'comments': (request.form.get('comments') or '').strip(),
+                    'status': 'Out',
+                    'issued_by_user': current_user,
+                    'created_at': datetime.utcnow(),
+                })
+                write_audit_entry('CREATE', 'store_key', ref,
+                                  f'key issued to {recipient} by {pharmacist} '
+                                  f'at {now:%Y-%m-%d %H:%M}')
+                flash(f'Key issued to {recipient} at {now:%H:%M}.', 'success')
+                return redirect(url_for('key_register'))
+
+            if action == 'return_key':
+                try:
+                    doc = keys.find_one({'_id': ObjectId(request.form.get('entry_id', ''))})
+                except (InvalidId, TypeError):
+                    doc = None
+                if not doc:
+                    flash('That key register entry was not found.')
+                    return redirect(url_for('key_register'))
+                if doc.get('status') != 'Out':
+                    flash('That entry is already closed — the key was already '
+                          'recorded as returned.')
+                    return redirect(url_for('key_register'))
+
+                returning = (request.form.get('returning_officer') or '').strip() \
+                    or doc.get('recipient_name', '')
+                receiving = (request.form.get('receiving_officer') or '').strip() \
+                    or current_user
+                ret_pharm = (request.form.get('return_pharmacist') or '').strip() \
+                    or current_user
+                extra = (request.form.get('comments') or '').strip()
+                comments = '; '.join(x for x in (doc.get('comments'), extra) if x)
+
+                keys.update_one({'_id': doc['_id']}, {'$set': {
+                    'returned_date': datetime(now.year, now.month, now.day),
+                    'returned_time': now.strftime('%H:%M'),
+                    'returned_at': now,
+                    'returning_officer': returning,
+                    'receiving_officer': receiving,
+                    'return_pharmacist': ret_pharm,
+                    'comments': comments,
+                    'status': 'Returned',
+                    'returned_by_user': current_user,
+                }})
+                held = _held_for(doc.get('issued_at') or doc['issued_date'], now)
+                write_audit_entry('UPDATE', 'store_key', doc.get('ref', ''),
+                                  f'key returned by {returning}, received by '
+                                  f'{receiving} after {held}')
+                flash(f'Key returned by {returning} at {now:%H:%M}, '
+                      f'out for {held}.', 'success')
+                return redirect(url_for('key_register'))
+
+            if action == 'delete_entry':
+                if not is_admin:
+                    flash('Access denied. Only admins can delete a register entry.')
+                    return redirect(url_for('key_register'))
+                try:
+                    doc = keys.find_one({'_id': ObjectId(request.form.get('entry_id', ''))})
+                except (InvalidId, TypeError):
+                    doc = None
+                if not doc:
+                    flash('That key register entry was not found.')
+                else:
+                    keys.delete_one({'_id': doc['_id']})
+                    write_audit_entry(
+                        'DELETE', 'store_key', doc.get('ref', ''),
+                        f"removed entry: key to {doc.get('recipient_name')} on "
+                        f"{doc['issued_date']:%Y-%m-%d}")
+                    flash(f"Entry for {doc.get('recipient_name')} deleted.", 'success')
+                return redirect(url_for('key_register'))
+
+            flash('Unknown action.')
+            return redirect(url_for('key_register'))
+
+        # ----- GET --------------------------------------------------------
+        now = local_now()
+        today = now.date()
+        raw_start = (request.args.get('start_date') or '').strip()
+        raw_end = (request.args.get('end_date') or '').strip()
+        try:
+            start = datetime.strptime(raw_start, '%Y-%m-%d')
+        except ValueError:
+            start = datetime(today.year, today.month, 1)
+        try:
+            end = datetime.strptime(raw_end, '%Y-%m-%d')
+        except ValueError:
+            end = datetime(today.year, today.month, today.day)
+        if end < start:
+            start, end = end, start
+        q = (request.args.get('q') or '').strip()
+
+        query = {'issued_date': {'$gte': start, '$lt': end + timedelta(days=1)}}
+        if q:
+            rx = {'$regex': re.escape(q), '$options': 'i'}
+            query['$or'] = [{'recipient_name': rx}, {'pharmacist': rx},
+                            {'returning_officer': rx}, {'receiving_officer': rx},
+                            {'ref': rx}]
+
+        entries, still_out_count = [], 0
+        for doc in keys.find(query).sort('issued_at', -1).limit(500):
+            out = doc.get('status') == 'Out'
+            # Still out, and not issued today: it has been held overnight,
+            # which for a store key is the thing worth noticing.
+            overdue = out and doc['issued_date'].date() < today
+            if out:
+                still_out_count += 1
+            entries.append({
+                'id': str(doc['_id']),
+                'ref': doc.get('ref', ''),
+                'issued_date': doc['issued_date'],
+                'issued_time': doc.get('issued_time', ''),
+                'pharmacist': doc.get('pharmacist', ''),
+                'recipient_name': doc.get('recipient_name', ''),
+                'returned_date': doc.get('returned_date'),
+                'returned_time': doc.get('returned_time'),
+                'returning_officer': doc.get('returning_officer'),
+                'receiving_officer': doc.get('receiving_officer'),
+                'return_pharmacist': doc.get('return_pharmacist'),
+                'comments': doc.get('comments', ''),
+                'status': doc.get('status', ''),
+                'overdue': overdue,
+            })
+
+        open_doc = keys.find_one({'status': 'Out'})
+        open_entry = None
+        if open_doc:
+            since = open_doc.get('issued_at') or open_doc['issued_date']
+            open_entry = {
+                'id': str(open_doc['_id']),
+                'recipient_name': open_doc.get('recipient_name', ''),
+                'issued_date': open_doc['issued_date'],
+                'issued_time': open_doc.get('issued_time', ''),
+                'pharmacist': open_doc.get('pharmacist', ''),
+                'held_for': _held_for(since, now),
+                'overdue': open_doc['issued_date'].date() < today,
+            }
+
+        last_return = ''
+        if not open_doc:
+            last = keys.find_one({'status': 'Returned'}, sort=[('returned_at', -1)])
+            if last and last.get('returned_date'):
+                last_return = (f"{last['returned_date']:%a %d %b} at "
+                               f"{last.get('returned_time', '')} by "
+                               f"{last.get('returning_officer', '')}")
+
+        return render_template_string(
+            KEY_REGISTER_TEMPLATE, nav_links=get_nav_links(),
+            message=message, message_class=message_class, is_admin=is_admin,
+            current_user=current_user,
+            open_entry=open_entry, last_return=last_return,
+            entries=entries, still_out_count=still_out_count,
+            start_date=start.strftime('%Y-%m-%d'),
+            end_date=end.strftime('%Y-%m-%d'), q=q)
+
+    except Exception as e:
+        app.logger.error(f'key_register failed: {e}')
+        flash('Could not load the key register.')
         return redirect('/reports')
 
 
