@@ -828,6 +828,12 @@ async function getMedicationOptions() {
 """
 
 DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
+<style>
+  .patient-recall { font-size: 12px; color: #856404; background: #fff3cd;
+                    border-radius: 4px; padding: 4px 8px; margin-top: 4px;
+                    display: none; }
+  .patient-recall.shown { display: block; }
+</style>
 <h1>Dispensing</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
@@ -843,7 +849,8 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
     <div class="common-section">
         <div>
             <label>Patient:</label>
-            <input name="patient" type="text" value="{{ tx_data.patient if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
+            <input name="patient" id="patient" type="text" value="{{ tx_data.patient if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
+            <div id="patient_recall" class="patient-recall"></div>
         </div>
         <div>
             <label for="company">Company:</label>
@@ -920,13 +927,16 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
             <select name="dispenser" {% if not tx_data %}required{% endif %}>
                 <option value="">-- Select Issuer --</option>
                 {% for d in dispensers %}
-                    <option value="{{ d }}" {% if tx_data and tx_data.dispenser == d %}selected{% endif %}>{{ d }}</option>
+                    {# Pre-selects whoever is logged in when their name is one of
+                       the issuers, which it normally is. Falls back to the prompt
+                       when it is not, rather than quietly picking somebody. #}
+                    <option value="{{ d }}" {% if (tx_data and tx_data.dispenser == d) or (not tx_data and d == current_user) %}selected{% endif %}>{{ d }}</option>
                 {% endfor %}
             </select>
         </div>
         <div>
             <label>Date:</label>
-            <input name="date" type="date" value="{{ tx_data.date if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
+            <input name="date" type="date" value="{{ tx_data.date if tx_data else today }}" max="{{ today }}" {% if not tx_data %}required{% endif %}>
         </div>
     </div>
     <div class="diag-section">
@@ -1296,6 +1306,8 @@ function clearForm() {
 
     // Clearing blanks the outcome select, so the days field must hide with it.
     toggleOutcomeDays();
+    const recall = document.getElementById('patient_recall');
+    if (recall) { recall.textContent = ''; recall.className = 'patient-recall'; }
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -1305,6 +1317,49 @@ document.addEventListener('DOMContentLoaded', function() {
     if (positionInput) addInputListener(positionInput, 'position');
     document.querySelectorAll('.med-input').forEach(i => addInputListener(i, 'medication'));
     document.querySelectorAll('.diag-input').forEach(i => addInputListener(i, 'diagnosis'));
+});
+
+// A returning patient's employer, position, birth decade and gender are the
+// same as last time, so they are filled from that visit rather than retyped.
+//
+// Only EMPTY fields are filled: whatever is already typed wins. And the note
+// says which visit the details came from, because two people really can share
+// a name and a silently inherited employer would look exactly like a fact.
+async function recallPatient() {
+    const nameEl = document.getElementById('patient');
+    const note = document.getElementById('patient_recall');
+    if (!nameEl || !note) return;
+    const name = nameEl.value.trim();
+    note.className = 'patient-recall';
+    note.textContent = '';
+    if (name.length < 3) return;
+    let d;
+    try {
+        const res = await fetch('/api/patient-lookup?name=' + encodeURIComponent(name));
+        if (!res.ok) return;
+        d = await res.json();
+    } catch (e) { return; }
+    if (!d || !d.patient) return;
+
+    const filled = [];
+    [['company', 'Company'], ['position', 'Position'],
+     ['birth_decade', 'Birth decade'], ['gender', 'Gender']].forEach(([f, label]) => {
+        const el = document.querySelector('.common-section [name="' + f + '"]');
+        if (el && !el.value && d[f]) { el.value = d[f]; filled.push(label); }
+    });
+    if (filled.length) {
+        note.textContent = 'Filled from the last visit on ' +
+            (d.last_visit || 'record') + ': ' + filled.join(', ') +
+            '. Check it is the same person.';
+        note.className = 'patient-recall shown';
+    }
+}
+document.addEventListener('DOMContentLoaded', function () {
+    const nameEl = document.getElementById('patient');
+    if (nameEl) {
+        nameEl.addEventListener('change', recallPatient);
+        nameEl.addEventListener('blur', recallPatient);
+    }
 });
 
 // Days apply to sick leave only. Clearing the box as it is hidden means a
@@ -1364,7 +1419,7 @@ item's AMC and the order request will replace it.</p>
         </div>
         <div>
             <label>Requested / Received By:</label>
-            <input name="issued_to" type="text" required>
+            <input name="issued_to" type="text" value="{{ current_user }}" required>
         </div>
         <div>
             <label>Note (optional):</label>
@@ -2448,7 +2503,7 @@ RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
             {% endfor %}
             </select></div>
         <div><label>Stock Receiver:</label>
-            <input name="stock_receiver" value="{{ rx_data.stock_receiver }}" required></div>
+            <input name="stock_receiver" value="{{ rx_data.stock_receiver if rx_data else current_user }}" required></div>
         <div><label>Order Number:</label>
             <input name="order_number" value="{{ rx_data.order_number }}" required></div>
         <div><label>Supplier:</label>
@@ -2617,7 +2672,7 @@ deliveries can be open at the same time.</p>
         <div><label>Invoice Number:</label><input name="invoice_number" required></div>
         <div><label>Invoice Total (R):</label>
             <input name="invoice_total" type="number" step="0.01" min="0" required></div>
-        <div><label>Received By:</label><input name="stock_receiver" required></div>
+        <div><label>Received By:</label><input name="stock_receiver" value="{{ current_user }}" required></div>
         <div><label>Note (optional):</label><input name="note" type="text"></div>
     </div>
     <div class="form-buttons"><input type="submit" value="Open Delivery"></div>
@@ -2779,6 +2834,41 @@ document.addEventListener('DOMContentLoaded', async () => {
         Array.from(datalist.options).forEach(opt => {
             opt.style.display = opt.value.toLowerCase().includes(q) ? '' : 'none';
         });
+    });
+
+    // Pack size and schedule describe the product, not the purchase, so the
+    // app already knows them from the last time this item was received.
+    // Retyping the pack size was also a live hazard: the field resets to 1,
+    // and a pack size of 1 values a pack-priced item at the pack price per
+    // unit. Price is deliberately NOT filled — that belongs to this invoice.
+    let medDefaults = null;
+    async function fillFromMedication(nameInput) {
+        if (medDefaults === null) {
+            try {
+                const res = await fetch('/api/medication-defaults');
+                medDefaults = res.ok ? await res.json() : {};
+            } catch (e) { medDefaults = {}; }
+        }
+        const d = medDefaults[nameInput.value.trim()];
+        if (!d) return;
+        const form = nameInput.closest('form') || document;
+        const ps = form.querySelector('[name="pack_size"]');
+        const sc = form.querySelector('[name="schedule"]');
+        // Only fill what the user has not already set away from its default.
+        if (ps && d.pack_size && (ps.value === '' || ps.value === '1')) {
+            ps.value = d.pack_size;
+        }
+        if (sc && d.schedule && !sc.dataset.touched) {
+            sc.value = d.schedule;
+        }
+        if (sc && !sc.dataset.bound) {
+            sc.dataset.bound = '1';
+            sc.addEventListener('change', () => { sc.dataset.touched = '1'; });
+        }
+    }
+    document.querySelectorAll('[name="med_name"]').forEach(el => {
+        el.addEventListener('change', () => fillFromMedication(el));
+        el.addEventListener('blur', () => fillFromMedication(el));
     });
 });
 </script>
@@ -2947,11 +3037,18 @@ balance, run a stock take and enter the physical count.</p>
 """
 
 REPORTS_TEMPLATE = CSS_STYLE + """
+<style>
+  .bulk-expiry-bar { background: #fff3cd; border: 1px solid #ffc107;
+                     border-radius: 6px; padding: 12px; margin: 10px 0;
+                     font-size: 14px; }
+  .bulk-expiry-bar input, .bulk-expiry-bar button { margin-left: 8px; }
+  @media print { .bulk-expiry-bar { display: none; } }
+</style>
 <h1>Inventory Reports</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
 {% if message %}
-    <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+    <p class="message {% if message_class %}{{ message_class }}{% elif 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
 <h2>Generate Report</h2>
 <form method="POST" action="{{ url_for('reports') }}">
@@ -2971,8 +3068,8 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         <option value="order_request">Order Request (Requisition)</option>
         <option value="monthly_report">Period Report (day / week / month / quarter / year)</option>
     </select><br>
-    <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" type="date"><br>
-    <label>End Date (YYYY-MM-DD, if applicable):</label><input name="end_date" type="date"><br>
+    <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" type="date" value="{{ start_date or default_start }}"><br>
+    <label>End Date (YYYY-MM-DD, if applicable):</label><input name="end_date" type="date" value="{{ end_date or default_end }}"><br>
     <label>Category:</label>
     <select name="category">
         <option value="pharmaceutical" {% if category == 'pharmaceutical' %}selected{% endif %}>Pharmaceuticals</option>
@@ -3025,15 +3122,43 @@ balance if only one batch is affected. <strong>Correct Date</strong> is for when
 expiry was recorded wrongly; it changes the date and moves no stock. Both are
 recorded in the audit log.</p>
 {% endif %}
+{% if is_admin and report_type == 'expired_list' and stock_data %}
+{# One pass instead of two interactions per item. The form lives OUTSIDE the
+   table because the per-row forms below cannot be nested inside it; the row
+   inputs join this one through their form="" attribute. #}
+<form id="bulk-expiry" method="POST" action="{{ url_for('remove_expired_bulk') }}"
+      onsubmit="return confirm('Write off every ticked item? Stock will be reduced.');">
+    <input type="hidden" name="report_type" value="{{ report_type }}">
+</form>
+<div class="bulk-expiry-bar">
+    <strong>Clear the whole list:</strong>
+    every row is ticked with its full balance. Untick anything that should stay,
+    or change a quantity where only part of the stock expired.
+    <input name="bulk_reason" type="text" form="bulk-expiry"
+           placeholder="Reason for the whole pass (optional)" style="width:18em;">
+    <button type="submit" form="bulk-expiry" class="delete-btn">Remove All Ticked</button>
+</div>
+{% endif %}
 <table>
     <thead>
         <tr>
+            {% if is_admin and report_type == 'expired_list' %}<th>Write off</th>{% endif %}
             <th>Medication</th><th>Balance</th><th>Expiry Date</th><th>Batch</th><th>Price</th><th>Actions</th>
         </tr>
     </thead>
     <tbody>
     {% for med in stock_data %}
         <tr class="{{ med.status }}">
+            {% if is_admin and report_type == 'expired_list' %}
+            <td>
+                <input type="checkbox" name="sel" value="{{ med.name }}"
+                       form="bulk-expiry" checked>
+                <input name="qty__{{ med.name }}" type="number" min="1"
+                       max="{{ med.balance }}" value="{{ med.balance }}"
+                       form="bulk-expiry" style="width:5em;"
+                       title="Units to write off in the bulk pass">
+            </td>
+            {% endif %}
             <td>{{ med.name }}</td>
             <td>{{ med.balance }}</td>
             <td>{{ med.expiry_date }}</td>
@@ -4993,6 +5118,8 @@ def dispense():
             search=search,
             tx_data=tx_data, current_year=datetime.utcnow().year,
             message_class=message_class,
+            today=local_now().strftime('%Y-%m-%d'),
+            current_user=session['user']['name'],
             birth_decades=_birth_decades(),
             pager=pager, window_defaulted=window_defaulted, unit='visits'
         )
@@ -5004,6 +5131,8 @@ def dispense():
             message="Database connection failed. Please try again later.",
             start_date='', end_date='', search='', tx_data=None,
             current_year=datetime.utcnow().year, birth_decades=_birth_decades(),
+            today=local_now().strftime('%Y-%m-%d'),
+            current_user=session.get('user', {}).get('name', ''),
             message_class='error',
             pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='visits'
         ), 500
@@ -5366,6 +5495,7 @@ def receive():
             tx_list=tx_list, nav_links=get_nav_links(),
             message=message, start_date=start_date, end_date=end_date,
             search=search, rx_data=rx_data,
+            current_user=session['user']['name'],
             delivery=delivery, delivery_lines=delivery_lines, recon=recon,
             deliveries=delivery_rows, order_summary=order_summary,
             pager=pager, window_defaulted=window_defaulted, unit='receipts'
@@ -5375,6 +5505,7 @@ def receive():
             RECEIVE_TEMPLATE, tx_list=[], nav_links=get_nav_links(),
             delivery=None, delivery_lines=[], recon={}, deliveries=[], order_summary=None,
             message="Database connection failed.", start_date='', end_date='', search='', rx_data=None,
+            current_user=session.get('user', {}).get('name', ''),
             pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='receipts'
         ), 500
 
@@ -5420,6 +5551,7 @@ def add_medication():
                 if medications.find_one({'name': med_name}):
                     message = f'Medication "{med_name}" already exists. Use Receiving to add stock.'
                     return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message,
+                     current_user=session.get('user', {}).get('name', ''),
                                                   categories=CATEGORIES)
 
                 price = _unit_price(pack_price, pack_size)
@@ -5457,13 +5589,16 @@ def add_medication():
                 else:
                     message = 'Medication added successfully! Receive stock against a delivery.'
                 return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message,
+                     current_user=session.get('user', {}).get('name', ''),
                                                   categories=CATEGORIES)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
                 return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message,
+                     current_user=session.get('user', {}).get('name', ''),
                                                   categories=CATEGORIES)
 
         return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message,
+                     current_user=session.get('user', {}).get('name', ''),
                                                   categories=CATEGORIES)
     except ServerSelectionTimeoutError:
         return render_template_string(
@@ -5876,6 +6011,93 @@ def remove_expired():
     return redirect(url_for('reports', report_type=report_type))
 
 
+@app.route('/remove-expired-bulk', methods=['POST'])
+@login_required
+def remove_expired_bulk():
+    """Write off several expired items in one pass.
+
+    The app already knows exactly what has expired, so clearing a month's
+    worth should be one review and one button, not two interactions per item.
+
+    Each line keeps its own quantity, pre-filled with the balance but
+    editable, because batches expire at different times and writing off a
+    whole balance when one batch went out of date destroys good stock on
+    paper. Unticking a line leaves it alone.
+
+    A line that cannot be written off does not stop the rest: it is skipped
+    and named in the result, so one bad figure never costs the whole pass.
+    """
+    if session['user'].get('role') != 'admin':
+        flash('Access denied. Only admins can remove expired stock.')
+        return redirect('/reports')
+    report_type = request.form.get('report_type', 'expired_list')
+    reason = (request.form.get('bulk_reason') or '').strip()
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        selected = [n.strip() for n in request.form.getlist('sel') if n.strip()]
+        if not selected:
+            flash('Nothing was ticked, so nothing was removed.')
+            return redirect(url_for('reports', report_type=report_type))
+
+        removed, skipped, total_value, total_units = [], [], 0.0, 0
+        for med_name in selected:
+            raw = (request.form.get(f'qty__{med_name}') or '').strip()
+            try:
+                quantity = int(raw)
+            except (TypeError, ValueError):
+                skipped.append(f'{med_name} (quantity "{raw}" is not a number)')
+                continue
+            med = db['medications'].find_one({'name': med_name})
+            if not med:
+                skipped.append(f'{med_name} (not found)')
+                continue
+            balance = med.get('balance', 0) or 0
+            if quantity < 1:
+                skipped.append(f'{med_name} (quantity must be at least 1)')
+                continue
+            if quantity > balance:
+                skipped.append(f'{med_name} (only {balance} on hand)')
+                continue
+
+            price = med.get('price', 0) or 0
+            db['medications'].update_one({'name': med_name},
+                                         {'$inc': {'balance': -quantity}})
+            db['transactions'].insert_one({
+                'type': 'expiry_removal',
+                'med_name': med_name,
+                'quantity': -quantity,
+                'price': price, 'line_value': -quantity * price,
+                'batch': med.get('batch'), 'expiry_date': med.get('expiry_date'),
+                'schedule': med.get('schedule'),
+                'reason': reason,
+                'balance_before': balance,
+                'user': session['user']['name'], 'timestamp': datetime.utcnow(),
+            })
+            write_audit_entry('UPDATE', 'expiry_removal', med_name,
+                              f'{quantity} unit(s) written off as expired in a '
+                              f'bulk pass (balance {balance} -> '
+                              f'{balance - quantity}, '
+                              f'value R{quantity * price:.2f})')
+            removed.append(med_name)
+            total_units += quantity
+            total_value += quantity * price
+
+        parts = []
+        if removed:
+            parts.append(f"{len(removed)} item{'' if len(removed) == 1 else 's'} "
+                         f'written off, {total_units} unit'
+                         f"{'' if total_units == 1 else 's'}, "
+                         f'value R{total_value:.2f}')
+        if skipped:
+            parts.append(f"not removed: {'; '.join(skipped)}")
+        flash('. '.join(parts) + '.' if parts else 'Nothing was removed.',
+              'error' if skipped and not removed else
+              ('partial' if skipped else 'success'))
+    except ServerSelectionTimeoutError:
+        flash('Database connection failed. Please try again later.')
+    return redirect(url_for('reports', report_type=report_type))
+
+
 @app.route('/correct-expiry', methods=['POST'])
 @login_required
 def correct_expiry():
@@ -5944,12 +6166,15 @@ def reports():
         start_date = None
         end_date = None
         total_transactions = 0
+        message_class = None
         message = session.pop('message', None)
         # Also read any flashed message from a preceding redirect (e.g.
         # access-denied from add/edit/delete medication routes).
+        # Honour the category the route set rather than guessing severity
+        # from the wording — that read a partly-successful bulk write-off,
+        # which names what it skipped, as an outright error.
         if not message:
-            flashed = get_flashed_messages()
-            message = flashed[0] if flashed else None
+            message_class, message = _flashed_banner()
         search = None
         report_title = None
         start_dt = None
@@ -6746,8 +6971,11 @@ def reports():
             issues=issues, issue_totals=issue_totals,
             sick_leave=sick_leave, sick_leave_totals=sick_leave_totals,
             start_date=start_date, end_date=end_date,
+            default_start=local_now().replace(day=1).strftime('%Y-%m-%d'),
+            default_end=local_now().strftime('%Y-%m-%d'),
             total_transactions=total_transactions,
             nav_links=get_nav_links(), message=message,
+            message_class=message_class, current_user=session['user']['name'],
             search=search, report_title=report_title, is_admin=is_admin
         )
     except ServerSelectionTimeoutError:
@@ -6755,6 +6983,10 @@ def reports():
             REPORTS_TEMPLATE, nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
             report_type=None, report_data=[], receive_list=[], stock_data=[],
+            message_class='error',
+            current_user=session.get('user', {}).get('name', ''),
+            default_start=local_now().replace(day=1).strftime('%Y-%m-%d'),
+            default_end=local_now().strftime('%Y-%m-%d'),
             controlled_register=[], order_request=None, monthly=None,
             category='pharmaceutical', category_label=CATEGORY_LABELS['pharmaceutical'],
             writeoffs=[], writeoff_totals={'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []},
@@ -7285,11 +7517,13 @@ def internal_issue():
         ).sort('timestamp', -1).limit(100))
         return render_template_string(
             INTERNAL_ISSUE_TEMPLATE, nav_links=get_nav_links(), message=message,
+            current_user=session['user']['name'],
             departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=recent)
     except ServerSelectionTimeoutError:
         return render_template_string(
             INTERNAL_ISSUE_TEMPLATE, nav_links=get_nav_links(),
             message='Database connection failed. Please try again later.',
+            current_user=session.get('user', {}).get('name', ''),
             departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=[]), 500
 
 
@@ -10033,6 +10267,7 @@ def edit_receive(receive_id):
             tx_list=tx_list, nav_links=get_nav_links(),
             message=message, start_date=start_date, end_date=end_date,
             search=search, rx_data=rx_data,
+            current_user=session['user']['name'],
             delivery=None, delivery_lines=[], recon={}, deliveries=[], order_summary=None,
             pager=pager, window_defaulted=False, unit='receipts'
         )
@@ -10386,6 +10621,80 @@ MEDICATION_OPTIONS = [
     'Zinc Tablets, 020 mg',
     'Zuvamor, 040 mg',
 ]
+
+@app.route('/api/patient-lookup', methods=['GET'])
+@login_required
+def patient_lookup():
+    """What this patient's last visit recorded about them.
+
+    Company, position, birth decade and gender are facts about a person, not
+    about a visit, so a returning patient should not have to supply them
+    again. Matched on the exact name, case-insensitively: anything looser
+    would attach one person's employer to another's record, which is worse
+    than typing it out.
+
+    The date of the visit it came from is returned too, because two people
+    genuinely can share a name. The form says where the details came from so
+    a wrong match is visible rather than silently believed.
+    """
+    name = (request.args.get('name') or '').strip()
+    if not name:
+        return jsonify({})
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        doc = db['transactions'].find_one(
+            {'type': 'dispense',
+             'patient': {'$regex': f'^{re.escape(name)}$', '$options': 'i'}},
+            {'_id': 0, 'patient': 1, 'company': 1, 'position': 1,
+             'birth_decade': 1, 'gender': 1, 'timestamp': 1, 'date': 1},
+            sort=[('timestamp', -1)])
+        if not doc:
+            return jsonify({})
+        when = doc.get('date') or ''
+        if not when and doc.get('timestamp'):
+            when = doc['timestamp'].strftime('%Y-%m-%d')
+        return jsonify({
+            'patient': doc.get('patient', ''),
+            'company': doc.get('company', ''),
+            'position': doc.get('position', ''),
+            'birth_decade': doc.get('birth_decade', ''),
+            'gender': doc.get('gender', ''),
+            'last_visit': when,
+        })
+    except Exception as e:
+        app.logger.warning(f'patient lookup failed: {e}')
+        return jsonify({})
+
+
+@app.route('/api/medication-defaults', methods=['GET'])
+@login_required
+def get_medication_defaults():
+    """Pack size and schedule for each stocked item, keyed by name.
+
+    These describe the PRODUCT, so they are the same on every delivery and
+    there is no reason to retype them. Price is deliberately not included:
+    that describes this particular purchase, and pre-filling it would invite
+    somebody to accept last month's figure without reading the invoice.
+
+    Leaving pack size to be retyped was not merely tedious — the field resets
+    to 1, and a pack size of 1 values a pack-priced item at the pack price per
+    unit, which is the inflation this app was already fixed for once.
+    """
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        out = {}
+        for m in db['medications'].find(
+                {}, {'_id': 0, 'name': 1, 'pack_size': 1, 'schedule': 1}):
+            name = m.get('name')
+            if not name:
+                continue
+            out[name] = {'pack_size': m.get('pack_size') or '',
+                         'schedule': m.get('schedule') or ''}
+        return jsonify(out)
+    except Exception as e:
+        app.logger.warning(f'medication defaults failed: {e}')
+        return jsonify({})
+
 
 @app.route('/api/medications', methods=['GET'])
 @login_required
