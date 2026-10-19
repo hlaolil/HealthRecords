@@ -1291,6 +1291,17 @@ function clearForm() {
 
     document.querySelector('.common-section').querySelectorAll('input, select').forEach(el => el.value = '');
 
+    // Blanking everything also wiped the fields the app fills in for you, so
+    // after a successful dispense the date went empty and the issuer went
+    // back to "-- Select Issuer --". Put those back: a default that survives
+    // only until the first patient is not a default.
+    // tojson quotes and escapes these, so a name with an apostrophe in it
+    // cannot break the script.
+    Object.keys(FORM_DEFAULTS).forEach(function (n) {
+        const el = document.querySelector('.common-section [name="' + n + '"]');
+        if (el) el.value = FORM_DEFAULTS[n];
+    });
+
     const diagContainer = document.getElementById('diagnoses');
     while (diagContainer.children.length > 1) diagContainer.removeChild(diagContainer.lastChild);
     diagContainer.firstElementChild.querySelectorAll('input').forEach(el => el.value = '');
@@ -1337,6 +1348,9 @@ document.addEventListener('DOMContentLoaded', function() {
 // the case that would otherwise leave the most convincing wrong data. Typing
 // in a field removes the mark: from then on it is the user's, and is left
 // alone.
+// What the server filled in on a fresh form, so clearing can restore it.
+var FORM_DEFAULTS = {date: {{ today|tojson }}, dispenser: {{ current_user|tojson }}};
+
 var RECALL_FIELDS = [['company', 'Company'], ['position', 'Position'],
                      ['birth_decade', 'Birth decade'], ['gender', 'Gender']];
 
@@ -2501,8 +2515,9 @@ there.</span>
     </tbody>
 </table>
 <p style="font-size:13px;">A dash means no reading was recorded for that check.
-Gaps are left as gaps on the chart rather than joined up, so a missed check stays
-visible.</p>
+On the chart a missed check is bridged with a thin dashed line rather than a
+solid one, so the trace still reads as a line while the gap stays visible, and
+no mark is made where nothing was recorded.</p>
 <p style="margin-top:18px;">Checked by: ______________________ &nbsp;&nbsp;
 Signature: ______________________ &nbsp;&nbsp; Date: ______________</p>
 """
@@ -7872,20 +7887,39 @@ def _temperature_chart(readings, year, month, location, thermometer=''):
 
     for key, _label, colour, shape, _pen in TEMP_SERIES:
         points = _series_points(key)
-        seg, segs = [], []
+        # Runs of consecutive checks, split wherever one was missed.
+        runs, cur = [], []
         for x, v in points:
             if v is None:
-                if len(seg) > 1:
-                    segs.append(seg)
-                seg = []
+                if cur:
+                    runs.append(cur)
+                    cur = []
             else:
-                seg.append((x, ty(v)))
-        if len(seg) > 1:
-            segs.append(seg)
-        for sgm in segs:
-            pts_attr = ' '.join(f'{x:.1f},{y:.1f}' for x, y in sgm)
-            o.append(f'<polyline points="{pts_attr}" fill="none" stroke="{colour}" '
-                     f'stroke-width="1.3" stroke-linejoin="round"/>')
+                cur.append((x, ty(v)))
+        if cur:
+            runs.append(cur)
+
+        # Bridge the gaps with a thin dashed line, so the trace reads as one
+        # continuous line rather than islands of marks — while still saying
+        # plainly that nothing was recorded in between. A solid bridge would
+        # claim readings that were never taken; no bridge at all left a
+        # fortnight's chart looking like scattered dots. The dash is the only
+        # dashed thing on this chart, so it cannot be mistaken for a limit.
+        for before, after in zip(runs, runs[1:]):
+            x1, y1 = before[-1]
+            x2, y2 = after[0]
+            o.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" '
+                     f'y2="{y2:.1f}" stroke="{colour}" stroke-width="0.9" '
+                     f'stroke-dasharray="3 3" opacity="0.65"/>')
+
+        for run in runs:
+            if len(run) > 1:
+                pts_attr = ' '.join(f'{x:.1f},{y:.1f}' for x, y in run)
+                o.append(f'<polyline points="{pts_attr}" fill="none" '
+                         f'stroke="{colour}" stroke-width="1.3" '
+                         f'stroke-linejoin="round"/>')
+
+        # Markers only where a reading actually exists.
         for x, v in points:
             if v is not None:
                 o.append(_temp_marker(shape, x, ty(v), colour))
