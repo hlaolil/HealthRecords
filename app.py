@@ -1416,6 +1416,10 @@ function clearForm() {
         const el = recallField(pair[0]);
         if (el) delete el.dataset.autofilled;
     });
+    // The form is empty, so the lookup state has to say so too, or the next
+    // submit would stop to wait for an answer about a name nobody typed.
+    recallDetailsFor = '';
+    recallInFlightFor = null;
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -1656,6 +1660,11 @@ async function recallPatient() {
                 (d.last_visit || 'record') + ': ' + filled.join(', ') +
                 '. Check it is the same person.';
             note.className = 'patient-recall shown';
+            // The draft only saves itself when a field raises an event, and
+            // these were filled in by code, which raises none. Without this
+            // the draft kept the patient's NAME but not their details, so a
+            // restored visit came back half empty.
+            if (typeof draftSave === 'function') draftSave();
         }
     } finally {
         // Only the newest lookup may declare the screen settled. An older one
@@ -1751,7 +1760,11 @@ function toggleOutcomeDays() {
 }
 document.addEventListener('DOMContentLoaded', toggleOutcomeDays);
 
-{% if message and ('successfully' in message|lower or 'updated' in message|lower) and 'partial success' not in message|lower %}
+{# form_saved comes from the route: it is true whenever the visit was
+   actually recorded, including a partial one. Reading the message text
+   instead left a recorded visit sitting in the form, one click away from
+   being dispensed twice. #}
+{% if form_saved %}
     {% if not tx_data %}
         draftClear();
         clearForm();
@@ -5592,6 +5605,21 @@ def dispense():
                         # It also left the browser sitting on a POST, so a refresh
                         # re-submitted the whole dispense and deducted the stock a
                         # second time. Redirecting after the write fixes both.
+                        # BUG: the form was cleared only if the message said
+                        # "successfully". A partial dispense says "Partial —
+                        # insufficient stock", so the form stayed loaded with
+                        # the whole visit in it — and the items that DID
+                        # dispense were already recorded and already deducted.
+                        # Pressing Dispense again, which is the natural thing
+                        # to do when a form looks unsubmitted, dispensed them a
+                        # second time. Whether the visit was written is a fact
+                        # the server knows; it must not be inferred from the
+                        # wording of a message.
+                        #   dispensed_meds -> dispense records written
+                        #   short_msgs     -> unmet demand records written
+                        #   missing_msgs alone -> nothing written, so the form
+                        #                         stays for the user to fix.
+                        session['dispense_saved'] = bool(dispensed_meds or short_msgs)
                         flash(message, severity)
                         return redirect(url_for('dispense'))
             except ValueError as e:
@@ -5608,6 +5636,7 @@ def dispense():
             search=search,
             tx_data=tx_data, current_year=datetime.utcnow().year,
             message_class=message_class,
+            form_saved=session.pop('dispense_saved', False),
             today=local_now().strftime('%Y-%m-%d'),
             current_user=session['user']['name'],
             form_defaults=_new_visit_defaults(session['user']['name']),
@@ -5625,7 +5654,7 @@ def dispense():
             today=local_now().strftime('%Y-%m-%d'),
             current_user=session.get('user', {}).get('name', ''),
             form_defaults=_new_visit_defaults(session.get('user', {}).get('name', '')),
-            message_class='error',
+            message_class='error', form_saved=False,
             pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='visits'
         ), 500
 
