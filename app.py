@@ -1457,9 +1457,18 @@ function draftSave() {
     if (tid && tid.value) return;
     var form = document.querySelector('.common-section');
     if (!form) return;
-    var data = {single: {}, meds: [], qtys: [], diags: []};
+    // BUG: the draft stored the VALUES but not who put them there. The
+    // patient's details are filled in by the app and marked as the app's, so
+    // that correcting the name can refresh them. Restoring them without that
+    // mark turned them into values the app believed the user had typed — and
+    // the app never overwrites those. So after any reload or timeout, the
+    // recall looked dead for the rest of the tab: change the name and the
+    // previous patient's employer just sat there.
+    var data = {single: {}, auto: {}, meds: [], qtys: [], diags: []};
     form.querySelectorAll('input, select').forEach(function (el) {
-        if (el.name) data.single[el.name] = el.value;
+        if (!el.name) return;
+        data.single[el.name] = el.value;
+        if (el.dataset.autofilled === '1') data.auto[el.name] = 1;
     });
     document.querySelectorAll('[name="med_names"]').forEach(function (el) {
         data.meds.push(el.value);
@@ -1488,7 +1497,12 @@ function draftRestore() {
     if (!form) return;
     Object.keys(d.single || {}).forEach(function (n) {
         var el = form.querySelector('[name="' + n + '"]');
-        if (el && d.single[n]) el.value = d.single[n];
+        if (!el || !d.single[n]) return;
+        el.value = d.single[n];
+        // Put the ownership back with the value, so a detail the app filled in
+        // is still the app's to refresh when the patient name changes.
+        if ((d.auto || {})[n]) el.dataset.autofilled = '1';
+        else delete el.dataset.autofilled;
     });
     while (document.querySelectorAll('[name="diagnoses"]').length < (d.diags || []).length) addDiagRow();
     document.querySelectorAll('[name="diagnoses"]').forEach(function (el, i) {
@@ -1617,6 +1631,12 @@ async function recallPatient() {
             const f = pair[0], label = pair[1];
             const el = recallField(f);
             if (!el) return;
+            // Never write into the box the cursor is sitting in. Typing the
+            // name and going straight on to Company let the answer land
+            // mid-word, so the field ended up reading
+            // "Letseng DiamondsMy Own Answer". If the user is in the field,
+            // they are answering it themselves.
+            if (document.activeElement === el) return;
             // The app may replace what the app put there, and may fill a
             // blank. What the user typed is theirs and is never touched.
             if (el.dataset.autofilled !== '1' && el.value) return;
@@ -1706,6 +1726,12 @@ document.addEventListener('DOMContentLoaded', function () {
             el.addEventListener(evt, function () {
                 if (el.dataset.autofilled === '1') delete el.dataset.autofilled;
             });
+        });
+        // A field the lookup skipped because the cursor was in it, and which
+        // the user then left empty, still deserves its answer. Debounced, so
+        // leaving several empty boxes in a row costs one lookup.
+        el.addEventListener('blur', function () {
+            if (!el.value) recallSoon();
         });
     });
 });
