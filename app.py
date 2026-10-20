@@ -1420,10 +1420,9 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
         </div>
         <div>
             <label>Dispenser (Issuer):</label>
-            {# From the staff roster, not written in here: see STAFF_SEED. #}
-            {% if is_admin %}<span style="font-size:11px;">
-            <a href="{{ url_for('key_register') }}#roster">Edit who appears
-            here</a></span>{% endif %}
+            {# From the staff roster, not written in here: see STAFF_SEED.
+               The roster is edited on the key register page; this form is
+               used all day and does not need a link to it. #}
             <select name="dispenser" {% if not tx_data %}required{% endif %}>
                 <option value="">-- Select Issuer --</option>
                 {% for d in dispensers %}
@@ -1555,11 +1554,20 @@ search looks across all records, not just this month.</p>
     <div class="filter-section">
         <div>
             <label>Start Date:</label>
-            <input name="start_date" type="date" value="{{ start_date or '' }}">
+            {# BUG: this showed the month the APP had chosen when no range was
+               asked for. The route drops that default as soon as there is a
+               search — so a search really does look at everything — but the
+               form submitted the dates sitting in these boxes along with it,
+               which put the month straight back on. The promise under the
+               heading was true on the first load and a lie from the second.
+               So when the window was defaulted, these start empty. #}
+            <input name="start_date" type="date"
+                   value="{% if not window_defaulted %}{{ start_date or '' }}{% endif %}">
         </div>
         <div>
             <label>End Date:</label>
-            <input name="end_date" type="date" value="{{ end_date or '' }}">
+            <input name="end_date" type="date"
+                   value="{% if not window_defaulted %}{{ end_date or '' }}{% endif %}">
         </div>
         <div>
             <label>Search:</label>
@@ -1577,7 +1585,7 @@ search looks across all records, not just this month.</p>
 <p style="font-size:13px;">The download is every visit the filter above
 matches, not just this page &mdash; one row per medication, with the visit's
 details repeated down its rows.</p>
-{{ pagebar(pager, 'dispense', start_date, end_date, search, unit) }}
+{{ pagebar(pager, 'dispense', '' if window_defaulted else start_date, '' if window_defaulted else end_date, search, unit) }}
 <div class="table-scroll"><table>
     <thead>
         <tr>
@@ -1689,7 +1697,7 @@ details repeated down its rows.</p>
         {% endfor %}
     </tbody>
 </table></div>
-{{ pagebar(pager, 'dispense', start_date, end_date, search, unit) }}
+{{ pagebar(pager, 'dispense', '' if window_defaulted else start_date, '' if window_defaulted else end_date, search, unit) }}
 <script>
 let medRowCount = {{ (tx_data.meds|length if tx_data else 1) }};
 let diagRowCount = {{ (tx_data.diags|length if tx_data else 1) }};
@@ -3615,11 +3623,20 @@ search looks across all records, not just this month.</p>
     <div class="filter-section">
         <div>
             <label>Start Date:</label>
-            <input name="start_date" type="date" value="{{ start_date or '' }}">
+            {# BUG: this showed the month the APP had chosen when no range was
+               asked for. The route drops that default as soon as there is a
+               search — so a search really does look at everything — but the
+               form submitted the dates sitting in these boxes along with it,
+               which put the month straight back on. The promise under the
+               heading was true on the first load and a lie from the second.
+               So when the window was defaulted, these start empty. #}
+            <input name="start_date" type="date"
+                   value="{% if not window_defaulted %}{{ start_date or '' }}{% endif %}">
         </div>
         <div>
             <label>End Date:</label>
-            <input name="end_date" type="date" value="{{ end_date or '' }}">
+            <input name="end_date" type="date"
+                   value="{% if not window_defaulted %}{{ end_date or '' }}{% endif %}">
         </div>
         <div>
             <label>Search:</label>
@@ -3633,7 +3650,7 @@ search looks across all records, not just this month.</p>
     </div>
 </form>
 
-{{ pagebar(pager, 'receive', start_date, end_date, search, unit) }}
+{{ pagebar(pager, 'receive', '' if window_defaulted else start_date, '' if window_defaulted else end_date, search, unit) }}
 <div class="table-scroll"><table>
     <thead>
         <tr>
@@ -3688,7 +3705,7 @@ search looks across all records, not just this month.</p>
         {% endfor %}
     </tbody>
 </table></div>
-{{ pagebar(pager, 'receive', start_date, end_date, search, unit) }}
+{{ pagebar(pager, 'receive', '' if window_defaulted else start_date, '' if window_defaulted else end_date, search, unit) }}
 
 <script>
 document.addEventListener('DOMContentLoaded', async () => {
