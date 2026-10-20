@@ -1152,10 +1152,16 @@ search looks across all records, not just this month.</p>
         </div>
         <div class="button-div">
             <input type="submit" value="Filter">
+            {# Same form, so the download obeys the dates and search already
+               set rather than asking for them a second time. #}
+            <button type="submit" name="export" value="csv" formnovalidate>Download CSV</button>
             <a href="{{ url_for('dispense') }}">Clear</a>
         </div>
     </div>
 </form>
+<p style="font-size:13px;">The download is every visit the filter above
+matches, not just this page &mdash; one row per medication, with the visit's
+details repeated down its rows.</p>
 {{ pagebar(pager, 'dispense', start_date, end_date, search, unit) }}
 <table>
     <thead>
@@ -5341,6 +5347,21 @@ def dispense():
                 {'diagnoses.0':{'$regex': search, '$options': 'i'}},
             ]
 
+        # The download is the whole filtered record, not the page on screen.
+        if request.values.get('export') == 'csv':
+            made = _dispense_csv(transactions, base_query)
+            if made:
+                filename, body = made
+                resp = make_response(body)
+                resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+                resp.headers['Content-Disposition'] = \
+                    f'attachment; filename="{filename}"'
+                return resp
+            flash(f'That is more than {DISPENSE_CSV_MAX_LINES:,} lines to '
+                  f'download at once. Narrow the date range and try again.')
+            return redirect(url_for('dispense', start_date=start_date or '',
+                                    end_date=end_date or '', search=search or ''))
+
         # FIX (Performance): page over VISITS, not lines. Paging the raw
         # transaction rows would split a patient's three medicines across a
         # page break, so the distinct transaction_ids are paged first and then
@@ -7961,6 +7982,72 @@ def _report_csv(report_type, ctx, is_admin=False):
     stamp = local_now().strftime('%Y%m%d')
     name = title.lower().replace(' ', '-')
     return f'{name}-{stamp}.csv', out.getvalue()
+
+
+# One row per medication line, because that is how a dispense is recorded and
+# how a spreadsheet can count it. The visit's own details repeat down its
+# lines, and Visit Cost appears once per visit — on its first line, blank on
+# the rest — exactly as the screen's merged cell shows it. That way summing
+# either Line Cost or Visit Cost gives the right total instead of a figure
+# inflated by every extra medicine on a prescription.
+DISPENSE_CSV_COLUMNS = [
+    ('date', 'Date'), ('timestamp', 'Timestamp'), ('patient', 'Patient'),
+    ('company', 'Company'), ('position', 'Position'), ('gender', 'Gender'),
+    ('birth_decade', 'Born'), ('outcome', 'Outcome'),
+    ('outcome_days', 'Days'), ('diagnoses', 'Diagnoses'),
+    ('prescriber', 'Prescriber'), ('dispenser', 'Dispenser'),
+    ('med_name', 'Medication'), ('quantity', 'Quantity'),
+    ('price', 'Unit Cost'), ('line_cost', 'Line Cost'),
+    ('visit_cost', 'Visit Cost'), ('user', 'Recorded By'),
+    ('transaction_id', 'Visit ID'),
+]
+# A download is not a page, so it is not paged — it is everything the filter
+# matches. Past this many lines the date range is doing no work, and silently
+# handing over a truncated file would be worse than saying so.
+DISPENSE_CSV_MAX_LINES = 20000
+
+
+def _dispense_csv(transactions, base_query):
+    """(filename, csv text) for the dispensing record the filter matches.
+
+    Returns None if the match is too large to hand over in one file.
+    """
+    ids = [g['_id'] for g in transactions.aggregate([
+        {'$match': base_query},
+        {'$group': {'_id': '$transaction_id', 'ts': {'$max': '$timestamp'}}},
+        {'$sort': {'ts': -1}},
+    ])]
+    # A search that matches one line brings its whole visit, the same way the
+    # screen does — a record showing two of a patient's three medicines is
+    # not the record.
+    lines = list(transactions.find(
+        {'type': 'dispense', 'transaction_id': {'$in': ids}}))
+    if len(lines) > DISPENSE_CSV_MAX_LINES:
+        return None
+
+    grouped = {}
+    for ln in lines:
+        grouped.setdefault(ln.get('transaction_id'), []).append(ln)
+
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow([label for _f, label in DISPENSE_CSV_COLUMNS])
+    for tid in ids:
+        rows = grouped.get(tid) or []
+        rows.sort(key=lambda r: (r.get('med_name') or ''))
+        visit_cost = sum(_line_value(r) for r in rows)
+        for n, r in enumerate(rows):
+            row = dict(r)
+            row['line_cost'] = f'{_line_value(r):.2f}'
+            row['visit_cost'] = f'{visit_cost:.2f}' if n == 0 else ''
+            ts = r.get('timestamp')
+            row['timestamp'] = ts.strftime('%Y-%m-%d %H:%M:%S') if ts else ''
+            if not row.get('date') and ts:
+                row['date'] = ts.strftime('%Y-%m-%d')
+            writer.writerow([_csv_value(row.get(f))
+                             for f, _lab in DISPENSE_CSV_COLUMNS])
+    stamp = local_now().strftime('%Y%m%d')
+    return f'dispensing-record-{stamp}.csv', out.getvalue()
 
 
 def _past_receivers(db, limit=40):
