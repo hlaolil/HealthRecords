@@ -353,7 +353,8 @@ def enforce_session_timeout():
             last_active = None
         if last_active and (now - last_active) > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
             session.clear()
-            flash('You were logged out due to 30 minutes of inactivity. Please log in again.', 'error')
+            flash(f'You were logged out after {SESSION_TIMEOUT_MINUTES} minutes '
+                  f'of inactivity. Please log in again.', 'error')
             return redirect('/login')
 
     # Still within the window (or this is the first request after login) —
@@ -374,6 +375,75 @@ def enforce_session_timeout():
 # FIX (Security/XSS): escape user-controlled values before inserting into nav HTML.
 # Previously the user's display name came straight from the DB and was rendered
 # with |safe, allowing a name like <script>alert(1)</script> to execute.
+
+# ---------------------------------------------------------------------------
+# Session guard, rendered on every signed-in page via get_nav_links().
+#
+# Built as a plain string and concatenated rather than interpolated into an
+# f-string: JavaScript is full of braces, and an f-string would need every one
+# of them doubled. __TIMEOUT__ is substituted at render time.
+# ---------------------------------------------------------------------------
+SESSION_GUARD_JS = """
+<div id="session-warn" class="session-warn"></div>
+<script>
+(function () {
+    var TIMEOUT_MS = __TIMEOUT__ * 60 * 1000;
+    var WARN_MS = 3 * 60 * 1000;      // warn with three minutes to go
+    var MIN_PING_MS = 60 * 1000;      // at most one ping a minute
+    var last = Date.now();            // last real interaction
+    var lastPing = Date.now();
+    var expired = false;
+    var box = document.getElementById('session-warn');
+
+    function show(msg, cls) {
+        if (!box) return;
+        box.textContent = msg;
+        box.className = 'session-warn shown ' + (cls || '');
+    }
+    function hide() { if (box) box.className = 'session-warn'; }
+
+    function ping() {
+        lastPing = Date.now();
+        fetch('/api/session-ping', {method: 'POST'})
+            .then(function (r) { if (!r.ok) markExpired(); })
+            .catch(function () { /* offline: leave the countdown alone */ });
+    }
+
+    function markExpired() {
+        expired = true;
+        show('Your session has expired. Open the login page in another tab, '
+             + 'sign in, then come back and save — what you have typed here '
+             + 'is kept.', 'session-expired');
+    }
+
+    // Only genuine interaction counts. A page left open on an empty counter
+    // makes none of these, so an unattended terminal still times out.
+    ['keydown', 'click', 'input', 'change'].forEach(function (evt) {
+        document.addEventListener(evt, function () {
+            last = Date.now();
+            if (expired) return;
+            if (Date.now() - lastPing > MIN_PING_MS) ping();
+        }, true);
+    });
+
+    setInterval(function () {
+        if (expired) return;
+        var idle = Date.now() - last;
+        if (idle >= TIMEOUT_MS) {
+            markExpired();
+        } else if (idle >= TIMEOUT_MS - WARN_MS) {
+            var mins = Math.max(1, Math.ceil((TIMEOUT_MS - idle) / 60000));
+            show('You will be signed out in about ' + mins + ' minute'
+                 + (mins === 1 ? '' : 's') + '. Type or click anywhere to stay '
+                 + 'signed in.', 'session-soon');
+        } else {
+            hide();
+        }
+    }, 15000);
+})();
+</script>
+"""
+
 def get_nav_links():
     if 'user' in session:
         user = session['user']
@@ -404,7 +474,7 @@ def get_nav_links():
             {audit_link}
             <span>Welcome, {name}! <a href="/logout">Logout</a></span>
         </p>
-        """
+        """ + SESSION_GUARD_JS.replace('__TIMEOUT__', str(SESSION_TIMEOUT_MINUTES))
     else:
         return """
         <p class="nav-links"><strong>Navigate:</strong>
@@ -697,6 +767,21 @@ CSS_STYLE = """
         background-color: #f8d7da;
         color: #721c24;
     }
+    /* Session guard banner, fixed so it is seen wherever the page is scrolled. */
+    .session-warn { display: none; }
+    .session-warn.shown {
+        display: block;
+        position: fixed;
+        top: 0; left: 0; right: 0;
+        z-index: 9999;
+        padding: 12px 16px;
+        text-align: center;
+        font-weight: bold;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    }
+    .session-warn.session-soon { background-color: #fff3cd; color: #856404; }
+    .session-warn.session-expired { background-color: #f8d7da; color: #721c24; }
+    @media print { .session-warn { display: none !important; } }
     .filter-form {
         background-color: #fff;
         padding: 15px;
@@ -833,6 +918,10 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
                     border-radius: 4px; padding: 4px 8px; margin-top: 4px;
                     display: none; }
   .patient-recall.shown { display: block; }
+  .draft-note { font-size: 12px; color: #0c5460; background: #d1ecf1;
+                border-radius: 4px; padding: 4px 8px; margin-top: 4px;
+                display: none; }
+  .draft-note.shown { display: block; }
 </style>
 <h1>Dispensing</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
@@ -851,6 +940,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
             <label>Patient:</label>
             <input name="patient" id="patient" type="text" value="{{ tx_data.patient if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
             <div id="patient_recall" class="patient-recall"></div>
+            <div id="draft-note" class="draft-note"></div>
         </div>
         <div>
             <label for="company">Company:</label>
@@ -1317,6 +1407,7 @@ function clearForm() {
 
     // Clearing blanks the outcome select, so the days field must hide with it.
     toggleOutcomeDays();
+    draftClear();
     const recall = document.getElementById('patient_recall');
     if (recall) { recall.textContent = ''; recall.className = 'patient-recall'; }
     RECALL_FIELDS.forEach(function (pair) {
@@ -1332,6 +1423,96 @@ document.addEventListener('DOMContentLoaded', function() {
     if (positionInput) addInputListener(positionInput, 'position');
     document.querySelectorAll('.med-input').forEach(i => addInputListener(i, 'medication'));
     document.querySelectorAll('.diag-input').forEach(i => addInputListener(i, 'diagnosis'));
+});
+
+// ---------------------------------------------------------------------
+// Keep a draft of the form in the browser while it is being filled in.
+//
+// A dispensing visit is a lot of typing, and losing it — to a session that
+// timed out, a mis-click, a closed tab — means asking the patient everything
+// again. The draft lives in sessionStorage: it never leaves the browser, it
+// is per-tab, it goes when the tab closes, and it is cleared the moment the
+// visit is saved. Wrapped throughout, because private windows can refuse it.
+// ---------------------------------------------------------------------
+var DRAFT_KEY = 'dispense-draft';
+
+function draftRead() {
+    try {
+        var raw = sessionStorage.getItem(DRAFT_KEY);
+        return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+}
+
+function draftClear() {
+    try { sessionStorage.removeItem(DRAFT_KEY); } catch (e) {}
+    var n = document.getElementById('draft-note');
+    if (n) n.className = 'draft-note';
+}
+
+function draftSave() {
+    // Never save over an edit: that form belongs to an existing record.
+    var tid = document.getElementById('transaction_id_field');
+    if (tid && tid.value) return;
+    var form = document.querySelector('.common-section');
+    if (!form) return;
+    var data = {single: {}, meds: [], qtys: [], diags: []};
+    form.querySelectorAll('input, select').forEach(function (el) {
+        if (el.name) data.single[el.name] = el.value;
+    });
+    document.querySelectorAll('[name="med_names"]').forEach(function (el) {
+        data.meds.push(el.value);
+    });
+    document.querySelectorAll('[name="quantities"]').forEach(function (el) {
+        data.qtys.push(el.value);
+    });
+    document.querySelectorAll('[name="diagnoses"]').forEach(function (el) {
+        data.diags.push(el.value);
+    });
+    var anything = Object.keys(data.single).some(function (k) {
+        return k !== 'date' && k !== 'dispenser' && data.single[k];
+    }) || data.meds.some(Boolean) || data.diags.some(Boolean);
+    try {
+        if (anything) sessionStorage.setItem(DRAFT_KEY, JSON.stringify(data));
+        else sessionStorage.removeItem(DRAFT_KEY);
+    } catch (e) {}
+}
+
+function draftRestore() {
+    var tid = document.getElementById('transaction_id_field');
+    if (tid && tid.value) return;            // editing: leave it alone
+    var d = draftRead();
+    if (!d) return;
+    var form = document.querySelector('.common-section');
+    if (!form) return;
+    Object.keys(d.single || {}).forEach(function (n) {
+        var el = form.querySelector('[name="' + n + '"]');
+        if (el && d.single[n]) el.value = d.single[n];
+    });
+    while (document.querySelectorAll('[name="diagnoses"]').length < (d.diags || []).length) addDiagRow();
+    document.querySelectorAll('[name="diagnoses"]').forEach(function (el, i) {
+        if (d.diags[i]) el.value = d.diags[i];
+    });
+    while (document.querySelectorAll('[name="med_names"]').length < (d.meds || []).length) addRow();
+    document.querySelectorAll('[name="med_names"]').forEach(function (el, i) {
+        if (d.meds[i]) el.value = d.meds[i];
+    });
+    document.querySelectorAll('[name="quantities"]').forEach(function (el, i) {
+        if (d.qtys[i]) el.value = d.qtys[i];
+    });
+    var n = document.getElementById('draft-note');
+    if (n) {
+        n.textContent = 'This is the visit you had started. Nothing was lost. '
+            + 'Save it, or clear the form to start again.';
+        n.className = 'draft-note shown';
+    }
+    toggleOutcomeDays();
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    draftRestore();
+    ['input', 'change'].forEach(function (evt) {
+        document.addEventListener(evt, draftSave, true);
+    });
 });
 
 // A returning patient's employer, position, birth decade and gender are the
@@ -1442,6 +1623,7 @@ document.addEventListener('DOMContentLoaded', toggleOutcomeDays);
 
 {% if message and ('successfully' in message|lower or 'updated' in message|lower) and 'partial success' not in message|lower %}
     {% if not tx_data %}
+        draftClear();
         clearForm();
     {% endif %}
 {% endif %}
@@ -10686,6 +10868,25 @@ MEDICATION_OPTIONS = [
     'Zinc Tablets, 020 mg',
     'Zuvamor, 040 mg',
 ]
+
+@app.route('/api/session-ping', methods=['POST'])
+@login_required
+def session_ping():
+    """Tell the server the user is still here.
+
+    The timeout is meant to measure INACTIVITY, but the only activity it
+    could see was a page request. Filling in a long dispensing form makes no
+    requests at all, so twenty minutes of typing looked exactly like twenty
+    minutes of an empty room — and the submit at the end landed on the login
+    page with the work lost.
+
+    The page calls this only when the user actually interacts with it, so an
+    unattended terminal still times out as intended. The before_request hook
+    has already refreshed the activity stamp by the time this runs; all this
+    has to do is answer.
+    """
+    return jsonify({'ok': True, 'timeout_minutes': SESSION_TIMEOUT_MINUTES})
+
 
 @app.route('/api/patient-lookup', methods=['GET'])
 @login_required
