@@ -485,7 +485,23 @@ def get_nav_links():
         """
 
 # CSS for all templates
-CSS_STYLE = """
+CSS_STYLE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+{#- The single most important line in this file for anyone on a phone.
+
+    Without it a mobile browser does not use the phone's width to lay the
+    page out. It assumes a desktop, lays everything out at 980px, and then
+    shrinks the result to fit the screen: measured on a Pixel-class phone,
+    the dashboard came out at 0.40 scale and the dispensing page at 0.25,
+    so the 16px body text was drawn at about 4px and every tap needed a
+    pinch-zoom first. It also meant the small-screen rules below never ran,
+    because as far as the browser was concerned the window was 980px wide
+    — which is why the Medication and Quantity labels sat on top of each
+    other on a real phone but not in a narrow desktop window. -#}
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ page_title|default('NMC Pharmacy', true) }}</title>
 <style>
     body {
         font-family: Arial, sans-serif;
@@ -710,6 +726,33 @@ CSS_STYLE = """
         transform: translateY(-2px) !important;
         box-shadow: 0 3px 6px rgba(0,0,0,0.2) !important;
     }
+    /* Every table sits in one of these. A register that mirrors a paper
+       form cannot drop columns to fit — Dispensing has 19 and the Key
+       Register 16, each one on the official form — so the register scrolls
+       sideways inside its own box and the page does not. The form above it,
+       the buttons and the nav stay put; only the register moves.
+
+       It has to be a wrapper rather than making the table itself scroll:
+       a table set to display:block stops stretching to fill its space, so
+       the 7-column Audit Log shrank to 556px of a 1200px page. */
+    .table-scroll {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        max-width: 100%;
+        /* Shadows at the edges, so it reads as "there is more this way"
+           rather than as the end of the table. They are painted on the
+           scrolling content, so they appear only on the side with more. */
+        background-image:
+            linear-gradient(to right, #f8f9fa 30%, rgba(248,249,250,0)),
+            linear-gradient(to left, #f8f9fa 30%, rgba(248,249,250,0)),
+            linear-gradient(to right, rgba(0,0,0,.16), rgba(0,0,0,0)),
+            linear-gradient(to left, rgba(0,0,0,.16), rgba(0,0,0,0));
+        background-position: 0 0, 100% 0, 0 0, 100% 0;
+        background-repeat: no-repeat;
+        background-size: 40px 100%, 40px 100%, 14px 100%, 14px 100%;
+        background-attachment: local, local, scroll, scroll;
+    }
+
     table {
         width: 100%;
         border-collapse: collapse;
@@ -783,7 +826,17 @@ CSS_STYLE = """
     }
     .session-warn.session-soon { background-color: #fff3cd; color: #856404; }
     .session-warn.session-expired { background-color: #f8d7da; color: #721c24; }
-    @media print { .session-warn { display: none !important; } }
+    @media print {
+        .session-warn { display: none !important; }
+        /* A box that scrolls on screen must not clip on paper: the printed
+           register has to carry every column, which is the whole reason
+           these forms are printed at all. */
+        .table-scroll {
+            overflow: visible !important;
+            background-image: none !important;
+        }
+        .nav-links { position: static; }
+    }
     .filter-form {
         background-color: #fff;
         padding: 15px;
@@ -831,14 +884,82 @@ CSS_STYLE = """
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         text-align: center;
     }
-    @media (max-width: 600px) {
+    /* ------------------------------------------------------------------
+       Screens narrower than a laptop.
+
+       The breakpoint used to be 600px, which is narrower than most phones
+       in landscape and every tablet in portrait, so a 700px-wide screen
+       got the full desktop layout squeezed into it. 820px covers a tablet
+       held upright; the second block below is for phones proper.
+
+       A register that mirrors a paper form cannot drop columns — the
+       Dispensing table has 19 and the Key Register 16, and every one of
+       them is on the official form. So the TABLE scrolls sideways inside
+       its own box instead of making the whole PAGE scroll sideways. The
+       difference matters: the form above it, the buttons and the nav stay
+       where they belong, and only the register moves under your finger.
+       ------------------------------------------------------------------ */
+    @media (max-width: 820px) {
         body { padding: 10px; }
-        form, table { max-width: 100%; }
+        form { max-width: 100%; }
         .common-section { grid-template-columns: 1fr; }
         #medications, #diagnoses { grid-template-columns: 1fr; }
         .med-row, .diag-row { grid-template-columns: 1fr; }
-        table th, table td { font-size: 14px; padding: 8px; }
         .filter-section { grid-template-columns: 1fr; }
+        table th, table td { font-size: 14px; padding: 8px; }
+
+        /* Fingers, not mice. Anything below about 44px is a mis-tap
+           waiting to happen, and the Remove buttons beside a medication
+           row were 21px high. */
+        input, select, button, input[type="submit"], .nav-links a {
+            min-height: 44px;
+        }
+        input[type="checkbox"], input[type="radio"] { min-height: 0; }
+        /* Twelve links wrapped over five rows of 44px filled the whole
+           first screen of a phone, and it is sticky, so it stayed there.
+           One swipeable row instead: same links, same tap size, a tenth of
+           the height. The edge shadows say there is more to the side, the
+           same way the registers do. */
+        .nav-links {
+            white-space: nowrap;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            text-align: left;
+            padding: 4px 0;
+            background-image:
+                linear-gradient(to right, #f8f9fa 30%, rgba(248,249,250,0)),
+                linear-gradient(to left, #f8f9fa 30%, rgba(248,249,250,0)),
+                linear-gradient(to right, rgba(0,0,0,.16), rgba(0,0,0,0)),
+                linear-gradient(to left, rgba(0,0,0,.16), rgba(0,0,0,0));
+            background-position: 0 0, 100% 0, 0 0, 100% 0;
+            background-repeat: no-repeat;
+            background-size: 40px 100%, 40px 100%, 14px 100%, 14px 100%;
+            background-attachment: local, local, scroll, scroll;
+        }
+        .nav-links a {
+            display: inline-block;
+            line-height: 36px;
+            min-height: 36px;
+            padding: 0 4px;
+        }
+        .form-buttons input[type="submit"],
+        .form-buttons button { width: 100%; }
+    }
+
+    /* Phones proper. */
+    @media (max-width: 480px) {
+        body { padding: 8px; }
+        h1 { font-size: 24px; }
+        h2 { font-size: 19px; margin-top: 20px; }
+        .nav-links { font-size: 15px; padding: 6px 0; }
+        .nav-links a { margin: 0 6px; }
+        table th, table td { font-size: 13px; padding: 6px; }
+    }
+
+    /* Touch devices of any width: the same mis-tap problem on a tablet. */
+    @media (pointer: coarse) {
+        input, select, button, input[type="submit"] { min-height: 44px; }
+        input[type="checkbox"], input[type="radio"] { min-height: 0; }
     }
 </style>
 <script>
@@ -889,6 +1010,8 @@ CSS_STYLE = """
     resetTimer();
 })();
 </script>
+</head>
+<body>
 """
 
 # FIX (Performance): medication options are now served from a single endpoint
@@ -1163,7 +1286,7 @@ search looks across all records, not just this month.</p>
 matches, not just this page &mdash; one row per medication, with the visit's
 details repeated down its rows.</p>
 {{ pagebar(pager, 'dispense', start_date, end_date, search, unit) }}
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr>
             <th>#</th>
@@ -1273,7 +1396,7 @@ details repeated down its rows.</p>
         <tr><td colspan="16">No dispense transactions.</td></tr>
         {% endfor %}
     </tbody>
-</table>
+</table></div>
 {{ pagebar(pager, 'dispense', start_date, end_date, search, unit) }}
 <script>
 let medRowCount = {{ (tx_data.meds|length if tx_data else 1) }};
@@ -1831,7 +1954,7 @@ item's AMC and the order request will replace it.</p>
         </div>
     </div>
     <h3>Items</h3>
-    <table>
+    <div class="table-scroll"><table>
         <thead><tr><th>Medication</th><th>Quantity</th></tr></thead>
         <tbody>
         {% for i in range(6) %}
@@ -1841,7 +1964,7 @@ item's AMC and the order request will replace it.</p>
             </tr>
         {% endfor %}
         </tbody>
-    </table>
+    </table></div>
     <datalist id="med_suggestions"></datalist>
     <div class="form-buttons"><input type="submit" value="Record Issue"></div>
 </form>
@@ -1879,7 +2002,7 @@ inflate AMC and the order request will not reorder against it.</p>
 </form>
 
 <h2>Recent Internal Issues &amp; Losses ({{ recent|length }})</h2>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Date</th><th>Type</th><th>Medication</th><th>Quantity</th><th>Value</th>
             <th>Department / Reason</th><th>To / Note</th><th>User</th></tr>
@@ -1904,7 +2027,7 @@ inflate AMC and the order request will not reorder against it.</p>
         <tr><td colspan="8">Nothing recorded yet.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 <script>
 document.addEventListener('DOMContentLoaded', async function() {
     const options = await getMedicationOptions();
@@ -1983,7 +2106,7 @@ is generated for you.</p>
 <h2>Register &mdash; {{ rows|length }} item{{ '' if rows|length == 1 else 's' }}</h2>
 <p class="loan-hint">Availability is worked out from the loan ledger, not
 stored on the item, so this table cannot disagree with what is actually out.</p>
-<table>
+<div class="table-scroll"><table>
     <tr>
         <th>Code</th><th>Type</th><th>Size</th><th>Condition</th>
         <th>State</th><th>With</th><th>Due</th><th>Note</th><th>Action</th>
@@ -2020,7 +2143,7 @@ stored on the item, so this table cannot disagree with what is actually out.</p>
     {% else %}
     <tr><td colspan="9">No items yet. Add the first one above.</td></tr>
     {% endfor %}
-</table>
+</table></div>
 """
 
 
@@ -2122,7 +2245,7 @@ damaged, retired or lost &mdash; or the register is empty.</p>
 {% if overdue_count %}
 <p class="loan-hint"><strong>{{ overdue_count }}</strong> past due. Those rows are red.</p>
 {% endif %}
-<table>
+<div class="table-scroll"><table>
     <tr>
         <th>Item</th><th>Type</th><th>Patient</th><th>Contact</th><th>OPD No</th>
         <th>Issued</th><th>Due</th><th>Days Out</th><th>Issued By</th>
@@ -2163,7 +2286,7 @@ damaged, retired or lost &mdash; or the register is empty.</p>
     {% else %}
     <tr><td colspan="10">Nothing is out.</td></tr>
     {% endfor %}
-</table>
+</table></div>
 
 <h2>Loan History</h2>
 <p class="loan-hint">This filter narrows the history table below. The
@@ -2191,7 +2314,7 @@ damaged, retired or lost &mdash; or the register is empty.</p>
         </div>
     </div>
 </form>
-<table>
+<div class="table-scroll"><table>
     <tr>
         <th>Ref</th><th>Item</th><th>Patient</th><th>Issued</th><th>Due</th>
         <th>Returned</th><th>Days</th><th>Out</th><th>Back</th>
@@ -2215,10 +2338,10 @@ damaged, retired or lost &mdash; or the register is empty.</p>
     {% else %}
     <tr><td colspan="12">No loans match.</td></tr>
     {% endfor %}
-</table>
+</table></div>
 
 <h2>Activity by Month</h2>
-<table>
+<div class="table-scroll"><table>
     <tr><th>Month</th><th>Issued</th><th>Returned</th><th>Average Days Out</th></tr>
     {% for r in activity %}
     <tr>
@@ -2228,7 +2351,7 @@ damaged, retired or lost &mdash; or the register is empty.</p>
         <td>{{ r.avg_days if r.avg_days is not none else '-' }}</td>
     </tr>
     {% endfor %}
-</table>
+</table></div>
 <p class="loan-hint">Average days out counts loans by the month they came
 back, so a long loan is measured against the month it ended.</p>
 <p style="margin-top:24px;">Checked by: ____________________________
@@ -2524,7 +2647,7 @@ who logs in while it is out is noted against that same row as also on duty,
 rather than splitting it. Nobody has to fill a form in.<br>
 The app records the names, the times and who was logged in; it does not record
 a signature it never saw.</p>
-<table>
+<div class="table-scroll"><table>
     <thead>
     <tr>
         <th>Date Key given</th>
@@ -2590,7 +2713,7 @@ a signature it never saw.</p>
     <tr><td colspan="{{ 16 if is_admin else 15 }}">No key movements in this period.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 <p class="key-hint">{{ entries|length }} movement{{ '' if entries|length == 1 else 's' }}
 in this period{% if still_out_count %}, {{ still_out_count }} not returned{% endif %}.</p>
 <p style="margin-top:20px;">Checked by: ______________________________
@@ -2603,7 +2726,7 @@ in this period{% if still_out_count %}, {{ still_out_count }} not returned{% end
 <p class="key-hint">Only people marked <strong>in charge</strong> are offered
 when the key is issued. Somebody can be on the roster, and use the app, without
 being in charge &mdash; that is what the flag is for.</p>
-<table>
+<div class="table-scroll"><table>
     <tr><th>Name</th><th>Role</th><th>In charge</th><th>Active</th><th>Set</th></tr>
     {% for o in roster %}
     <tr>
@@ -2628,7 +2751,7 @@ being in charge &mdash; that is what the flag is for.</p>
         </td>
     </tr>
     {% endfor %}
-</table>
+</table></div>
 <h3>Add Someone</h3>
 <form method="POST" action="{{ url_for('key_register') }}" class="dispense-form">
     <input type="hidden" name="action" value="add_officer">
@@ -2685,6 +2808,14 @@ TEMPERATURE_TEMPLATE = CSS_STYLE + """
   .temp-breach { background-color: #f8d7da !important; }
   .temp-round { max-width: 760px; margin-bottom: 8px; }
   .temp-round-input { width: 110px; font-size: 20px; padding: 8px; text-align: center; }
+  /* The round is walked, so it is the page most likely to be done on a
+     phone. At 110px the input pushed the acceptable range off the edge,
+     and the range is the thing that tells you whether to act on the
+     reading — so on a narrow screen the box gives up the width instead. */
+  @media (max-width: 480px) {
+    .temp-round-input { width: 68px; font-size: 18px; padding: 8px 4px; }
+    .temp-round th, .temp-round td { padding: 6px 4px; font-size: 13px; }
+  }
   .temp-round-note { font-size: 13px; margin: 4px 0 14px; }
   .temp-already { font-size: 12px; color: #856404; }
   .temp-manual { margin-top: 18px; }
@@ -2708,10 +2839,14 @@ checked &mdash; nothing is recorded for it.</p>
     <input type="hidden" name="action" value="record_round">
     <input type="hidden" name="month" value="{{ month_value }}">
     <input type="hidden" name="location" value="{{ location }}">
-    <table class="temp-round">
+    <div class="table-scroll"><table class="temp-round">
         <tr>
-            <th>Room</th><th>Thermometer</th><th>Temperature &deg;C</th>
-            <th>Acceptable</th><th>Already recorded</th>
+            {# Soft hyphens: these one-word headings set the column width on
+               a phone, where "Thermometer" alone was 92px for a single
+               digit. &shy; lets them break only when the screen is too
+               narrow; on a desktop, and in print, they read as normal. #}
+            <th>Room</th><th>Thermo&shy;meter</th><th>Temp&shy;erature &deg;C</th>
+            <th>Accept&shy;able</th><th>Already recorded</th>
         </tr>
         {% for r in round_rows %}
         <tr>
@@ -2726,7 +2861,7 @@ checked &mdash; nothing is recorded for it.</p>
                 &mdash; typing here corrects it</span>{% else %}&ndash;{% endif %}</td>
         </tr>
         {% endfor %}
-    </table>
+    </table></div>
     <div class="form-buttons">
         <input type="submit" value="Save {{ round_session }} Round">
     </div>
@@ -2822,7 +2957,7 @@ there.</span>
 <div class="temp-chart">{{ chart|safe }}</div>
 
 <h3>Register</h3>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr>
             <th rowspan="2">Day</th>
@@ -2865,7 +3000,7 @@ there.</span>
         </tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 <p style="font-size:13px;">A dash means no reading was recorded for that check.
 Each line on the chart runs straight through the readings that exist, with a
 mark only where one was taken; a missed check shows as a blank column in the
@@ -2955,7 +3090,7 @@ RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
 <p style="font-size:13px;">One order is often filled by several part-deliveries, each
 with its own invoice. This is the position across <strong>all</strong> invoices
 raised against this order number.</p>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Order Total</th><th>Invoices</th><th>Invoiced to Date</th>
                <th>Goods Received</th><th>Still to Invoice</th><th>Status</th></tr></thead>
     <tbody>
@@ -2970,14 +3105,14 @@ raised against this order number.</p>
                 {% else %}Part-delivered{% endif %}</td>
         </tr>
     </tbody>
-</table>
+</table></div>
 {% if order_summary.conflicting_totals %}
 <p class="message error" style="font-size:13px;">The invoices recorded against this
 order do not agree on the order total. The figure above is from the most recently
 opened delivery. Check the paperwork.</p>
 {% endif %}
 {% if order_summary.invoice_count > 1 %}
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Delivery</th><th>Invoice</th><th>Invoice Total</th><th>Status</th></tr></thead>
     <tbody>
     {% for sib in order_summary.siblings %}
@@ -2989,12 +3124,12 @@ opened delivery. Check the paperwork.</p>
         </tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% endif %}
 {% endif %}
 
 <h3>This Invoice vs Goods Received</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Document</th><th>Total</th><th>Compared With</th><th>Difference</th><th>Status</th></tr></thead>
     <tbody>
         <tr class="{{ recon.goods_class }}">
@@ -3005,7 +3140,7 @@ opened delivery. Check the paperwork.</p>
             <td>{{ recon.goods_note }}</td>
         </tr>
     </tbody>
-</table>
+</table></div>
 <p style="font-size:13px;">Goods received is the sum of the line values captured
 below, each computed from the pack price rather than a rounded unit price, so a
 pack size that does not divide cleanly cannot cause a false mismatch. A mismatch is flagged but never blocks
@@ -3060,7 +3195,7 @@ priced singly, leave pack size as 1.</p>
 {% endif %}
 
 <h3>Lines Captured ({{ delivery_lines|length }})</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Medication</th><th>Units</th><th>Pack Size</th><th>Packs</th>
                <th>Price/Pack</th><th>Unit Price</th><th>Line Value</th>
                <th>Batch</th><th>Expiry</th><th>Captured</th></tr></thead>
@@ -3082,7 +3217,7 @@ priced singly, leave pack size as 1.</p>
         <tr><td colspan="10">No lines captured yet.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 
 {% else %}
 <h2>Start a Delivery</h2>
@@ -3105,7 +3240,7 @@ deliveries can be open at the same time.</p>
 </form>
 
 <h2>Deliveries ({{ deliveries|length }})</h2>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Reference</th><th>Supplier</th><th>Order</th><th>Order Total</th>
             <th>Invoice</th><th>Invoice Total</th><th>Goods Received</th>
@@ -3130,7 +3265,7 @@ deliveries can be open at the same time.</p>
         <tr><td colspan="12">No deliveries yet.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% endif %}
 
 <hr>
@@ -3185,7 +3320,7 @@ search looks across all records, not just this month.</p>
 </form>
 
 {{ pagebar(pager, 'receive', start_date, end_date, search, unit) }}
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr>
             <th>Medication</th><th>Quantity</th><th>Batch</th><th>Price</th>
@@ -3238,7 +3373,7 @@ search looks across all records, not just this month.</p>
         <tr><td colspan="12">No receive transactions.</td></tr>
         {% endfor %}
     </tbody>
-</table>
+</table></div>
 {{ pagebar(pager, 'receive', start_date, end_date, search, unit) }}
 
 <script>
@@ -3653,7 +3788,7 @@ recorded in the audit log.</p>
     <button type="submit" form="bulk-expiry" class="delete-btn">Remove All Ticked</button>
 </div>
 {% endif %}
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr>
             {% if is_admin and report_type == 'expired_list' %}<th>Write off</th>{% endif %}
@@ -3719,7 +3854,7 @@ recorded in the audit log.</p>
         <tr><td colspan="6">No medications matching the criteria.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% elif report_type == 'inventory' and report_data %}
 <form method="POST" action="{{ url_for('reports') }}" class="filter-form">
     <input type="hidden" name="report_type" value="inventory">
@@ -3758,7 +3893,7 @@ is why it is not headed "Dispensed". <strong>To Departments</strong> is stock se
 to a department rather than a patient. AMC is average monthly consumption
 &mdash; dispensing plus issues to departments, since both have to be replaced.</p>
 {% endif %}
-<table>
+<div class="table-scroll"><table>
     <thead>
         {# NEW: the Adjustment column is admin-only. Non-admins see a row that
            still adds up, because dispensed_effective has the adjustment folded
@@ -3805,13 +3940,13 @@ to a department rather than a patient. AMC is average monthly consumption
         <tr><td colspan="{{ (14 if is_admin else 11) + (1 if category == 'both' else 0) }}">No data for this period.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% elif report_type == 'sick_leave' %}
 <h2>Sick Leave Register for {{ start_date }} to {{ end_date }}</h2>
 <p style="font-size:13px;">Every visit whose outcome was sick leave, with the days
 given. One line per visit, not per medication &mdash; a patient who received three
 items on one visit was given one period of leave, not three.</p>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Date</th><th>Patient</th><th>Company</th><th>Days</th>
             <th>Diagnoses</th><th>Prescriber</th><th>Dispenser</th></tr>
@@ -3831,10 +3966,10 @@ items on one visit was given one period of leave, not three.</p>
         <tr><td colspan="7">No sick leave was recorded in this period.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% if sick_leave %}
 <h3>Summary</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Certificates</th><th>Patients</th><th>Total Days</th>
                <th>Average Days</th><th>Longest</th></tr></thead>
     <tbody>
@@ -3844,17 +3979,17 @@ items on one visit was given one period of leave, not three.</p>
             <td>{{ sick_leave_totals.average }}</td>
             <td>{{ sick_leave_totals.longest }}</td></tr>
     </tbody>
-</table>
+</table></div>
 {% if sick_leave_totals.repeat %}
 <h3>More Than One Certificate in the Period</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Patient</th><th>Certificates</th><th>Total Days</th></tr></thead>
     <tbody>
     {% for r in sick_leave_totals.repeat %}
         <tr><td>{{ r.patient }}</td><td>{{ r.count }}</td><td>{{ r.days }}</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% endif %}
 <div class="form-buttons">
     <button type="button" onclick="window.print();">Print This Register</button>
@@ -3868,7 +4003,7 @@ than dispensed to a patient. This is <strong>consumption</strong>: it counts
 toward each item's AMC and the order request replaces it, because the stock was
 used and has to be bought again. Damage and expiry are losses and appear under
 <em>Losses</em> instead.</p>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Date</th><th>Department</th><th>Medication</th><th>Quantity</th>
             <th>Value</th><th>Received By</th><th>Note</th><th>Issued By</th></tr>
@@ -3887,10 +4022,10 @@ used and has to be bought again. Damage and expiry are losses and appear under
         <tr><td colspan="8">No internal issues in this period.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% if issues %}
 <h3>By Department</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Department</th><th>Lines</th><th>Units</th><th>Value</th><th>Share</th></tr></thead>
     <tbody>
     {% for d in issue_totals.by_dept %}
@@ -3899,9 +4034,9 @@ used and has to be bought again. Damage and expiry are losses and appear under
             <td>{% if issue_totals.value %}{{ "%.1f"|format(d.value / issue_totals.value * 100) }}%{% else %}&ndash;{% endif %}</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 <h3>By Medication</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Medication</th><th>Lines</th><th>Units</th><th>Value</th></tr></thead>
     <tbody>
     {% for m in issue_totals.by_med %}
@@ -3909,16 +4044,16 @@ used and has to be bought again. Damage and expiry are losses and appear under
             <td>R{{ "%.2f"|format(m.value) }}</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 <h3>Summary</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Issues</th><th>Departments</th><th>Units</th><th>Total Value</th></tr></thead>
     <tbody>
         <tr><td>{{ issue_totals.lines }}</td><td>{{ issue_totals.dept_count }}</td>
             <td>{{ issue_totals.units }}</td>
             <td>R{{ "%.2f"|format(issue_totals.value) }}</td></tr>
     </tbody>
-</table>
+</table></div>
 <div class="form-buttons">
     <button type="button" onclick="window.print();">Print This Report</button>
 </div>
@@ -3930,7 +4065,7 @@ used and has to be bought again. Damage and expiry are losses and appear under
 be supplied in full. This is the demand that never reaches the dispensing figures,
 and the reason AMC alone understates what an item is really needed for &mdash; the
 more often something runs out, the less it appears to be used.</p>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Date</th><th>Medication</th><th>Requested</th><th>Given</th>
             <th>Short</th><th>Value Short</th><th>Patient</th><th>Prescriber</th><th>User</th></tr>
@@ -3948,10 +4083,10 @@ more often something runs out, the less it appears to be used.</p>
         <tr><td colspan="9">Every request in this period was filled in full.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% if unmet_list %}
 <h3>By Medication</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Medication</th><th>Occasions</th><th>Units Short</th>
                <th>Units Dispensed</th><th>Fill Rate</th><th>Value Short</th></tr></thead>
     <tbody>
@@ -3964,9 +4099,9 @@ more often something runs out, the less it appears to be used.</p>
         </tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 <h3>Summary</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Occasions</th><th>Items Affected</th><th>Units Short</th>
                <th>Overall Fill Rate</th><th>Value Short</th></tr></thead>
     <tbody>
@@ -3975,7 +4110,7 @@ more often something runs out, the less it appears to be used.</p>
             <td>{% if unmet_totals.fill_rate is not none %}{{ unmet_totals.fill_rate }}%{% else %}&ndash;{% endif %}</td>
             <td>R{{ "%.2f"|format(unmet_totals.value) }}</td></tr>
     </tbody>
-</table>
+</table></div>
 <p style="font-size:13px;">Fill rate is units supplied as a share of units
 requested. The Order Request already adds these shortfalls back when working out
 what to buy.</p>
@@ -3996,7 +4131,7 @@ This is the record of loss &mdash; distinct from
 <em>Expired Stock on Shelf</em>, which is a work list of what still needs
 removing and empties as you deal with it. Values are at the unit price recorded
 when the stock was written off.</p>
-<table>
+<div class="table-scroll"><table>
     <thead>
         {# Column order and headings are fixed by the register form this report
            has to match: DATE, Item Description, QTY, EXPIRY DATE, Batch/Lot,
@@ -4043,19 +4178,19 @@ when the stock was written off.</p>
         <tr><td colspan="{{ 8 if is_admin else 7 }}">No stock was written off in this period.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% if writeoffs %}
 <h3>Summary</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Write-Offs</th><th>Items Affected</th><th>Units Lost</th><th>Value Lost</th></tr></thead>
     <tbody>
         <tr><td>{{ writeoffs|length }}</td><td>{{ writeoff_totals.item_count }}</td>
             <td>{{ writeoff_totals.units }}</td>
             <td>R{{ "%.2f"|format(writeoff_totals.value) }}</td></tr>
     </tbody>
-</table>
+</table></div>
 <h3>By Medication</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Medication</th><th>Times Written Off</th><th>Units Lost</th><th>Value Lost</th></tr></thead>
     <tbody>
     {% for m in writeoff_totals.by_med %}
@@ -4063,7 +4198,7 @@ when the stock was written off.</p>
             <td>{{ m.units }}</td><td>R{{ "%.2f"|format(m.value) }}</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 <p style="font-size:13px;">An item appearing here repeatedly is usually an
 over-ordering signal rather than a storage one &mdash; compare its AMC against
 how much is being brought in.</p>
@@ -4084,7 +4219,7 @@ dispensing line(s) in this period predate cost capture and are valued at the
 item's current price. Those figures are indicative.{% endif %}</p>
 
 <h3>Stock Value Movement</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Movement</th><th>Value</th><th>Note</th></tr></thead>
     <tbody>
         <tr><td>Opening stock value</td><td>R{{ "%.2f"|format(monthly.opening_value) }}</td>
@@ -4116,7 +4251,7 @@ item's current price. Those figures are indicative.{% endif %}</p>
             <td>R{{ "%.2f"|format(monthly.closing_value) }}</td>
             <td>at today's unit prices</td></tr>
     </tbody>
-</table>
+</table></div>
 <p style="font-size:13px;">Opening and closing values are the stock on hand at each
 point, priced at each item's current unit price. Movements are priced as they
 happened, so the two bases differ and the column will not add up exactly when
@@ -4124,7 +4259,7 @@ supplier prices have changed during the period &mdash; that difference is a pric
 effect, not a stock discrepancy.</p>
 
 <h3>Dispensing</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Measure</th><th>Value</th></tr></thead>
     <tbody>
         <tr><td>Visits</td><td>{{ monthly.visits }}</td></tr>
@@ -4138,10 +4273,10 @@ effect, not a stock discrepancy.</p>
             <td><strong>R{{ "%.2f"|format(monthly.cost_per_patient) }}</strong></td></tr>
         <tr><td>Average cost per item</td><td>R{{ "%.2f"|format(monthly.cost_per_item) }}</td></tr>
     </tbody>
-</table>
+</table></div>
 
 <h3>Procurement</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Measure</th><th>Value</th></tr></thead>
     <tbody>
         <tr><td>Orders raised</td><td>{{ monthly.order_count }}</td></tr>
@@ -4153,14 +4288,14 @@ effect, not a stock discrepancy.</p>
             <td>Invoiced less goods received</td>
             <td>R{{ "%+.2f"|format(monthly.invoice_gap) }}</td></tr>
     </tbody>
-</table>
+</table></div>
 <p style="font-size:13px;">An order counts in the period its first invoice was
 recorded, since there is no separate order record. Where one order is invoiced
 across two periods it is counted once, in the earlier one.</p>
 
 {% if monthly.by_dept %}
 <h3>Internal Issues by Department</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Department</th><th>Lines</th><th>Value</th><th>Share of Issues</th></tr></thead>
     <tbody>
     {% for d in monthly.by_dept %}
@@ -4169,11 +4304,11 @@ across two periods it is counted once, in the earlier one.</p>
             <td>{% if monthly.issued_value %}{{ "%.1f"|format(d.value / monthly.issued_value * 100) }}%{% else %}&ndash;{% endif %}</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% endif %}
 
 <h3>Highest Cost Items ({{ monthly.top_items|length }})</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Medication</th><th>Units Dispensed</th><th>Cost</th><th>Share of Total</th></tr></thead>
     <tbody>
     {% for t in monthly.top_items %}
@@ -4183,7 +4318,7 @@ across two periods it is counted once, in the earlier one.</p>
         <tr><td colspan="4">Nothing dispensed in this period.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 <div class="form-buttons">
     <button type="button" onclick="window.print();">Print This Report</button>
 </div>
@@ -4211,7 +4346,7 @@ item(s) below were adjusted upward this way.</strong>{% endif %}</p>
 
 {% for group in order_request.groups %}
 <h3>{{ group.supplier }} &mdash; {{ group.lines|length }} item(s), R{{ "%.2f"|format(group.total) }}</h3>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Medication</th><th>AMC (consumption)</th><th>Unmet</th>
             <th>AMC used</th><th>On Hand</th><th>Months Left</th>
@@ -4232,7 +4367,7 @@ item(s) below were adjusted upward this way.</strong>{% endif %}</p>
         </tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% else %}
 <p class="message success">Nothing needs ordering &mdash; every item with recorded
 consumption has more than {{ order_request.cover_months }} months of stock.</p>
@@ -4240,7 +4375,7 @@ consumption has more than {{ order_request.cover_months }} months of stock.</p>
 
 {% if order_request.groups %}
 <h3>Summary</h3>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Suppliers</th><th>Items</th><th>Packs</th><th>Estimated Total</th>
                <th>No price on file</th><th>No pack size on file</th></tr></thead>
     <tbody>
@@ -4253,7 +4388,7 @@ consumption has more than {{ order_request.cover_months }} months of stock.</p>
             <td>{{ order_request.unsized }}</td>
         </tr>
     </tbody>
-</table>
+</table></div>
 {% if order_request.unpriced %}
 <p class="message error" style="font-size:13px;">{{ order_request.unpriced }} item(s)
 have no pack price on file, so their cost is not included in the total. They are
@@ -4283,7 +4418,7 @@ so treat the total as indicative rather than a quotation.</p>
     </div>
 </form>
 <h2>Receive List for {{ start_date }} to {{ end_date }}</h2>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Medication</th><th>Quantity</th><th>Batch</th><th>Price</th><th>Expiry Date</th><th>Stock Receiver</th><th>Order Number</th><th>Supplier</th><th>Invoice Number</th><th>User</th><th>Timestamp</th></tr>
     </thead>
@@ -4300,7 +4435,7 @@ so treat the total as indicative rather than a quotation.</p>
         <tr><td colspan="11">No receive transactions in this period.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% elif report_type == 'controlled_drug_register' and controlled_register %}
 <form method="POST" action="{{ url_for('reports') }}" class="filter-form">
     <input type="hidden" name="report_type" value="controlled_drug_register">
@@ -4315,7 +4450,7 @@ so treat the total as indicative rather than a quotation.</p>
 {% for reg in controlled_register %}
     <h3>{{ reg.med_name }} — Beginning: {{ reg.beginning_balance }} | Ending: {{ reg.ending_balance }} | Received: {{ reg.received }} | Dispensed: {{ reg.dispensed }}</h3>
     {% if reg.transactions %}
-    <table>
+    <div class="table-scroll"><table>
         <thead>
             <tr><th>Date</th><th>Type</th><th>Quantity</th><th>Balance After</th><th>Prescriber</th><th>Issuer/Receiver</th><th>User</th><th>Reference/Patient</th></tr>
         </thead>
@@ -4331,7 +4466,7 @@ so treat the total as indicative rather than a quotation.</p>
             </tr>
         {% endfor %}
         </tbody>
-    </table>
+    </table></div>
     {% else %}
     <p>No transactions in this period.</p>
     {% endif %}
@@ -4416,7 +4551,7 @@ DASHBOARD_TEMPLATE = CSS_STYLE + """
 </div>
 
 <h2>Activity by Month</h2>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Measure</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}</tr>
     </thead>
@@ -4436,7 +4571,7 @@ DASHBOARD_TEMPLATE = CSS_STYLE + """
             {% for v in totals.val_adjusted %}<td>R{{ v }}</td>{% endfor %}</tr>
         {% endif %}
     </tbody>
-</table>
+</table></div>
 <p style="font-size:13px;">
 A dispensing visit is one patient encounter; an item is one medication line
 within it, so a visit with three medicines counts as one visit and three items.
@@ -4453,7 +4588,7 @@ will read low. AMC is calculated from the completed months only.
 </p>
 
 <h2>Visit Outcomes by Month</h2>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Outcome</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
             <th>Total</th><th>Days</th></tr>
@@ -4468,14 +4603,14 @@ will read low. AMC is calculated from the completed months only.
         <tr><td colspan="{{ month_labels|length + 3 }}">No outcomes recorded yet.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 <p style="font-size:13px;">Counted per <strong>visit</strong>, not per medication
 &mdash; a visit that produced three items is one referral, not three. Outcome is
 optional, so a visit with none recorded appears in no row here. Days apply to sick
 leave and admission.</p>
 
 <h2>Disease Trends</h2>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Diagnosis</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
             <th>Total</th><th>Trend</th></tr>
@@ -4489,7 +4624,7 @@ leave and admission.</p>
         <tr><td colspan="{{ month_labels|length + 2 }}">No diagnoses recorded yet.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 <p style="font-size:13px;">The twelve most frequent diagnoses across
 {{ clinical.episodes }} visit(s), by episode. <strong>Trend</strong> compares the
 last completed month against the average of the months before it, so a genuine
@@ -4509,7 +4644,7 @@ low fill rate has an AMC that understates what people actually wanted.
 buffer than its AMC alone suggests.
 The peak month in each row is shown in bold.
 </p>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr>
             <th>Medication</th>
@@ -4538,10 +4673,10 @@ The peak month in each row is shown in bold.
         <tr><td colspan="{{ month_labels|length + 9 }}">No medications matching the criteria.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 
 <h2>Expiring Within 90 Days ({{ expiring|length }})</h2>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Medication</th><th>Expiry Date</th><th>Days Left</th><th>Balance</th>
             <th>Value</th><th>AMC</th><th>Likely Unused</th></tr>
@@ -4561,14 +4696,14 @@ The peak month in each row is shown in bold.
         <tr><td colspan="7">Nothing expiring in the next 90 days.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 <p style="font-size:13px;">"Likely unused" projects how much will still be on the
 shelf at expiry if the item keeps moving at its AMC — that is the quantity at
 risk of being written off.</p>
 
 {% if is_admin %}
 <h2>Stock Take Discrepancies by Month</h2>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Measure</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}</tr>
     </thead>
@@ -4581,13 +4716,13 @@ risk of being written off.</p>
             {% for v in st_totals.over_units %}<td>{{ v }}</td>{% endfor %}</tr>
         <tr><td><strong>Accuracy</strong></td>{% for v in st_totals.accuracy %}<td>{{ v }}</td>{% endfor %}</tr>
     </tbody>
-</table>
+</table></div>
 <p style="font-size:13px;">Accuracy is the share of counted lines that agreed with
 the system. A falling accuracy rate is worth investigating before the next count.
 <a href="{{ url_for('audit_log', view='stocktake', only='discrepancies') }}">See every discrepancy &rarr;</a></p>
 
 <h3>Largest Discrepancies in the Period ({{ top_discrepancies|length }})</h3>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Medication</th><th>Net Variance</th><th>Counts</th><th>Type</th><th>Last Counted</th></tr>
     </thead>
@@ -4604,12 +4739,12 @@ the system. A falling accuracy rate is worth investigating before the next count
         <tr><td colspan="5">No discrepancies recorded in this period.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 
 <h3>Never Counted ({{ never_counted|length }})</h3>
 <p style="font-size:13px;">Items with stock on hand that have not appeared in any
 stock take. These are the shelves where a discrepancy would still be invisible.</p>
-<table>
+<div class="table-scroll"><table>
     <thead><tr><th>Medication</th><th>Balance</th><th>Value</th></tr></thead>
     <tbody>
     {% for n in never_counted %}
@@ -4618,7 +4753,7 @@ stock take. These are the shelves where a discrepancy would still be invisible.<
         <tr><td colspan="3">Every item with stock has been counted at least once.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% endif %}
 """
 
@@ -4653,7 +4788,7 @@ Each item's balance is corrected the moment you record its count.</p>
 </form>
 
 <h2>Stock Takes ({{ sessions|length }})</h2>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Reference</th><th>Description</th><th>Status</th><th>Opened</th><th>Opened By</th>
             <th>Items Counted</th><th>Discrepancies</th><th>Closed</th><th>Actions</th></tr>
@@ -4677,7 +4812,7 @@ Each item's balance is corrected the moment you record its count.</p>
         <tr><td colspan="9">No stock takes yet.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 
 {% else %}
 <h2>{{ active.reference }}{% if active.note %} — {{ active.note }}{% endif %}</h2>
@@ -4706,7 +4841,7 @@ until after you post.</p>
                onkeyup="stFilter()" style="width:16em;">
         <span style="font-size:13px;">&nbsp;typing here only hides rows; it does not clear anything you have entered.</span>
     </p>
-    <table id="st_sheet">
+    <div class="table-scroll"><table id="st_sheet">
         <thead>
             <tr><th>Medication</th><th>Physical Count</th><th>Note (optional)</th></tr>
         </thead>
@@ -4723,7 +4858,7 @@ until after you post.</p>
             <tr><td colspan="3">Every medication has been counted in this stock take.</td></tr>
         {% endfor %}
         </tbody>
-    </table>
+    </table></div>
     {% if uncounted %}
     <div class="form-buttons">
         <input type="submit" value="Post Counts">
@@ -4753,7 +4888,7 @@ function stFilter() {
 <p>Counted: {{ counts|length }} &nbsp;|&nbsp; Agreed: {{ agreed_count }} &nbsp;|&nbsp;
    Issued not recorded: {{ issued_not_recorded }} &nbsp;|&nbsp;
    Recorded not issued: {{ recorded_not_issued }}</p>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr><th>Counted At</th><th>Medication</th><th>System Balance</th><th>Physical Count</th>
             <th>Variance</th><th>Discrepancy Type</th><th>Counted By</th><th>Note</th></tr>
@@ -4774,7 +4909,7 @@ function stFilter() {
         <tr><td colspan="8">Nothing counted yet in this stock take.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% endif %}
 """
 
@@ -4822,7 +4957,7 @@ AUDIT_TEMPLATE = CSS_STYLE + """
 
 {% if view == 'changes' %}
 <h2>Edits &amp; Deletes ({{ entries|length }})</h2>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr>
             <th>Timestamp</th>
@@ -4849,7 +4984,7 @@ AUDIT_TEMPLATE = CSS_STYLE + """
         <tr><td colspan="7">No edit or delete records found.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% elif view == 'stocktake' %}
 <h2>Stock Take Discrepancies ({{ entries|length }})</h2>
 <p>Every physical count recorded against a stock take, and the correction it
@@ -4862,7 +4997,7 @@ Beginning + Received &minus; Dispensed &plusmn; Adjustment = Current.</p>
     <a href="{{ url_for('audit_log', view='stocktake', start_date=start_date, end_date=end_date, search=search) }}">All counts</a> |
     <a href="{{ url_for('audit_log', view='stocktake', start_date=start_date, end_date=end_date, search=search, only='discrepancies') }}">Discrepancies only</a>
 </p>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr>
             <th>Timestamp</th>
@@ -4893,11 +5028,11 @@ Beginning + Received &minus; Dispensed &plusmn; Adjustment = Current.</p>
         <tr><td colspan="9">No stock take counts found.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% elif view == 'warnings' %}
 <h2>Business Warnings ({{ entries|length }})</h2>
 <p>Handled conditions that are not bugs — a medication wasn't found, stock was insufficient, or a transaction no longer exists. These don't crash the app, but are worth reviewing.</p>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr>
             <th>Timestamp</th>
@@ -4922,10 +5057,10 @@ Beginning + Received &minus; Dispensed &plusmn; Adjustment = Current.</p>
         <tr><td colspan="6">No business warnings found.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% else %}
 <h2>Application Errors ({{ entries|length }})</h2>
-<table>
+<div class="table-scroll"><table>
     <thead>
         <tr>
             <th>Timestamp</th>
@@ -4950,7 +5085,7 @@ Beginning + Received &minus; Dispensed &plusmn; Adjustment = Current.</p>
         <tr><td colspan="6">No application errors found.</td></tr>
     {% endfor %}
     </tbody>
-</table>
+</table></div>
 {% endif %}
 """
 
