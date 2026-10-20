@@ -7922,8 +7922,8 @@ def _stdev(values):
 
 
 DEPARTMENTS = ['Emergency Department', 'Emergency Trolley', 'PHC', 'OHC',
-               'Lab', 'Testing Room', 'Doctor Consultation', 'Campaigns',
-               'Environment', 'Other']
+               'Lab', 'Testing Room', 'Tx Room', 'Doctor Consultation',
+               'Campaigns', 'Environment', 'Other']
 
 DAMAGE_REASONS = ['Broken / spilled', 'Contaminated', 'Cold chain failure',
                   'Recalled by supplier', 'Lost / unaccounted', 'Other']
