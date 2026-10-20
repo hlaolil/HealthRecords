@@ -2,6 +2,8 @@ import os
 import re
 import csv
 import io
+import json
+import zipfile
 import requests
 from flask import Flask, request, render_template_string, jsonify, redirect, url_for, session, flash, get_flashed_messages, make_response
 from functools import wraps
@@ -1285,6 +1287,23 @@ MEDICATION_OPTIONS_JS = """
 // FIX: medication list is fetched once from /api/medications instead of being
 // duplicated in every template. Results are cached in module scope.
 let _medicationOptions = null;
+let _peopleOptionsLoaded = null;
+
+// Companies and positions, from the record rather than from this file.
+async function loadPeopleOptions() {
+    if (_peopleOptionsLoaded) return _peopleOptionsLoaded;
+    _peopleOptionsLoaded = (async function () {
+        try {
+            const res = await fetch('/api/people-options');
+            if (!res.ok) return;
+            const d = await res.json();
+            if (Array.isArray(d.companies)) companyOptions = d.companies;
+            if (Array.isArray(d.positions)) positionOptions = d.positions;
+        } catch (e) { /* the boxes still take anything typed */ }
+    })();
+    return _peopleOptionsLoaded;
+}
+document.addEventListener('DOMContentLoaded', loadPeopleOptions);
 
 async function getMedicationOptions() {
     if (_medicationOptions) return _medicationOptions;
@@ -1391,7 +1410,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
         </div>
         <div>
             <label>Prescriber (Doctor):</label>
-            {% set prescribers = ['Dr. T. Khothatso', 'Locum Doctor', 'Locum Nurse', 'Malesoetsa Leohla', 'Mamosa Seetsa', 'Mamosaase Nqosa', 'Mapalo Mapesela', 'Mathuto Kutoane', 'Thapelo Mphole'] %}
+            {# From the staff roster, not written in here: see STAFF_SEED. #}
             <select name="prescriber" {% if not tx_data %}required{% endif %}>
                 <option value="">-- Select Doctor --</option>
                 {% for p in prescribers %}
@@ -1401,7 +1420,10 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
         </div>
         <div>
             <label>Dispenser (Issuer):</label>
-            {% set dispensers = ['Letlotlo Hlaoli', 'Locum Nurse', 'Locum Pharmacist', 'Malesoetsa Leohla', 'Mamosa Seetsa', 'Mamosaase Nqosa', 'Mapalo Mapesela', 'Mathuto Kutoane', 'Thapelo Mphole'] %}
+            {# From the staff roster, not written in here: see STAFF_SEED. #}
+            {% if is_admin %}<span style="font-size:11px;">
+            <a href="{{ url_for('key_register') }}#roster">Edit who appears
+            here</a></span>{% endif %}
             <select name="dispenser" {% if not tx_data %}required{% endif %}>
                 <option value="">-- Select Issuer --</option>
                 {% for d in dispensers %}
@@ -1672,23 +1694,13 @@ details repeated down its rows.</p>
 let medRowCount = {{ (tx_data.meds|length if tx_data else 1) }};
 let diagRowCount = {{ (tx_data.diags|length if tx_data else 1) }};
 
-const companyOptions = [
-    "BLW","BUSY BEE","CMS","Consulmet","Enaex","Eminence","ER24","Government",
-    "IFS","LD","LISELO","LMPS","Mendi","MGC","MINOPEX","NMC","Other","PLATO",
-    "Public","THOLO","TOMRA","UL4","UNITRANS"
-];
-const positionOptions = [
-    "Administration","Artisan","Blasting","Boiler Maker","Chef","CI","Cleaner",
-    "Controller","Director","Diesel Depo","Drilling","Drivers","Electricians",
-    "Emergency Coordinator","Environmnet","Finance","Fitters","Food Service Attendant",
-    "General Worker","Geologist","Hse","Housekeeping","IT","Intern","Kitchen",
-    "Lab Technologist","Maintenance","Management","Manager","Mechanics","Medical Doctor",
-    "Metallurgy","Mining","Nurse","Operator","Other","PHC","Pharmacist","Plant Operator",
-    "Police","Procurement","Process","Production","Public","Recovery","Rope Access",
-    "Security","Sorting","Storekeeper","Supervisor","Survey","Technician","Training",
-    "Tourist","Treatment","Tyreman","UNITRANS","Visitor","Water Works","Welder",
-    "Workshop Cleaners","X-Ray Technologist"
-];
+// Filled from /api/people-options, which answers with the companies and
+// positions actually on record plus the standing list below it. Written in
+// here, the two lists went stale the moment a new contractor arrived: the
+// name was not offered, so it got typed three different ways and the
+// sick-leave-by-company report split across all three.
+var companyOptions = [];
+var positionOptions = [];
 
 function addInputListener(input, type) {
     input.addEventListener('input', async function() {
@@ -2528,7 +2540,7 @@ damaged, retired or lost &mdash; or the register is empty.</p>
         <td>{{ r.patient_name }}</td>
         <td>{{ r.patient_contact or '-' }}</td>
         <td>{{ r.patient_id or '-' }}</td>
-        <td>{{ r.issued_date.strftime('%Y-%m-%d') }}</td>
+        <td>{{ r.issued_date.strftime('%Y-%m-%d') if r.issued_date else '&ndash;'|safe }}</td>
         <td>{{ r.due_date.strftime('%Y-%m-%d') if r.due_date else '-' }}</td>
         <td>{{ r.days_out }}{% if r.overdue %} ({{ r.days_over }} over){% endif %}</td>
         <td>{{ r.issued_by }}</td>
@@ -2580,6 +2592,7 @@ damaged, retired or lost &mdash; or the register is empty.</p>
         <div>
             <label>&nbsp;</label>
             <button type="submit">Filter</button>
+            <button type="submit" name="export" value="csv" formnovalidate>Download CSV</button>
             <button type="button" onclick="window.print()">Print</button>
         </div>
     </div>
@@ -2595,7 +2608,7 @@ damaged, retired or lost &mdash; or the register is empty.</p>
         <td>{{ r.loan_ref }}</td>
         <td>{{ r.item_code }}</td>
         <td>{{ r.patient_name }}</td>
-        <td>{{ r.issued_date.strftime('%Y-%m-%d') }}</td>
+        <td>{{ r.issued_date.strftime('%Y-%m-%d') if r.issued_date else '&ndash;'|safe }}</td>
         <td>{{ r.due_date.strftime('%Y-%m-%d') if r.due_date else '-' }}</td>
         <td>{{ r.returned_date.strftime('%Y-%m-%d') if r.returned_date else '-' }}</td>
         <td>{{ r.days if r.days is not none else '-' }}</td>
@@ -2841,6 +2854,7 @@ you were the one who typed it.{% endif %}</p>
         <div>
             <label>&nbsp;</label>
             <input type="submit" value="Show">
+            <button type="submit" name="export" value="csv" formnovalidate>Download CSV</button>
             <button type="button" onclick="window.print()">Print Register</button>
         </div>
     </div>
@@ -2941,7 +2955,7 @@ a signature it never saw.</p>
     <tbody>
     {% for r in entries %}
     <tr class="{% if r.overdue %}key-overdue{% elif r.off_roster %}key-off-roster{% endif %}">
-        <td>{{ r.issued_date.strftime('%Y-%m-%d') }}</td>
+        <td>{{ r.issued_date.strftime('%Y-%m-%d') if r.issued_date else '&ndash;'|safe }}</td>
         <td>{{ r.issued_time }}</td>
         <td>{{ r.pharmacist }}</td>
         <td class="key-sign">&nbsp;</td>
@@ -2991,28 +3005,43 @@ in this period{% if still_out_count %}, {{ still_out_count }} not returned{% end
 &nbsp;&nbsp;&nbsp; Date: ____________________</p>
 
 {% if is_admin %}
-<details class="key-roster no-print">
-<summary>Nursing officer roster &mdash; who may hold the key</summary>
-<p class="key-hint">Only people marked <strong>in charge</strong> are offered
-when the key is issued. Somebody can be on the roster, and use the app, without
-being in charge &mdash; that is what the flag is for.</p>
+<details class="key-roster no-print" id="roster">
+<summary>Staff roster &mdash; who may hold the key, prescribe and dispense</summary>
+<p class="key-hint">This is the only list of people in the app. Whoever is
+ticked here is who the <strong>Prescriber</strong> and <strong>Dispenser</strong>
+boxes on the dispensing page offer, and who is offered when the key is issued.
+Add a nurse once, here, and she appears wherever she should. Somebody can be on
+the roster, and use the app, without being in charge of the key &mdash; that is
+what that flag is for. Marking somebody <strong>inactive</strong> takes them out
+of every list at once without touching anything they have already recorded.</p>
 <div class="table-scroll"><table>
-    <tr><th>Name</th><th>Role</th><th>In charge</th><th>Active</th><th>Set</th></tr>
+    <tr><th>Name</th><th>Role</th><th>Key</th><th>Prescribes</th>
+        <th>Dispenses</th><th>Active</th><th>Set</th></tr>
     {% for o in roster %}
     <tr>
         <td>{{ o.name }}</td>
         <td>{{ o.role }}</td>
         <td>{{ 'Yes' if o.in_charge else 'No' }}</td>
+        <td>{{ 'Yes' if o.prescriber else 'No' }}</td>
+        <td>{{ 'Yes' if o.dispenser else 'No' }}</td>
         <td>{{ 'Yes' if o.active else 'No' }}</td>
         <td>
             <form method="POST" action="{{ url_for('key_register') }}" style="display:inline">
                 <input type="hidden" name="action" value="set_officer">
                 <input type="hidden" name="officer_id" value="{{ o._id }}">
-                <select name="in_charge">
-                    <option value="yes" {% if o.in_charge %}selected{% endif %}>In charge</option>
-                    <option value="no" {% if not o.in_charge %}selected{% endif %}>Not in charge</option>
+                <select name="in_charge" aria-label="May hold the key">
+                    <option value="yes" {% if o.in_charge %}selected{% endif %}>Key: yes</option>
+                    <option value="no" {% if not o.in_charge %}selected{% endif %}>Key: no</option>
                 </select>
-                <select name="active">
+                <select name="prescriber" aria-label="May prescribe">
+                    <option value="yes" {% if o.prescriber %}selected{% endif %}>Prescribes</option>
+                    <option value="no" {% if not o.prescriber %}selected{% endif %}>Does not prescribe</option>
+                </select>
+                <select name="dispenser" aria-label="May dispense">
+                    <option value="yes" {% if o.dispenser %}selected{% endif %}>Dispenses</option>
+                    <option value="no" {% if not o.dispenser %}selected{% endif %}>Does not dispense</option>
+                </select>
+                <select name="active" aria-label="On the staff">
                     <option value="yes" {% if o.active %}selected{% endif %}>Active</option>
                     <option value="no" {% if not o.active %}selected{% endif %}>Inactive</option>
                 </select>
@@ -3036,10 +3065,24 @@ being in charge &mdash; that is what the flag is for.</p>
                    placeholder="Nursing Officer">
         </div>
         <div>
-            <label>In charge?</label>
+            <label>In charge of the key?</label>
             <select name="in_charge">
                 <option value="yes">Yes &mdash; may hold the key</option>
                 <option value="no">No &mdash; may use the app only</option>
+            </select>
+        </div>
+        <div>
+            <label>May prescribe?</label>
+            <select name="prescriber">
+                <option value="yes">Yes &mdash; offered as Prescriber</option>
+                <option value="no">No</option>
+            </select>
+        </div>
+        <div>
+            <label>May dispense?</label>
+            <select name="dispenser">
+                <option value="yes">Yes &mdash; offered as Dispenser</option>
+                <option value="no">No</option>
             </select>
         </div>
     </div>
@@ -3204,6 +3247,7 @@ than adding a second.</p>
         </div>
         <div class="button-div">
             <input type="submit" value="Show Month">
+            <button type="submit" name="export" value="csv" formnovalidate>Download CSV</button>
             <button type="button" onclick="window.print();">Print Chart &amp; Register</button>
         </div>
     </div>
@@ -3982,6 +4026,7 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         <option value="controlled_drug_register">Controlled Drug Register</option>
         <option value="order_request">Order Request (Requisition)</option>
         <option value="monthly_report">Period Report (day / week / month / quarter / year)</option>
+        <option value="duplicate_visits">Possible Double-Dispensing (to check)</option>
     </select><br>
     <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" type="date" value="{{ start_date or default_start }}"><br>
     <label>End Date (YYYY-MM-DD, if applicable):</label><input name="end_date" type="date" value="{{ end_date or default_end }}"><br>
@@ -4013,6 +4058,22 @@ REPORTS_TEMPLATE = CSS_STYLE + """
     <button type="submit" name="export" value="csv"
             formnovalidate>Download CSV</button>
 </form>
+{% if is_admin %}
+{# Every other download here answers one question. This one is the whole
+   register, for keeping rather than reading. #}
+<div style="border:1px solid #dee2e6; background:#fff; border-radius:6px;
+            padding:12px 14px; margin:14px 0;">
+    <h3 style="margin:0 0 6px;">Back up everything</h3>
+    <p style="font-size:13px; margin:0 0 10px;">
+    One file holding every record the pharmacy system has &mdash; dispensing,
+    the controlled drug register, deliveries, stock takes, temperatures, the
+    key register, loans and the audit log. Keep a copy somewhere that would
+    survive losing this computer. It contains patient names and diagnoses, so
+    treat it like the paper register.</p>
+    <a href="{{ url_for('backup_download') }}">
+        <button type="button">Download Full Backup</button></a>
+</div>
+{% endif %}
 {% if report_type in ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list'] and stock_data %}
 <form method="POST" action="{{ url_for('reports') }}" class="filter-form">
     <input type="hidden" name="report_type" value="{{ report_type }}">
@@ -4211,6 +4272,56 @@ to a department rather than a patient. AMC is average monthly consumption
     {% endfor %}
     </tbody>
 </table></div>
+{% elif report_type == 'duplicate_visits' %}
+<h2>Possible Double-Dispensing</h2>
+<p style="font-size:13px;">Until 20 October a <strong>partial</strong> dispense
+left the whole visit sitting in the form, because only the word "successfully"
+cleared it. The medicines that <em>had</em> dispensed were already recorded and
+their stock already deducted &mdash; so pressing Dispense again, which is the
+natural thing to do when a form looks unsubmitted, dispensed them a second
+time. The form no longer does that. These are the records it may already have
+made.</p>
+<p style="font-size:13px;">Listed below: the same patient, the same medication,
+the same quantity, recorded twice within
+{{ duplicate_window }} minutes, over the last six months. That does not happen
+by accident in a pharmacy, but <strong>it is not a verdict</strong> &mdash;
+check each one against what you remember before correcting anything. A real
+second visit can be left alone.</p>
+{% if duplicates %}
+<p class="message partial">{{ duplicates|length }} to check.
+{% set u = namespace(v=0) %}{% set c = namespace(v=0.0) %}
+{% for d in duplicates %}{% set u.v = u.v + (d.units or 0) %}{% set c.v = c.v + (d.value or 0) %}{% endfor %}
+If every one is a duplicate, {{ u.v }} units worth R{{ '%.2f'|format(c.v) }}
+were counted out of stock without leaving the shelf.</p>
+{% endif %}
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Patient</th><th>Medication</th><th>Quantity</th>
+            <th>First recorded</th><th>Recorded again</th><th>Apart</th>
+            <th>Units</th><th>Value</th><th>Dispenser</th></tr>
+    </thead>
+    <tbody>
+    {% for d in duplicates %}
+        <tr>
+            <td>{{ d.patient }}</td>
+            <td>{{ d.med_name }}</td>
+            <td>{{ d.quantity }}</td>
+            <td>{{ d.first.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ d.second.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ d.minutes }} min</td>
+            <td>{{ d.units }}</td>
+            <td>R{{ '%.2f'|format(d.value or 0) }}</td>
+            <td>{{ d.dispenser }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="9">Nothing looks like a visit recorded twice.
+        That is the answer you want.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+<p style="font-size:13px;">To correct one, open Dispensing, find the later
+visit and delete it &mdash; the stock goes back and the deletion is audited.</p>
+
 {% elif report_type == 'sick_leave' %}
 <h2>Sick Leave Register for {{ start_date }} to {{ end_date }}</h2>
 <p style="font-size:13px;">Every visit whose outcome was sick leave, with the days
@@ -5155,6 +5266,13 @@ function stFilter() {
 {% endif %}
 
 <h3>Counted Items ({{ counts|length }})</h3>
+{% if counts %}
+<form method="GET" action="{{ url_for('stock_take') }}" style="display:inline">
+    <button type="submit" name="export" value="csv">Download CSV</button>
+    <span style="font-size:13px;">&nbsp;the count sheet as posted so far,
+    with the variance against the system.</span>
+</form>
+{% endif %}
 <p>Counted: {{ counts|length }} &nbsp;|&nbsp; Agreed: {{ agreed_count }} &nbsp;|&nbsp;
    Issued not recorded: {{ issued_not_recorded }} &nbsp;|&nbsp;
    Recorded not issued: {{ recorded_not_issued }}</p>
@@ -5220,6 +5338,7 @@ AUDIT_TEMPLATE = CSS_STYLE + """
         </div>
         <div class="button-div">
             <input type="submit" value="Filter">
+            <button type="submit" name="export" value="csv" formnovalidate>Download CSV</button>
             <a href="{{ url_for('audit_log') }}">Clear</a>
         </div>
     </div>
@@ -6074,6 +6193,9 @@ def dispense():
             tx_data=tx_data, current_year=datetime.utcnow().year,
             message_class=message_class,
             form_saved=session.pop('dispense_saved', False),
+            is_admin=session['user'].get('role') == 'admin',
+            prescribers=_staff_named_for(db, 'prescriber'),
+            dispensers=_staff_named_for(db, 'dispenser'),
             today=local_now().strftime('%Y-%m-%d'),
             current_user=session['user']['name'],
             form_defaults=_new_visit_defaults(session['user']['name']),
@@ -6092,6 +6214,11 @@ def dispense():
             current_user=session.get('user', {}).get('name', ''),
             form_defaults=_new_visit_defaults(session.get('user', {}).get('name', '')),
             message_class='error', form_saved=False,
+            is_admin=session.get('user', {}).get('role') == 'admin',
+            # The database is unreachable on this path, so the roster falls
+            # back to the seed rather than leaving both dropdowns empty.
+            prescribers=_staff_named_for(None, 'prescriber'),
+            dispensers=_staff_named_for(None, 'dispenser'),
             pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='visits'
         ), 500
 
@@ -7119,6 +7246,7 @@ def reports():
         writeoffs = []
         writeoff_totals = {'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []}
         unmet_list = []
+        duplicates = []
         unmet_totals = {'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []}
         issues = []
         issue_totals = {'lines': 0, 'units': 0, 'value': 0.0, 'dept_count': 0, 'by_dept': [], 'by_med': []}
@@ -7451,6 +7579,18 @@ def reports():
                                        sorted(by_med.items(), key=lambda kv: -kv[1]['value'])][:20],
                         }
                         report_title = 'Internal Issues'
+
+                    elif report_type == 'duplicate_visits':
+                        # No date range: this is a hunt through the record for
+                        # something that should not be there, not a report on
+                        # a period. It looks back six months by default.
+                        duplicates = _duplicate_visits(transactions)
+                        if search:
+                            sl = search.lower()
+                            duplicates = [d for d in duplicates
+                                          if sl in (d['patient'] or '').lower()
+                                          or sl in (d['med_name'] or '').lower()]
+                        report_title = 'Possible double-dispensing'
 
                     elif report_type == 'unmet_demand':
                         if not start_date or not end_date:
@@ -7914,6 +8054,7 @@ def reports():
                     writeoffs = []
                     writeoff_totals = {'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []}
                     unmet_list = []
+                    duplicates = []
                     unmet_totals = {'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []}
                     issues = []
                     issue_totals = {'lines': 0, 'units': 0, 'value': 0.0, 'dept_count': 0, 'by_dept': [], 'by_med': []}
@@ -7931,6 +8072,7 @@ def reports():
                 'controlled_register': controlled_register, 'monthly': monthly,
                 'writeoffs': writeoffs, 'unmet_list': unmet_list,
                 'issues': issues, 'sick_leave': sick_leave,
+                'duplicates': duplicates,
             }, is_admin=is_admin)
             if made:
                 filename, body = made
@@ -7949,6 +8091,8 @@ def reports():
             category=cat, category_label=cat_label,
             monthly=monthly, writeoffs=writeoffs, writeoff_totals=writeoff_totals,
             unmet_list=unmet_list, unmet_totals=unmet_totals,
+            duplicates=duplicates,
+            duplicate_window=DUPLICATE_WINDOW_MINUTES,
             issues=issues, issue_totals=issue_totals,
             sick_leave=sick_leave, sick_leave_totals=sick_leave_totals,
             start_date=start_date, end_date=end_date,
@@ -7975,7 +8119,9 @@ def reports():
             issues=[], issue_totals={'lines': 0, 'units': 0, 'value': 0.0, 'dept_count': 0, 'by_dept': [], 'by_med': []},
             sick_leave=[], sick_leave_totals={'patients': 0, 'days': 0, 'average': '-', 'longest': 0, 'repeat': []},
             start_date=None, end_date=None,
-            total_transactions=0, search=None, report_title=None, is_admin=is_admin
+            total_transactions=0, search=None, report_title=None,
+            duplicates=[], duplicate_window=DUPLICATE_WINDOW_MINUTES,
+            is_admin=is_admin
         ), 500
 
 
@@ -8334,6 +8480,12 @@ CSV_REPORTS = {
         ('date', 'Date'), ('med_name', 'Medication'), ('quantity', 'Qty'),
         ('department', 'Department'), ('issued_to', 'Received By'),
         ('line_value', 'Value'), ('user', 'Issued By')]),
+    'duplicate_visits': ('Possible Double-Dispensing', 'duplicates', [
+        ('patient', 'Patient'), ('med_name', 'Medication'),
+        ('quantity', 'Quantity'), ('first', 'First recorded'),
+        ('second', 'Recorded again'), ('minutes', 'Minutes apart'),
+        ('units', 'Units counted twice'), ('value', 'Value counted twice'),
+        ('dispenser', 'Dispenser')]),
     'unmet_demand': ('Unmet Demand', 'unmet_list', [
         ('date', 'Date'), ('med_name', 'Medication'),
         ('quantity_requested', 'Requested'), ('patient', 'Patient')]),
@@ -9367,6 +9519,11 @@ def temperature():
                          'note': '; '.join(notes), 'by': ', '.join(by),
                          'initials': ' / '.join(inits), 'times': ' / '.join(times)})
 
+        if request.values.get('export') == 'csv':
+            # One row per reading rather than the chart's grid: a grid is for
+            # looking at, a row per reading is what a spreadsheet can count.
+            return _register_csv_response('temperature', readings)
+
         return render_template_string(
             TEMPERATURE_TEMPLATE, nav_links=get_nav_links(), message=message,
             message_class=message_class, is_admin=is_admin,
@@ -9806,7 +9963,9 @@ def loans():
                 'patient_name': doc.get('patient_name', ''),
                 'patient_contact': doc.get('patient_contact', ''),
                 'patient_id': doc.get('patient_id', ''),
-                'issued_date': doc['issued_date'],
+                # Guarded for the same reason as the dispensing register: one
+                # old record without this field must not take the page down.
+                'issued_date': doc.get('issued_date'),
                 'due_date': due,
                 'issued_by': doc.get('issued_by', ''),
                 'days_out': (datetime.utcnow() - doc['issued_date']).days,
@@ -9828,10 +9987,11 @@ def loans():
                 'loan_ref': doc.get('loan_ref', ''),
                 'item_code': doc.get('item_code', ''),
                 'patient_name': doc.get('patient_name', ''),
-                'issued_date': doc['issued_date'],
+                'issued_date': doc.get('issued_date'),
                 'due_date': doc.get('due_date'),
                 'returned_date': ret,
-                'days': (ret - doc['issued_date']).days if ret else None,
+                'days': ((ret - doc['issued_date']).days
+                         if ret and doc.get('issued_date') else None),
                 'condition_out': doc.get('condition_out'),
                 'condition_in': doc.get('condition_in'),
                 'status': doc.get('status', ''),
@@ -9846,6 +10006,12 @@ def loans():
             'unusable': sum(1 for r in rows
                             if not r['loan'] and r['shelf'] in ('Damaged', 'Retired', 'Lost')),
         }
+
+        if request.values.get('export') == 'csv':
+            # history already holds every loan the filter matches, out and
+            # returned alike; out_rows is a subset of it shown separately on
+            # screen, so adding both listed the open loans twice.
+            return _register_csv_response('loans', history)
 
         return render_template_string(
             LOANS_TEMPLATE,
@@ -9887,24 +10053,97 @@ def loans():
 # app but is not in charge. These names were taken from the staff already
 # named elsewhere in the app, so the roles are a starting guess — an admin
 # edits them on the page.
-KEY_OFFICER_SEED = [
-    ('Malesoetsa Leohla', 'Nursing Officer', True),
-    ('Mamosaase Nqosa', 'Nursing Officer', True),
-    ('Mapalo Mapesela', 'Nursing Officer', True),
-    ('Mathuto Kutoane', 'Nursing Officer', True),
-    ('Thapelo Mphole', 'Nursing Officer', True),
-    ('Locum Nurse', 'Nursing Officer', True),
-    ('Mamosa Seetsa', 'Nurse Assistant', False),
+# One roster, one person, three jobs.
+#
+# The same people were listed in FOUR places: a prescribers list and a
+# dispensers list written into the dispensing page, this key-register roster,
+# and the login accounts. They already disagreed — the roster had seven names
+# and the other two had nine each — and adding a nurse meant editing all four.
+# Miss one and someone who can log in cannot be selected as the dispenser, so
+# their visit is recorded under another person's name or not at all.
+#
+# The flags below are what the old lists contained, person for person, so
+# nothing changes about who may do what. The collection is still called
+# key_officers because that is what it is called in every pharmacy database
+# already running; renaming it would be a migration for no gain.
+#
+#   name, role, in charge of the key, may prescribe, may dispense
+STAFF_SEED = [
+    ('Dr. T. Khothatso', 'Doctor', False, True, False),
+    ('Letlotlo Hlaoli', 'Pharmacist', False, False, True),
+    ('Locum Doctor', 'Doctor', False, True, False),
+    ('Locum Nurse', 'Nursing Officer', True, True, True),
+    ('Locum Pharmacist', 'Pharmacist', False, False, True),
+    ('Malesoetsa Leohla', 'Nursing Officer', True, True, True),
+    ('Mamosa Seetsa', 'Nurse Assistant', False, True, True),
+    ('Mamosaase Nqosa', 'Nursing Officer', True, True, True),
+    ('Mapalo Mapesela', 'Nursing Officer', True, True, True),
+    ('Mathuto Kutoane', 'Nursing Officer', True, True, True),
+    ('Thapelo Mphole', 'Nursing Officer', True, True, True),
 ]
+# Kept for the tests and anything that still refers to it.
+KEY_OFFICER_SEED = [(n, r, c) for n, r, c, _p, _d in STAFF_SEED]
 
 
 def _seed_key_officers(officers):
-    """Put the roster in place once, if it has never been set up."""
-    if officers.count_documents({}) == 0:
-        officers.insert_many([
-            {'name': n, 'role': r, 'in_charge': c, 'active': True,
-             'created_at': datetime.utcnow(), 'seeded': True}
-            for n, r, c in KEY_OFFICER_SEED])
+    """Put the roster in place, and fill in anything it has not got yet.
+
+    This runs on a pharmacy that has been using the app for months, so it
+    must never overwrite a decision an administrator has already made. It
+    adds people who are missing, and sets a job flag only where that flag
+    has never been set at all. Somebody marked inactive stays inactive.
+    """
+    try:
+        existing = {o.get('name'): o for o in officers.find(
+            {}, {'name': 1, 'prescriber': 1, 'dispenser': 1})}
+    except Exception as e:
+        app.logger.warning(f'staff roster unavailable: {e}')
+        return
+    to_add, to_set = [], []
+    for name, role, in_charge, prescriber, dispenser in STAFF_SEED:
+        found = existing.get(name)
+        if found is None:
+            to_add.append({'name': name, 'role': role, 'in_charge': in_charge,
+                           'prescriber': prescriber, 'dispenser': dispenser,
+                           'active': True, 'created_at': datetime.utcnow(),
+                           'seeded': True})
+            continue
+        fill = {}
+        if 'prescriber' not in found:
+            fill['prescriber'] = prescriber
+        if 'dispenser' not in found:
+            fill['dispenser'] = dispenser
+        if fill:
+            to_set.append((found['_id'], fill))
+    try:
+        if to_add:
+            officers.insert_many(to_add)
+        for _id, fill in to_set:
+            officers.update_one({'_id': _id}, {'$set': fill})
+    except Exception as e:
+        app.logger.warning(f'staff roster could not be completed: {e}')
+
+
+def _staff_named_for(db, job):
+    """Everyone on the roster who may do this job, in name order.
+
+    Asked of the roster rather than written into the page, so adding a nurse
+    is one entry in one place and she appears everywhere she should.
+    """
+    try:
+        officers = db['key_officers']
+        _seed_key_officers(officers)
+        return sorted(
+            (o['name'] for o in officers.find(
+                {'active': True, job: True}, {'name': 1})
+             if o.get('name')),
+            key=str.lower)
+    except Exception as e:
+        app.logger.warning(f'staff list for {job} unavailable: {e}')
+        # Better a usable form with the roster as it was last known than a
+        # dispensing page nobody can fill in.
+        return sorted((n for n, _r, _c, p, d in STAFF_SEED
+                       if (p if job == 'prescriber' else d)), key=str.lower)
 
 
 def _officer_names(officers, in_charge_only=True):
@@ -10320,17 +10559,28 @@ def key_register():
                     flash(f'{name} is already on the roster.')
                     return redirect(url_for('key_register'))
                 in_charge = request.form.get('in_charge') == 'yes'
+                prescriber = request.form.get('prescriber') == 'yes'
+                dispenser = request.form.get('dispenser') == 'yes'
                 officers.insert_one({
                     'name': name,
                     'role': (request.form.get('officer_role') or '').strip()
                             or ('Nursing Officer' if in_charge else 'Nurse Assistant'),
-                    'in_charge': in_charge, 'active': True,
+                    'in_charge': in_charge,
+                    'prescriber': prescriber, 'dispenser': dispenser,
+                    'active': True,
                     'created_by': current_user, 'created_at': datetime.utcnow(),
                 })
-                write_audit_entry('CREATE', 'key_officer', name,
-                                  f"added, in charge: {'yes' if in_charge else 'no'}")
+                write_audit_entry(
+                    'CREATE', 'key_officer', name,
+                    f"added, in charge: {'yes' if in_charge else 'no'}, "
+                    f"prescribes: {'yes' if prescriber else 'no'}, "
+                    f"dispenses: {'yes' if dispenser else 'no'}")
+                jobs = [j for j, on in (('hold the key', in_charge),
+                                        ('prescribe', prescriber),
+                                        ('dispense', dispenser)) if on]
                 flash(f"{name} added to the roster"
-                      f"{'' if in_charge else ' (not an officer in charge)'}.",
+                      + (f" &mdash; may {', '.join(jobs)}." if jobs
+                         else ', with no jobs ticked yet.'),
                       'success')
                 return redirect(url_for('key_register'))
 
@@ -10347,12 +10597,18 @@ def key_register():
                     return redirect(url_for('key_register'))
                 in_charge = request.form.get('in_charge') == 'yes'
                 active = request.form.get('active') == 'yes'
+                prescriber = request.form.get('prescriber') == 'yes'
+                dispenser = request.form.get('dispenser') == 'yes'
                 officers.update_one({'_id': doc['_id']},
                                     {'$set': {'in_charge': in_charge,
+                                              'prescriber': prescriber,
+                                              'dispenser': dispenser,
                                               'active': active}})
                 write_audit_entry(
                     'UPDATE', 'key_officer', doc['name'],
                     f"in charge {doc.get('in_charge')} -> {in_charge}, "
+                    f"prescribes {doc.get('prescriber')} -> {prescriber}, "
+                    f"dispenses {doc.get('dispenser')} -> {dispenser}, "
                     f"active {doc.get('active')} -> {active}")
                 flash(f"{doc['name']} updated.", 'success')
                 return redirect(url_for('key_register'))
@@ -10476,6 +10732,9 @@ def key_register():
         raw_edit = (request.args.get('edit') or '').strip()
         if raw_edit and is_admin:
             edit_entry = next((e for e in entries if e['id'] == raw_edit), None)
+
+        if request.values.get('export') == 'csv':
+            return _register_csv_response('key_register', entries)
 
         return render_template_string(
             KEY_REGISTER_TEMPLATE, nav_links=get_nav_links(),
@@ -11107,6 +11366,9 @@ def stock_take():
             # by accident.
             done = set(counts_col.distinct('med_name', {'stock_take_id': str(active['_id'])}))
             uncounted = [m for m in med_names if m not in done]
+            if request.values.get('export') == 'csv':
+                return _register_csv_response('stock_take', counts)
+
             return render_template_string(
                 STOCK_TAKE_TEMPLATE, nav_links=get_nav_links(), message=message,
                 active=active, counts=counts, med_names=med_names,
@@ -11284,6 +11546,9 @@ def audit_log():
             entries = list(
                 db['audit_log'].find(query).sort('timestamp', -1).limit(500)
             )
+
+        if request.values.get('export') == 'csv':
+            return _register_csv_response('audit', entries)
 
         return render_template_string(
             AUDIT_TEMPLATE,
@@ -11568,6 +11833,346 @@ def _diagnosis_matches(query, limit=DIAGNOSIS_SUGGESTION_LIMIT):
             scored.append((best, len(label), label.lower(), label))
     scored.sort()
     return [label for _r, _n, _l, label in scored[:limit]]
+
+
+# Every register answers the same question on paper: "can I have this as a
+# file?" The reports page and the dispensing page already could. These are
+# the rest of them, through one helper so they behave identically and a sixth
+# register costs four lines rather than forty.
+REGISTER_CSV = {
+    'audit': ('Audit Log', [
+        ('timestamp', 'When'), ('user', 'User'), ('action', 'Action'),
+        ('target_type', 'Record type'), ('target_id', 'Record'),
+        ('changes', 'What changed'), ('ip', 'From')]),
+    'key_register': ('Key Register', [
+        ('ref', 'Ref'), ('issued_date', 'Issued'), ('issued_time', 'Time out'),
+        ('recipient_name', 'Issued to'), ('recipient_role', 'Role'),
+        ('purpose', 'Purpose'), ('also_on_duty', 'Also on duty'),
+        ('returned_date', 'Returned'), ('returned_time', 'Time in'),
+        ('returning_officer', 'Returned by'),
+        ('receiving_officer', 'Received by'), ('pharmacist', 'Pharmacist'),
+        ('comment', 'Comment'), ('user', 'Recorded by')]),
+    'temperature': ('Temperature Register', [
+        ('date', 'Date'), ('session', 'Round'), ('location', 'Room'),
+        ('thermometer', 'Thermometer'), ('temp', 'Temperature C'),
+        ('initials', 'Initials'), ('check_time', 'Write time'),
+        ('user', 'Recorded by')]),
+    'loans': ('Equipment Loans', [
+        ('loan_ref', 'Ref'), ('item_code', 'Item'), ('item_type', 'Type'),
+        ('patient_name', 'Patient'), ('patient_id', 'Patient ID'),
+        ('patient_contact', 'Contact'), ('issued_date', 'Issued'),
+        ('due_date', 'Due back'), ('returned_date', 'Returned'),
+        ('days', 'Days out'), ('status', 'Status'),
+        ('condition_out', 'Condition out'), ('condition_in', 'Condition back'),
+        ('issued_by', 'Issued by'), ('note', 'Note')]),
+    'stock_take': ('Stock Take', [
+        ('med_name', 'Medication'), ('expected', 'On system'),
+        ('counted', 'Counted'), ('variance', 'Variance'),
+        ('counted_by', 'Counted by'), ('timestamp', 'When'),
+        ('note', 'Note')]),
+}
+
+
+def _register_csv(kind, rows):
+    """(filename, csv text) for one of the registers."""
+    title, columns = REGISTER_CSV[kind]
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow([label for _f, label in columns])
+    for row in rows or []:
+        writer.writerow([_csv_value(row.get(f) if hasattr(row, 'get') else None)
+                         for f, _lab in columns])
+    stamp = local_now().strftime('%Y%m%d')
+    return f"{title.lower().replace(' ', '-')}-{stamp}.csv", out.getvalue()
+
+
+def _register_csv_response(kind, rows):
+    """The download itself.
+
+    An empty register still hands over the file, with its column headings and
+    no rows. The first version refused and flashed a message instead — but
+    these pages do not all render flashed messages, so on the audit log the
+    button did nothing at all and said nothing about why. A file that says
+    "no rows" is honest; a button that silently does nothing is not.
+    """
+    filename, body = _register_csv(kind, rows)
+    resp = make_response(body)
+    resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+    resp.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return resp
+
+
+# ---------------------------------------------------------------------
+# Visits that look like the same visit recorded twice.
+#
+# Until today a partial dispense left the whole visit sitting in the form —
+# the message said "Partial", not "successfully", and only the word
+# "successfully" cleared it. The medicines that HAD dispensed were already
+# recorded and their stock already deducted, so pressing Dispense again, the
+# natural thing to do when a form looks unsubmitted, dispensed them a second
+# time. The form is fixed; the records it made are still there, with the
+# stock counted out twice.
+#
+# Matching is deliberately narrow: same patient, same medication, same
+# quantity, minutes apart. A patient genuinely coming back the same day for
+# the same drug at the same dose within a few minutes does not happen.
+# ---------------------------------------------------------------------
+DUPLICATE_WINDOW_MINUTES = 10
+
+
+def _duplicate_visits(transactions, days=180, limit=200):
+    """Visits that are probably one visit recorded twice.
+
+    Returns a list of {patient, med_name, quantity, first, second, minutes,
+    units, value, ids} — never a verdict. The pharmacist decides; this only
+    says where to look.
+    """
+    since = datetime.utcnow() - timedelta(days=days)
+    try:
+        rows = list(transactions.find(
+            {'type': 'dispense', 'timestamp': {'$gte': since}},
+            {'patient': 1, 'med_name': 1, 'quantity': 1, 'price': 1,
+             'line_value': 1, 'timestamp': 1, 'transaction_id': 1,
+             'dispenser': 1}).sort('timestamp', 1))
+    except Exception as e:
+        app.logger.warning(f'duplicate scan unavailable: {e}')
+        return []
+
+    by_key = {}
+    for r in rows:
+        key = ((r.get('patient') or '').strip().lower(),
+               (r.get('med_name') or '').strip().lower(),
+               r.get('quantity'))
+        by_key.setdefault(key, []).append(r)
+
+    out = []
+    window = timedelta(minutes=DUPLICATE_WINDOW_MINUTES)
+    for (_pat, _med, _qty), group in by_key.items():
+        if len(group) < 2:
+            continue
+        for a, b in zip(group, group[1:]):
+            ta, tb = a.get('timestamp'), b.get('timestamp')
+            if not ta or not tb or (tb - ta) > window:
+                continue
+            # Two lines of the SAME visit are not a duplicate: a prescription
+            # can legitimately repeat a medicine across its own lines.
+            if a.get('transaction_id') and a.get('transaction_id') == b.get('transaction_id'):
+                continue
+            out.append({
+                'patient': b.get('patient', ''),
+                'med_name': b.get('med_name', ''),
+                'quantity': b.get('quantity', 0),
+                'first': ta, 'second': tb,
+                'minutes': round((tb - ta).total_seconds() / 60, 1),
+                'dispenser': b.get('dispenser', ''),
+                'units': b.get('quantity', 0) or 0,
+                'value': _line_value(b),
+                'ids': [a.get('transaction_id'), b.get('transaction_id')],
+            })
+    out.sort(key=lambda d: d['second'], reverse=True)
+    return out[:limit]
+
+
+# ---------------------------------------------------------------------
+# Getting everything out.
+#
+# Every other download in this app answers one question — a month's
+# dispensing, a stock-on-hand list. None of them is the REGISTER. Years of
+# dispensing, the controlled drug movements, the key register and the
+# temperature record live in one database in one cluster, and a MongoDB
+# Atlas free tier takes no backups of its own. If that cluster is lost, or
+# the account lapses, the register goes with it and there is nothing on
+# paper to go back to.
+#
+# So: one button that writes the whole thing to a file the pharmacy keeps.
+# JSON Lines rather than CSV, because this is a backup and has to come back
+# in — one document per line, the shape Mongo itself reads with
+# `mongoimport`. The archive also carries a plain-English README, because
+# the person who needs it will be having a bad day and may not be you.
+# ---------------------------------------------------------------------
+BACKUP_COLLECTIONS = [
+    'medications', 'transactions', 'deliveries', 'stock_takes',
+    'stock_take_counts', 'temperature_logs', 'loan_items', 'loans',
+    'key_register', 'key_officers', 'key_control', 'users', 'audit_log',
+    'app_warnings', 'error_logs',
+]
+
+
+def _json_safe(value):
+    """Anything Mongo stores, written so it can be read back."""
+    if isinstance(value, ObjectId):
+        return {'$oid': str(value)}
+    if isinstance(value, datetime):
+        # Stored naive, in UTC, like everything else this app writes.
+        return {'$date': value.replace(microsecond=0).isoformat() + 'Z'}
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+BACKUP_README = """NMC Pharmacy — full database backup
+===================================
+
+Taken : {when}
+By    : {who}
+Source: {db}
+
+WHAT THIS IS
+    Every record the pharmacy system holds, at the moment above. One file
+    per collection. Each line of a .jsonl file is one record.
+
+    This is the whole register: dispensing history, the controlled drug
+    movements, deliveries, stock takes, the temperature record, the key
+    register, equipment loans and the audit log.
+
+WHAT IS IN IT
+{counts}
+
+KEEP IT SOMEWHERE ELSE
+    A backup on the same machine as the thing it is backing up is not a
+    backup. Put a copy somewhere that would survive losing this computer.
+
+    Passwords are stored only as one-way hashes and cannot be read out of
+    this file, but it still holds patient names and their diagnoses. Treat
+    it exactly as you would the paper register: it is confidential.
+
+PUTTING IT BACK
+    Each file restores with mongoimport, one collection at a time:
+
+        mongoimport --uri "<your connection string>" \
+                    --collection transactions \
+                    --file transactions.jsonl
+
+    Restore into an EMPTY database first and check it before pointing the
+    live app at it. --drop replaces a collection outright, so only reach
+    for it when you are certain.
+"""
+
+
+def _backup_archive(db, taken_by):
+    """(filename, bytes) — the whole database as a dated zip."""
+    buf = io.BytesIO()
+    counts = {}
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for name in BACKUP_COLLECTIONS:
+            lines = []
+            try:
+                for doc in db[name].find():
+                    lines.append(json.dumps(_json_safe(doc),
+                                            ensure_ascii=False))
+            except Exception as e:
+                # One unreadable collection must not cost the pharmacy the
+                # other fourteen. Say so in the archive rather than failing.
+                app.logger.warning(f'backup: {name} unavailable: {e}')
+                zf.writestr(f'{name}.FAILED.txt',
+                            f'This collection could not be read: {e}\n')
+                counts[name] = 'could not be read'
+                continue
+            counts[name] = len(lines)
+            zf.writestr(f'{name}.jsonl', '\n'.join(lines) + ('\n' if lines else ''))
+        when = local_now().strftime('%Y-%m-%d %H:%M')
+        width = max((len(n) for n in counts), default=10)
+        rows = '\n'.join(f'    {n.ljust(width)}  {counts[n]}'
+                          for n in BACKUP_COLLECTIONS if n in counts)
+        zf.writestr('README.txt', BACKUP_README.format(
+            when=when, who=taken_by, db='pharmacy_db', counts=rows))
+        zf.writestr('manifest.json', json.dumps({
+            'taken_at': when, 'taken_by': taken_by,
+            'database': 'pharmacy_db', 'counts': counts,
+            'format': 'one JSON document per line (mongoimport)',
+        }, indent=1))
+    stamp = local_now().strftime('%Y%m%d-%H%M')
+    return f'nmc-pharmacy-backup-{stamp}.zip', buf.getvalue()
+
+
+@app.route('/backup', methods=['GET'])
+@login_required
+def backup_download():
+    """The whole register, in one file, for the pharmacy to keep."""
+    if session['user'].get('role') != 'admin':
+        flash('Only an administrator can download the full backup.')
+        return redirect(url_for('reports'))
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        taken_by = session['user']['name']
+        filename, blob = _backup_archive(db, taken_by)
+    except ServerSelectionTimeoutError:
+        flash('Database connection failed, so no backup was taken. '
+              'Nothing was changed.')
+        return redirect(url_for('reports'))
+    write_audit_entry('EXPORT', 'database_backup', filename,
+                      f'Full database backup downloaded by {taken_by}.')
+    resp = make_response(blob)
+    resp.headers['Content-Type'] = 'application/zip'
+    resp.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return resp
+
+
+# The companies whose staff the pharmacy serves, and the jobs they do.
+# These SEED the suggestions; the live list is whatever has actually been
+# recorded, so a new contractor appears the first time one of its employees
+# is seen rather than when someone remembers to edit this file.
+COMPANY_SEED = [
+    'BLW', 'BUSY BEE', 'CMS', 'Consulmet', 'Eminence', 'Enaex', 'ER24',
+    'Government', 'IFS', 'LD', 'LISELO', 'LMPS', 'Mendi', 'MGC', 'MINOPEX',
+    'NMC', 'Other', 'PLATO', 'Public', 'THOLO', 'TOMRA', 'UL4', 'UNITRANS',
+]
+POSITION_SEED = [
+    'Administration', 'Artisan', 'Blasting', 'Boiler Maker', 'Chef', 'CI',
+    'Cleaner', 'Controller', 'Diesel Depo', 'Director', 'Drilling', 'Drivers',
+    'Electricians', 'Emergency Coordinator', 'Environmnet', 'Finance',
+    'Fitters', 'Food Service Attendant', 'General Worker', 'Geologist', 'Hse',
+    'Housekeeping', 'Intern', 'IT', 'Kitchen', 'Lab Technologist',
+    'Maintenance', 'Management', 'Manager', 'Mechanics', 'Medical Doctor',
+    'Metallurgy', 'Mining', 'Nurse', 'Operator', 'Other', 'Pharmacist', 'PHC',
+    'Plant Operator', 'Police', 'Procurement', 'Process', 'Production',
+    'Public', 'Recovery', 'Rope Access', 'Security', 'Sorting', 'Storekeeper',
+    'Supervisor', 'Survey', 'Technician', 'Tourist', 'Training', 'Treatment',
+    'Tyreman', 'UNITRANS', 'Visitor', 'Water Works', 'Welder',
+    'Workshop Cleaners', 'X-Ray Technologist',
+]
+PEOPLE_OPTION_LIMIT = 400
+
+
+def _recorded_values(transactions, field, seed):
+    """What has been recorded in this field, plus the standing list.
+
+    Case-folded so "Unitrans" and "UNITRANS" do not both appear: the first
+    spelling seen wins, which keeps whatever the pharmacy actually writes
+    rather than imposing a house style on their own records.
+    """
+    out, seen = [], set()
+    for name in sorted(seed, key=str.lower):
+        if name.strip() and name.strip().lower() not in seen:
+            seen.add(name.strip().lower())
+            out.append(name.strip())
+    try:
+        for value in transactions.distinct(field, {'type': 'dispense'}):
+            v = (value or '').strip()
+            if v and v.lower() not in seen:
+                seen.add(v.lower())
+                out.append(v)
+    except Exception as e:
+        app.logger.warning(f'{field} suggestions unavailable: {e}')
+    return sorted(out, key=str.lower)[:PEOPLE_OPTION_LIMIT]
+
+
+@app.route('/api/people-options', methods=['GET'])
+@login_required
+def people_options():
+    """Companies and positions to suggest, as JSON."""
+    try:
+        transactions = get_mongo_client()['pharmacy_db']['transactions']
+        return jsonify({
+            'companies': _recorded_values(transactions, 'company', COMPANY_SEED),
+            'positions': _recorded_values(transactions, 'position', POSITION_SEED),
+        })
+    except Exception as e:
+        app.logger.warning(f'people options unavailable: {e}')
+        return jsonify({'companies': sorted(COMPANY_SEED, key=str.lower),
+                        'positions': sorted(POSITION_SEED, key=str.lower)})
 
 
 @app.route('/api/diagnoses', methods=['GET'])
