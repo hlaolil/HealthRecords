@@ -986,7 +986,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
             <select name="outcome" id="outcome-select" {% if not tx_data %}required{% endif %}
                     onchange="toggleOutcomeDays()">
                 {% for opt in ['Outpatient', 'Sick leave', 'Referral', 'Admission'] %}
-                <option value="{{ opt }}" {% if (tx_data and tx_data.outcome == opt) or (not tx_data and opt == 'Outpatient') %}selected{% endif %}>{{ opt }}</option>
+                <option value="{{ opt }}" {% if (tx_data and tx_data.outcome == opt) or (not tx_data and opt == form_defaults.outcome) %}selected{% endif %}>{{ opt }}</option>
                 {% endfor %}
             </select>
         </div>
@@ -1020,13 +1020,13 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
                     {# Pre-selects whoever is logged in when their name is one of
                        the issuers, which it normally is. Falls back to the prompt
                        when it is not, rather than quietly picking somebody. #}
-                    <option value="{{ d }}" {% if (tx_data and tx_data.dispenser == d) or (not tx_data and d == current_user) %}selected{% endif %}>{{ d }}</option>
+                    <option value="{{ d }}" {% if (tx_data and tx_data.dispenser == d) or (not tx_data and d == form_defaults.dispenser) %}selected{% endif %}>{{ d }}</option>
                 {% endfor %}
             </select>
         </div>
         <div>
             <label>Date:</label>
-            <input name="date" type="date" value="{{ tx_data.date if tx_data else today }}" max="{{ today }}" {% if not tx_data %}required{% endif %}>
+            <input name="date" type="date" value="{{ tx_data.date if tx_data else form_defaults.date }}" max="{{ form_defaults.date }}" {% if not tx_data %}required{% endif %}>
         </div>
     </div>
     <div class="diag-section">
@@ -1529,8 +1529,11 @@ document.addEventListener('DOMContentLoaded', function () {
 // the case that would otherwise leave the most convincing wrong data. Typing
 // in a field removes the mark: from then on it is the user's, and is left
 // alone.
-// What the server filled in on a fresh form, so clearing can restore it.
-var FORM_DEFAULTS = {date: {{ today|tojson }}, dispenser: {{ current_user|tojson }}};
+// Exactly what the server put on a fresh form, so clearing restores it.
+// The template renders from this same dict, so the two cannot disagree — the
+// outcome was missing from here and went blank after every saved visit, which
+// is how the second patient of the day lost the Outpatient default.
+var FORM_DEFAULTS = {{ form_defaults|tojson }};
 
 var RECALL_FIELDS = [['company', 'Company'], ['position', 'Position'],
                      ['birth_decade', 'Birth decade'], ['gender', 'Gender']];
@@ -5373,6 +5376,7 @@ def dispense():
             message_class=message_class,
             today=local_now().strftime('%Y-%m-%d'),
             current_user=session['user']['name'],
+            form_defaults=_new_visit_defaults(session['user']['name']),
             birth_decades=_birth_decades(),
             pager=pager, window_defaulted=window_defaulted, unit='visits'
         )
@@ -5386,6 +5390,7 @@ def dispense():
             current_year=datetime.utcnow().year, birth_decades=_birth_decades(),
             today=local_now().strftime('%Y-%m-%d'),
             current_user=session.get('user', {}).get('name', ''),
+            form_defaults=_new_visit_defaults(session.get('user', {}).get('name', '')),
             message_class='error',
             pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='visits'
         ), 500
@@ -7543,6 +7548,20 @@ def _pager(page, page_size, total):
             'has_prev': page > 1, 'has_next': page < pages,
             'first': 0 if total == 0 else (page - 1) * page_size + 1,
             'last': min(page * page_size, total)}
+
+
+def _new_visit_defaults(current_user):
+    """What a fresh dispensing form starts with.
+
+    Rendered into the form AND handed to the script that restores it after a
+    visit is saved, so a default cannot exist in one place and be forgotten in
+    the other. Add a field here and both follow.
+    """
+    return {
+        'date': local_now().strftime('%Y-%m-%d'),
+        'dispenser': current_user,
+        'outcome': 'Outpatient',
+    }
 
 
 def _birth_decades():
