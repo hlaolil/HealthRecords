@@ -5057,21 +5057,41 @@ so treat the total as indicative rather than a quotation.</p>
 </form>
 <h2>Controlled Drug Register for {{ start_date }} to {{ end_date }}</h2>
 {% for reg in controlled_register %}
-    <h3>{{ reg.med_name }} — Beginning: {{ reg.beginning_balance }} | Ending: {{ reg.ending_balance }} | Received: {{ reg.received }} | Dispensed: {{ reg.dispensed }}</h3>
+    <h3>{{ reg.med_name }}</h3>
+    <p style="font-size:13px;">Opening balance <strong>{{ reg.beginning_balance }}</strong>
+    &nbsp;|&nbsp; received in <strong>{{ reg.received }}</strong>
+    &nbsp;|&nbsp; went out <strong>{{ reg.dispensed }}</strong>
+    &nbsp;|&nbsp; closing balance <strong>{{ reg.ending_balance }}</strong>
+    {% if not reg.reconciles %}
+    <br><span class="temp-breach" style="padding:2px 6px;">More left the
+    cupboard in this period than could have been in it: the opening balance
+    works out below zero. Something was recorded outside these dates, or a
+    balance has been edited directly &mdash; this needs explaining before the
+    register is signed.</span>
+    {% endif %}</p>
     {% if reg.transactions %}
+    {# In and Out, rather than one Quantity column carrying a minus sign on
+       some rows and not others. An expiry removal is stored negative and a
+       dispense positive, so a single column showed "-10" for one and "20"
+       for the other when both left the cupboard. #}
     <div class="table-scroll"><table>
         <thead>
-            <tr><th>Date</th><th>Type</th><th>Quantity</th><th>Balance After</th><th>Prescriber</th><th>Issuer/Receiver</th><th>User</th><th>Reference/Patient</th></tr>
+            <tr><th>Date</th><th>Movement</th><th>In</th><th>Out</th>
+                <th>Balance After</th><th>Prescriber</th><th>Issuer/Receiver</th>
+                <th>User</th><th>Reference/Patient</th></tr>
         </thead>
         <tbody>
         {% for tx in reg.transactions %}
             <tr>
                 <td>{{ tx.get('date', tx.timestamp.strftime('%Y-%m-%d')) }}</td>
-                <td>{{ tx.type }}</td><td>{{ tx.quantity }}</td><td>{{ tx.balance_after }}</td>
+                <td>{{ tx.movement }}</td>
+                <td>{% if tx.in_qty %}{{ tx.in_qty }}{% else %}&ndash;{% endif %}</td>
+                <td>{% if tx.out_qty %}{{ tx.out_qty }}{% else %}&ndash;{% endif %}</td>
+                <td>{{ tx.balance_after }}</td>
                 <td>{{ tx.get('prescriber', '') }}</td>
-                <td>{{ tx.get('dispenser', tx.get('stock_receiver', '')) }}</td>
+                <td>{{ tx.get('dispenser', tx.get('stock_receiver', tx.get('issued_to', ''))) }}</td>
                 <td>{{ tx.get('user', '') }}</td>
-                <td>{{ tx.get('patient', tx.get('order_number', tx.get('supplier', ''))) }}</td>
+                <td>{{ tx.get('patient', tx.get('department', tx.get('order_number', tx.get('supplier', tx.get('reason', ''))))) }}</td>
             </tr>
         {% endfor %}
         </tbody>
@@ -5080,8 +5100,17 @@ so treat the total as indicative rather than a quotation.</p>
     <p>No transactions in this period.</p>
     {% endif %}
 {% endfor %}
-{% else %}
-<p>No controlled drugs found or no data for this period.</p>
+{% elif report_type %}
+{# This used to be the catch-all for the whole report chain, so the controlled
+   drug message was what greeted you on the reports page before you had chosen
+   anything at all. It now only answers for the report you actually asked
+   for. #}
+    {% if report_type == 'controlled_drug_register' %}
+    <p>No controlled drugs have moved in this period. Nothing was dispensed,
+    received, issued or written off.</p>
+    {% else %}
+    <p>That report has nothing in it for this period.</p>
+    {% endif %}
 {% endif %}
 """
 
@@ -8240,31 +8269,45 @@ def reports():
                                 try:
                                     current_balance    = med.get('balance', 0)
                                     med_txs            = tx_by_med[med_name]
-                                    received_in_period = sum(t['quantity'] for t in med_txs
-                                                             if t['type'] in ('receive', 'opening_balance'))
-                                    dispensed_in_period= sum(t['quantity'] for t in med_txs if t['type'] == 'dispense')
-                                    adjusted_in_period = sum(t['quantity'] for t in med_txs
-                                                             if t['type'] in ('adjustment', 'expiry_removal'))
-                                    beginning_balance  = max(0, current_balance - received_in_period
-                                                             + dispensed_in_period - adjusted_in_period)
+                                    # Every movement, by its own direction —
+                                    # issues to a department and write-offs
+                                    # included. Leaving those out is what let
+                                    # the register disagree with the shelf.
+                                    deltas             = [_controlled_delta(t) for t in med_txs]
+                                    received_in_period = sum(d for d in deltas if d > 0)
+                                    issued_in_period   = sum(-d for d in deltas if d < 0)
+                                    # Worked backwards from the shelf, so the
+                                    # register and the balance cannot disagree.
+                                    beginning_balance  = current_balance - sum(deltas)
                                     running_bal        = beginning_balance
                                     running_entries    = []
-                                    for tx in med_txs:
-                                        if tx['type'] in ('receive', 'opening_balance'):
-                                            running_bal += tx['quantity']
-                                        elif tx['type'] == 'dispense':
-                                            running_bal -= tx['quantity']
-                                        else:  # adjustment / expiry write-off — already signed
-                                            running_bal += tx['quantity']
+                                    for tx, delta in zip(med_txs, deltas):
+                                        running_bal += delta
                                         tx_copy = tx.copy()
                                         tx_copy['balance_after'] = running_bal
+                                        tx_copy['movement'] = CONTROLLED_MOVEMENT_LABEL.get(
+                                            tx.get('type'), tx.get('type', ''))
+                                        # Shown in an In or an Out column, so
+                                        # the figure itself never needs a
+                                        # minus sign to be understood.
+                                        tx_copy['in_qty'] = delta if delta > 0 else None
+                                        tx_copy['out_qty'] = -delta if delta < 0 else None
                                         running_entries.append(tx_copy)
                                     controlled_register.append({
                                         'med_name': med_name,
                                         'beginning_balance': beginning_balance,
                                         'ending_balance': current_balance,
                                         'received': received_in_period,
-                                        'dispensed': dispensed_in_period,
+                                        'dispensed': issued_in_period,
+                                        # The opening balance is worked
+                                        # backwards from the shelf, so the
+                                        # column always adds up — what it
+                                        # cannot do is start below zero. That
+                                        # means more left the cupboard than
+                                        # could ever have been in it, which
+                                        # is a movement recorded outside this
+                                        # period or a balance edited directly.
+                                        'reconciles': beginning_balance >= 0,
                                         'transactions': [e for e in running_entries if matches_search(e, search)]
                                     })
                                 except Exception as qe:
@@ -8722,9 +8765,9 @@ CSV_REPORTS = {
         ('batch', 'Batch'), ('expiry_date', 'Expiry'), ('supplier', 'Supplier'),
         ('invoice_number', 'Invoice'), ('line_value', 'Value')]),
     'controlled_drug_register': ('Controlled Drug Register', 'controlled_register', [
-        ('date', 'Date'), ('med_name', 'Medication'), ('type', 'Movement'),
-        ('quantity', 'Qty'), ('balance', 'Balance'), ('patient', 'Patient'),
-        ('user', 'By')]),
+        ('date', 'Date'), ('med_name', 'Medication'), ('movement', 'Movement'),
+        ('in_qty', 'In'), ('out_qty', 'Out'), ('balance_after', 'Balance'),
+        ('patient', 'Patient'), ('user', 'By')]),
 }
 
 ORDER_REQUEST_COLUMNS = [
@@ -8749,7 +8792,23 @@ def _csv_value(v):
 
 def _report_csv(report_type, ctx, is_admin=False):
     """(filename, csv text) for the report on screen, or None if it has none."""
-    if report_type == 'inventory':
+    if report_type == 'controlled_drug_register':
+        # The register is grouped by medication, each group holding its own
+        # movements. Handing those groups straight to the writer produced one
+        # blank line per medication and not a single movement — the file had
+        # the right headings over nothing at all.
+        rows = []
+        for group in ctx.get('controlled_register') or []:
+            for tx in group.get('transactions') or []:
+                row = dict(tx)
+                row['med_name'] = group.get('med_name', '')
+                ts = tx.get('timestamp')
+                if not row.get('date') and ts:
+                    row['date'] = ts.strftime('%Y-%m-%d')
+                rows.append(row)
+        columns = CSV_REPORTS['controlled_drug_register'][2]
+        title = 'Controlled Drug Register'
+    elif report_type == 'inventory':
         columns = INVENTORY_COLUMNS_ADMIN if is_admin else INVENTORY_COLUMNS_USER
         rows = ctx.get('report_data') or []
         title = 'Inventory Report'
@@ -10285,6 +10344,51 @@ def loans():
 # app but is not in charge. These names were taken from the staff already
 # named elsewhere in the app, so the roles are a starting guess — an admin
 # edits them on the page.
+# How each kind of movement affects a controlled drug balance.
+#
+# This used to be inferred from the SIGN stored on the transaction, and the
+# signs are not consistent: a dispense and an internal issue are stored
+# positive, while a damage and an expiry removal are stored negative. The
+# register added anything that was not a receipt or a dispense, so issuing
+# morphine to a department made the register's running balance go UP. Checked
+# against a seeded month, the register ended at 85 where the shelf said 55.
+#
+# A controlled drug register is a legal document. The direction of a movement
+# is therefore stated here once, by type, and the quantity is taken as a
+# magnitude — so no change to a storage convention anywhere else in this file
+# can silently invert a morphine balance again.
+CONTROLLED_DIRECTION = {
+    'opening_balance': +1,
+    'receive': +1,
+    'dispense': -1,
+    'internal_issue': -1,
+    'damage': -1,
+    'expiry_removal': -1,
+    'adjustment': 0,      # genuinely either way: the sign IS the information
+}
+
+# What a register has to call these in words. "expiry_removal" is a column in
+# a database, not an entry in a register someone may have to answer for.
+CONTROLLED_MOVEMENT_LABEL = {
+    'opening_balance': 'Opening balance',
+    'receive': 'Received',
+    'dispense': 'Dispensed to patient',
+    'internal_issue': 'Issued to department',
+    'damage': 'Damaged — removed',
+    'expiry_removal': 'Expired — removed',
+    'adjustment': 'Stock-take adjustment',
+}
+
+
+def _controlled_delta(tx):
+    """What this movement does to the balance: negative means it left."""
+    direction = CONTROLLED_DIRECTION.get(tx.get('type'), 0)
+    qty = tx.get('quantity', 0) or 0
+    if direction == 0:
+        return qty              # an adjustment carries its own sign
+    return direction * abs(qty)
+
+
 # One roster, one person, three jobs.
 #
 # The same people were listed in FOUR places: a prescribers list and a
