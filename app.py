@@ -946,11 +946,11 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
         </div>
         <div>
             <label for="company">Company:</label>
-            <input id="company" name="company" list="company_suggestions" type="text" value="{{ tx_data.company if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
+            <input id="company" name="company" list="company_suggestions" type="text" value="{{ tx_data.company if tx_data else '' }}" {% if tx_data and tx_data.company %}data-autofilled="1"{% endif %} {% if not tx_data %}required{% endif %}>
         </div>
         <div>
             <label for="position">Position:</label>
-            <input id="position" name="position" list="position_suggestions" type="text" value="{{ tx_data.position if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
+            <input id="position" name="position" list="position_suggestions" type="text" value="{{ tx_data.position if tx_data else '' }}" {% if tx_data and tx_data.position %}data-autofilled="1"{% endif %} {% if not tx_data %}required{% endif %}>
         </div>
         <div>
             {# NEW: the prescription states a year of birth, not an age band.
@@ -959,7 +959,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
                year, whereas a birth year stays true. Age is derived where it is
                needed. #}
             <label>Year of Birth (decade):</label>
-            <select name="birth_decade" {% if not tx_data %}required{% endif %}>
+            <select name="birth_decade" {% if tx_data and tx_data.birth_decade %}data-autofilled="1"{% endif %} {% if not tx_data %}required{% endif %}>
                 <option value="">-- Select Decade --</option>
                 {% for d in birth_decades %}
                 <option value="{{ d }}" {% if tx_data and tx_data.birth_decade == d %}selected{% endif %}>{{ d }}&ndash;{{ d + 9 }}</option>
@@ -968,7 +968,7 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
         </div>
         <div>
             <label>Gender:</label>
-            <select name="gender" {% if not tx_data %}required{% endif %}>
+            <select name="gender" {% if tx_data and tx_data.gender %}data-autofilled="1"{% endif %} {% if not tx_data %}required{% endif %}>
                 <option value="">-- Select --</option>
                 <option value="Male" {% if tx_data and tx_data.gender == 'Male' %}selected{% endif %}>Male</option>
                 <option value="Female" {% if tx_data and tx_data.gender == 'Female' %}selected{% endif %}>Female</option>
@@ -1539,6 +1539,14 @@ var FORM_DEFAULTS = {{ form_defaults|tojson }};
 
 var RECALL_FIELDS = [['company', 'Company'], ['position', 'Position'],
                      ['birth_decade', 'Birth decade'], ['gender', 'Gender']];
+var RECALL_DEBOUNCE_MS = 350;
+// The name whose details are the ones currently on screen.
+var recallDetailsFor = null;
+var recallSubmitting = false;
+// The name the details on screen were fetched for. A lookup that finishes
+// after the name has moved on again must not be allowed to paint stale
+// details over the newer ones.
+var recallInFlightFor = null;
 
 function recallField(f) {
     return document.querySelector('.common-section [name="' + f + '"]');
@@ -1560,44 +1568,135 @@ async function recallPatient() {
     if (!nameEl || !note) return;
     const name = nameEl.value.trim();
 
-    // Always first, and before any early return: a name that matches nothing
-    // must not leave the last patient's details behind.
-    clearRecalled();
+    // BUG: this used to blank the four detail fields HERE, before the lookup,
+    // and that broke the page in a way nothing on screen explained. Clicking
+    // Dispense right after changing the name first blurs the name box, which
+    // runs this function, which emptied four REQUIRED fields — so the click's
+    // own submission failed validation and nothing happened at all. The user
+    // clicks Dispense and the app just sits there.
+    //
+    // So nothing is blanked on the way out any more. The details stay on
+    // screen, marked as belonging to the previous name, and are replaced when
+    // the answer arrives. Only a name that matches nobody clears them, and
+    // only once we know that for certain.
     note.className = 'patient-recall';
     note.textContent = '';
-    if (name.length < 3) return;
+    if (name.length < 3) {
+        clearRecalled();
+        recallDetailsFor = name;
+        return;
+    }
 
+    // recallInFlightFor says a lookup for this name has STARTED;
+    // recallDetailsFor says one has FINISHED and the screen reflects it. The
+    // submit guard needs the second, and conflating the two is what let a
+    // record save Palesa's name with the previous patient's employer: the
+    // guard saw the name it was waiting for and let the POST go while the
+    // answer was still on the wire.
+    recallInFlightFor = name;
     let d;
     try {
-        const res = await fetch('/api/patient-lookup?name=' + encodeURIComponent(name));
-        if (!res.ok) return;
-        d = await res.json();
-    } catch (e) { return; }
-    if (!d || !d.patient) return;
+        try {
+            const res = await fetch('/api/patient-lookup?name=' + encodeURIComponent(name));
+            if (!res.ok) return;
+            d = await res.json();
+        } catch (e) { return; }
+        // Typing fires several lookups, and they can come back out of order.
+        // Only the answer to the name CURRENTLY in the box may fill the form.
+        if (nameEl.value.trim() !== name) return;
 
-    const filled = [];
-    RECALL_FIELDS.forEach(function (pair) {
-        const f = pair[0], label = pair[1];
-        const el = recallField(f);
-        if (el && !el.value && d[f]) {
-            el.value = d[f];
-            el.dataset.autofilled = '1';
-            filled.push(label);
+        // A name nobody has been seen under before: whatever the app put
+        // there belongs to someone else and has to go.
+        if (!d || !d.patient) {
+            clearRecalled();
+            return;
         }
-    });
-    if (filled.length) {
-        note.textContent = 'Filled from the last visit on ' +
-            (d.last_visit || 'record') + ': ' + filled.join(', ') +
-            '. Check it is the same person.';
-        note.className = 'patient-recall shown';
+
+        const filled = [];
+        RECALL_FIELDS.forEach(function (pair) {
+            const f = pair[0], label = pair[1];
+            const el = recallField(f);
+            if (!el) return;
+            // The app may replace what the app put there, and may fill a
+            // blank. What the user typed is theirs and is never touched.
+            if (el.dataset.autofilled !== '1' && el.value) return;
+            if (d[f]) {
+                el.value = d[f];
+                el.dataset.autofilled = '1';
+                filled.push(label);
+            } else {
+                // This patient has no record of it, so the last patient's
+                // answer must not be left standing in its place.
+                el.value = '';
+                delete el.dataset.autofilled;
+            }
+        });
+        if (filled.length) {
+            note.textContent = 'Filled from the last visit on ' +
+                (d.last_visit || 'record') + ': ' + filled.join(', ') +
+                '. Check it is the same person.';
+            note.className = 'patient-recall shown';
+        }
+    } finally {
+        // Only the newest lookup may declare the screen settled. An older one
+        // finishing late leaves the flag alone, so the submit guard keeps
+        // waiting for the one that matters.
+        if (recallInFlightFor === name) {
+            recallInFlightFor = null;
+            recallDetailsFor = name;
+        }
     }
+}
+
+// BUG (reported twice): the lookup was bound to 'change' and 'blur' only. A
+// text input fires 'change' when the value is COMMITTED — on blur or Enter —
+// not while it is being typed. So correcting the patient name and looking
+// straight at the Company box showed the PREVIOUS patient's employer, and it
+// stayed that way until the field was left. Worse, pressing Enter to submit
+// fires change and the POST in the same breath, so the stale details could be
+// saved against the new name.
+//
+// So the lookup now also runs as the name is typed, debounced: one request
+// once the typing settles, not one per keystroke. change and blur stay, as
+// the belt to this braces — a name pasted in or picked from autofill may
+// never raise a single keystroke.
+var recallTimer = null;
+function recallSoon() {
+    if (recallTimer) clearTimeout(recallTimer);
+    recallTimer = setTimeout(recallPatient, RECALL_DEBOUNCE_MS);
 }
 
 document.addEventListener('DOMContentLoaded', function () {
     const nameEl = document.getElementById('patient');
     if (nameEl) {
+        // On an edit, the details already on screen are this patient's.
+        recallDetailsFor = nameEl.value.trim();
+        nameEl.addEventListener('input', recallSoon);
         nameEl.addEventListener('change', recallPatient);
         nameEl.addEventListener('blur', recallPatient);
+    }
+
+    // Pressing Enter in the name box fires change and submits in the same
+    // breath, so the lookup would still be in the air when the record was
+    // written — saving one patient's name against another's employer. If the
+    // details on screen have not caught up with the name, the submit waits
+    // for the lookup, and goes ahead regardless after a moment so a slow or
+    // failed lookup can never block a dispense.
+    const form = document.querySelector('form.dispense-form');
+    if (form && nameEl) {
+        form.addEventListener('submit', function (e) {
+            if (recallSubmitting) return;
+            if (recallInFlightFor === null
+                && nameEl.value.trim() === (recallDetailsFor || '')) return;
+            e.preventDefault();
+            recallSubmitting = true;
+            if (recallTimer) clearTimeout(recallTimer);
+            const settled = Promise.resolve(recallPatient()).catch(function () {});
+            const giveUp = new Promise(function (r) { setTimeout(r, 1500); });
+            Promise.race([settled, giveUp]).then(function () {
+                form.submit();
+            });
+        });
     }
     // Once the user edits one of these, it is theirs and is never cleared.
     RECALL_FIELDS.forEach(function (pair) {
@@ -5245,9 +5344,15 @@ def dispense():
         # FIX (UX/Correctness): group rows by transaction_id in Python so the
         # template can use reliable rowspan values regardless of sort order or
         # shared timestamps.  Ordered by the paged visit order.
+        # BUG: t['transaction_id'] was a direct key access. A dispense record
+        # without that field groups under None, which $in then matches, and the
+        # KeyError took the WHOLE dispensing page down with a 500 — no form, no
+        # history, nothing. One malformed old record must not be able to do
+        # that, so the field is read defensively and such rows are grouped
+        # under None, which no visit id matches, so they simply do not list.
         grouped = {}
         for t in raw_tx:
-            grouped.setdefault(t['transaction_id'], []).append(t)
+            grouped.setdefault(t.get('transaction_id'), []).append(t)
         tx_groups = [(tid, grouped[tid]) for tid in visit_ids if tid in grouped]
         # Keep flat list for backwards-compat with anything that needs it
         tx_list = raw_tx
