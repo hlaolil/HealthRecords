@@ -255,74 +255,337 @@ def init_db_collections():
 init_db_collections()
 
 # Diagnosis options
+# The clinical vocabulary. Standardised 2026-10-20: 79 entries carried a
+# spelling or punctuation error ("Chelazion", "Rynaulds phenomenon",
+# "Myocardiac infaction", "Dysfunctional uterine beeding"), 14 were
+# body-system headings rather than diagnoses ("ENT", "Respiratory",
+# "Surgical") and three said the same thing twice. Records already written
+# keep whatever was entered at the time — a clinical record is not rewritten
+# after the fact — so the old spellings live on in DIAGNOSIS_SEARCH_TERMS
+# below and still find the corrected entry.
 DIAGNOSES_OPTIONS = [
-    'ARDS', 'Abscess', 'Acne', 'Acute Bronchitis', 'Acute Gastroenteritis (AGE)',
-    'Acute appendicitis', 'Acute otitis media', 'Acute sinusitis', 'Acute stress disorder',
-    'Acute tonsilitis /pharyngitis', 'Alcohol intoxication', 'Allergic conjunctivitis',
-    'Allergic rhinitis', 'Allergic skin reaction', 'Allergies', 'Anaemia',
-    'Anal fissure', 'Angina', 'Antiphspholipid syndrome', 'Anxiety disorder/ panic disorder',
-    'Aphthous ulcers/oral lessions', 'Aquagenic pruritus', 'Arthralgia', 'Asthma',
-    'Awating PCR results', 'Bacterial conjunctivitis', 'Bipolar disorder', 'Boutoner deformity',
-    'Bowel obstruction', 'Brachial plexus compression', 'Breast lump', 'Bulous skin lessions',
-    'Burns', 'Bursitis', 'CCF', 'CNS_PNS', 'COPD', 'COVID_19', 'CVS_Immunological',
-    'Calcaneous spur', 'Candidiasis(oral/esophageal)', 'Cardiac dysrythmia', 'Cardiomegally',
-    'Cataract', 'Cellulitis', 'Chelazion', 'Chemical conjunctivitis', 'Chemical pneumonitis',
-    'Chronic Suppurative Otits media (CSOM)', 'Chronic fatique syndrome', 'Chronic sinusitis',
-    'Circumcission', 'Common Cold', 'Constipation', 'Costochondritis', 'Crush syndrome',
-    'DVT', 'Dental', 'Dental abscess', 'Dental caries', 'Dental decay', 'Depressive disorder',
-    'Dermatitis/Eczema', 'Dermatological', 'Diarrhoea', 'Disc Hernia', 'Dislocation',
-    'Dog bite', 'Dry Eyes', 'Dysentery', 'ENT', 'Ear wax impaction', 'Emphysema',
-    'Endocrinological', 'Epidermoid cyst', 'Epilepsy / Seizure disorder', 'Epistaxis',
-    'Eyelid infection', 'Feet corns/calluses', 'Foreign body', 'Foreign body (in soft tissue)',
-    'Foreign body ear', 'Fractures', 'Fungal infections/Tineas/ Dermatophyte',
-    'GERD / Esophageal sphincter dysfunction', 'GIT', 'GUT_Urological_Gynae',
-    'Ganglion cyst', 'Gingivitis', "Golfer's elbow", 'Gout', 'Grief/bereavement',
-    'HIV', 'HIV -Associated vasculitis', 'HTN', 'HTN/DM', 'Hairy leucoplakia',
-    'Hallus valgus deformity', 'Head injury',
-    'Headaches (tension, migrane, cluster etc)', 'Hepatitis',
-    'Herpes labialis (cold sore)', 'Herpes zoster', 'Hiccups', 'High altitude syndrome',
-    'Hypercholesterolaemia', 'Hypertriglyceridaemia', 'Hypotension', 'I & D',
-    'Illio-tibial band syndrome', 'Indigestion', 'Inflamatory bowel disease / IBS',
-    'Influenza', 'Ingrown', 'Injury', 'Insect bite', 'Insomnia',
-    'Insufficient sleep syndrome', 'Internal/external haemorrhoids', 'Kaposis Sarcoma',
-    'LRTI', 'Laryngitis', 'Lightening injury', 'Ligmament sprain',
-    'Lipoma', 'Loose teeth', 'Lower GI bleed',
-    'Lymphadenitis', 'Mechanical low back pain', 'Medication induced cough(ACE-I etc)',
-    'Medication side effects', 'Mucus hypersecretion', 'Muscle strain',
-    'Musculoskeletal', 'Myalgia/muscle tension/ spasm', 'Myocardiac infaction/ ACS',
-    'Nasal lession/infection', 'Nasal polyp', 'Nausea and Vomiting', 'Negative on AgRDT',
-    'Neuralgia / neuritis', 'Non specific spinal pain',
-    'Obstructive sleep apnea', 'Opthalmological', 'Oral lession(s)', 'Osteoarthritis',
-    'Otitis externa', 'PICA', 'PJP', 'PUD/gastritis', 'Pancreatitis', 'Papule, pastules',
-    'Parasthesia', 'Peri-orbital lession', 'Perianal abscess', 'Periodontitis',
-    'Peripheral neuropathy', 'Peripheral vascular disease', 'Pinguecula', 'Planta fascitis',
-    'Pleural effusion', 'Pleuritic chest pain/pleuritis', 'Pneumonia', 'Polyarthralgia',
-    'Poor vision', 'Positive on AgRDT', 'Post covid hyperactive airway DX',
-    'Preseptal cellulitis', 'Psychiatric', 'Psychosomatic Disorder', 'Pterygium',
-    'Radiculopathy', 'Respiratory', 'Rheumatoid arthritis',
-    'Rheumatological_Ortho', 'Rynaulds phenomenon', 'Scabies', 'Sceptic nasal piercing',
-    'Sciatica', 'Smoke inhilation injury', 'Spinal abnormality',
-    'Spondylolisthesis', 'Spondylosis', 'Spondylosis/spondylolisthesis', 'Stye /',
-    'Surgical', 'Surgical site infection', 'Swan neck deformity',
-    'Syncope', 'TB', 'TB Meningitis', 'TIA / CVA',
-    'Temporal arteritis', 'Tendon injury', 'Tendonitis', 'Tennis elbow', 'Thoracic back pain',
-    'Tinnitus', 'Toothache', 'Torticolis', 'Traumatic conjunctivitis',
-    'Tumour', 'Typhoid', 'URTI', 'Ulcer',
-    'Upper GI bleed', 'Urticaria', 'Venous insufficiency', 'Viral conjunctivitis',
-    'Viral rhinitis/ common cold', 'Warts', 'Worm infestation', 'faecal incontinence',
-    'hordeolum', 'injuries', 'injuries on duty', 'injury (RTA)',
-    'STI (MUS, VDS, Herpes genitalia, syphilis etc)', 'Post HIV exposure', 'Post operative adhessions',
-    'Vaginal candidiasis', 'Cervixitis', 'UTI', 'Pelvic hypertension', 'Dysmenorrhoea', 'PID',
-    'Hormonal imbalance', 'PCOS', 'Ovarian cyst', 'Pelvic mass',
-    'Fibroid uterus', 'Pregnancy', 'Supplementation', 'Normal mentrual period', 'Menorrhagia',
-    'Miscarriage', 'Secondary ammenorrhoea',
-    'Post menopausal syndrome', 'Post menauposal bleeding', 'Dysfunctional uterine beeding',
-    'Inhibited sexual desire', 'Erectile dysfunction', 'Epididimorchitis',
-    'Urine Incontinence', 'Hydrocele', 'Acute urinary retension', 'Urinary catheter blockage',
-    'BPH', 'Acute kidney injury', 'Chronic kidney disease',
-    'Drug induced kidney injury', 'Urethral stricture/Urinary outlet obstruction', 'Kidney stone',
-    'Bladder stone', 'Warts', 'DM', 'Hyperglycaemia', 'Hypoglycaemia', 'DKA', 'HHS'
+    'Abscess', 'Acne', 'Acute appendicitis', 'Acute bronchitis',
+    'Acute gastroenteritis (AGE)', 'Acute kidney injury',
+    'Acute otitis media', 'Acute sinusitis', 'Acute stress disorder',
+    'Acute tonsillitis / pharyngitis', 'Acute urinary retention',
+    'Alcohol intoxication', 'Allergic conjunctivitis', 'Allergic rhinitis',
+    'Allergic skin reaction', 'Allergies', 'Anaemia', 'Anal fissure',
+    'Angina', 'Antiphospholipid syndrome',
+    'Anxiety disorder / panic disorder', 'Aphthous ulcers / oral lesions',
+    'Aquagenic pruritus', 'ARDS', 'Arthralgia', 'Asthma',
+    'Awaiting PCR results', 'Bacterial conjunctivitis', 'Bipolar disorder',
+    'Bladder stone', 'Boutonniere deformity', 'Bowel obstruction', 'BPH',
+    'Brachial plexus compression', 'Breast lump', 'Bullous skin lesions',
+    'Burns', 'Bursitis', 'Calcaneal spur', 'Candidiasis (oral / oesophageal)',
+    'Cardiac dysrhythmia', 'Cardiomegaly', 'Cataract', 'CCF', 'Cellulitis',
+    'Cervixitis', 'Chalazion', 'Chemical conjunctivitis',
+    'Chemical pneumonitis', 'Chronic fatigue syndrome',
+    'Chronic kidney disease', 'Chronic sinusitis',
+    'Chronic suppurative otitis media (CSOM)', 'Circumcision', 'Common cold',
+    'Constipation', 'COPD', 'Costochondritis', 'COVID-19', 'Crush syndrome',
+    'Dental abscess', 'Dental caries', 'Dental decay', 'Depressive disorder',
+    'Dermatitis / eczema', 'Diarrhoea', 'Disc herniation', 'Dislocation',
+    'DKA', 'DM', 'Dog bite', 'Drug-induced kidney injury', 'Dry eyes', 'DVT',
+    'Dysentery', 'Dysfunctional uterine bleeding', 'Dysmenorrhoea',
+    'Ear wax impaction', 'Emphysema', 'Epidermoid cyst', 'Epididymo-orchitis',
+    'Epilepsy / seizure disorder', 'Epistaxis', 'Erectile dysfunction',
+    'Eyelid infection', 'Faecal incontinence', 'Feet corns / calluses',
+    'Fibroid uterus', 'Foreign body', 'Foreign body (in soft tissue)',
+    'Foreign body ear', 'Fractures',
+    'Fungal infection / tinea / dermatophyte', 'Ganglion cyst',
+    'GERD / oesophageal sphincter dysfunction', 'Gingivitis',
+    "Golfer's elbow", 'Gout', 'Grief / bereavement', 'Hairy leucoplakia',
+    'Hallux valgus deformity', 'Head injury',
+    'Headache (tension, migraine, cluster etc)', 'Hepatitis',
+    'Herpes labialis (cold sore)', 'Herpes zoster', 'HHS', 'Hiccups',
+    'High altitude syndrome', 'HIV', 'HIV-associated vasculitis',
+    'Hormonal imbalance', 'HTN', 'HTN / DM', 'Hydrocele',
+    'Hypercholesterolaemia', 'Hyperglycaemia', 'Hypertriglyceridaemia',
+    'Hypoglycaemia', 'Hypotension', 'I & D', 'Iliotibial band syndrome',
+    'Indigestion', 'Inflammatory bowel disease / IBS', 'Influenza', 'Ingrown toenail',
+    'Inhibited sexual desire', 'Injury', 'Injury (RTA)', 'Injury on duty',
+    'Insect bite', 'Insomnia', 'Insufficient sleep syndrome',
+    'Internal / external haemorrhoids', "Kaposi's sarcoma", 'Kidney stone',
+    'Laryngitis', 'Ligament sprain', 'Lightning injury', 'Lipoma',
+    'Loose teeth', 'Lower GI bleed', 'LRTI', 'Lymphadenitis',
+    'Mechanical low back pain', 'Medication side effects',
+    'Medication-induced cough (ACE-I etc)', 'Menorrhagia', 'Miscarriage',
+    'Mucus hypersecretion', 'Muscle strain',
+    'Myalgia / muscle tension / spasm', 'Myocardial infarction / ACS',
+    'Nasal lesion / infection', 'Nasal polyp', 'Nausea and vomiting',
+    'Negative on AgRDT', 'Neuralgia / neuritis', 'Non-specific spinal pain',
+    'Normal menstrual period', 'Obstructive sleep apnoea', 'Oral lesion(s)',
+    'Osteoarthritis', 'Otitis externa', 'Ovarian cyst', 'Pancreatitis',
+    'Papules, pustules', 'Paraesthesia', 'PCOS', 'Pelvic congestion syndrome',
+    'Pelvic mass', 'Peri-orbital lesion', 'Perianal abscess', 'Periodontitis',
+    'Peripheral neuropathy', 'Peripheral vascular disease', 'Pica', 'PID',
+    'Pinguecula', 'PJP', 'Plantar fasciitis', 'Pleural effusion',
+    'Pleuritic chest pain / pleuritis', 'Pneumonia', 'Polyarthralgia',
+    'Poor vision', 'Positive on AgRDT', 'Post HIV exposure',
+    'Post-COVID hyperactive airway disease', 'Post-menopausal bleeding',
+    'Post-menopausal syndrome', 'Post-operative adhesions', 'Pregnancy',
+    'Preseptal cellulitis', 'Psychosomatic disorder', 'Pterygium',
+    'PUD / gastritis', 'Radiculopathy', "Raynaud's phenomenon",
+    'Rheumatoid arthritis', 'Scabies', 'Sciatica', 'Secondary amenorrhoea',
+    'Septic nasal piercing', 'Smoke inhalation injury', 'Spinal abnormality',
+    'Spondylolisthesis', 'Spondylosis', 'Spondylosis / spondylolisthesis',
+    'STI (MUS, VDS, herpes genitalia, syphilis etc)', 'Stye (hordeolum)',
+    'Supplementation', 'Surgical site infection', 'Swan neck deformity',
+    'Syncope', 'TB', 'TB meningitis', 'Temporal arteritis', 'Tendon injury',
+    'Tendonitis', 'Tennis elbow', 'Thoracic back pain', 'TIA / CVA',
+    'Tinnitus', 'Toothache', 'Torticollis', 'Traumatic conjunctivitis',
+    'Tumour', 'Typhoid', 'Ulcer', 'Upper GI bleed',
+    'Urethral stricture / urinary outlet obstruction',
+    'Urinary catheter blockage', 'Urinary incontinence', 'URTI', 'Urticaria',
+    'UTI', 'Vaginal candidiasis', 'Venous insufficiency',
+    'Viral conjunctivitis', 'Viral rhinitis / common cold', 'Warts',
+    'Worm infestation',
 ]
+
+# Extra words that find an entry without being part of its name: the long
+# form of an abbreviation, the everyday word for it, and every spelling this
+# list used to carry. Typing "hypertension" found NOTHING before this,
+# because the entry is called HTN; so did "diabetes", "stroke", "shingles"
+# and "nosebleed". A standard list only standardises anything if it is easier
+# to hit than it is to type something of your own.
+DIAGNOSIS_SEARCH_TERMS = {
+    'ARDS': [
+        'acute respiratory distress syndrome',],
+    'Acute gastroenteritis (AGE)': [
+        'age', 'diarrhoea vomiting', 'stomach bug',],
+    'Acute otitis media': [
+        'ear infection', 'earache',],
+    'Acute tonsillitis / pharyngitis': [
+        'acute tonsilitis /pharyngitis', 'sore throat', 'tonsils',],
+    'Acute urinary retention': [
+        'acute urinary retension',],
+    'Allergic conjunctivitis': [
+        'pink eye', 'red eye',],
+    'Anaemia': [
+        'anemia', 'low blood',],
+    'Antiphospholipid syndrome': [
+        'antiphspholipid syndrome',],
+    'Anxiety disorder / panic disorder': [
+        'anxiety disorder/ panic disorder',],
+    'Aphthous ulcers / oral lesions': [
+        'aphthous ulcers/oral lessions',],
+    'Awaiting PCR results': [
+        'awating pcr results',],
+    'BPH': [
+        'benign prostatic hyperplasia', 'enlarged prostate', 'prostate',],
+    'Bacterial conjunctivitis': [
+        'pink eye', 'red eye',],
+    'Boutonniere deformity': [
+        'boutoner deformity', 'boutonniere',],
+    'Bullous skin lesions': [
+        'bulous skin lessions',],
+    'CCF': [
+        'congestive cardiac failure', 'heart failure',],
+    'COPD': [
+        'chronic obstructive pulmonary disease', 'emphysema bronchitis',],
+    'COVID-19': [
+        'covid_19',],
+    'Calcaneal spur': [
+        'calcaneous spur',],
+    'Candidiasis (oral / oesophageal)': [
+        'candida', 'candidiasis(oral/esophageal)', 'thrush',],
+    'Cardiac dysrhythmia': [
+        'cardiac dysrythmia',],
+    'Cardiomegaly': [
+        'cardiomegally', 'enlarged heart',],
+    'Chalazion': [
+        'chelazion', 'eyelid lump',],
+    'Chronic fatigue syndrome': [
+        'chronic fatique syndrome',],
+    'Chronic suppurative otitis media (CSOM)': [
+        'chronic suppurative otits media (csom)', 'csom', 'discharging ear',],
+    'Circumcision': [
+        'circumcission',],
+    'DKA': [
+        'diabetic ketoacidosis',],
+    'DM': [
+        'diabetes', 'diabetes mellitus', 'sugar',],
+    'DVT': [
+        'clot', 'deep vein thrombosis',],
+    'Dermatitis / eczema': [
+        'dermatitis/eczema',],
+    'Diarrhoea': [
+        'diarrhea', 'loose stools',],
+    'Disc herniation': [
+        'disc hernia',],
+    'Drug-induced kidney injury': [
+        'drug induced kidney injury',],
+    'Dysfunctional uterine bleeding': [
+        'dysfunctional uterine beeding',],
+    'Dysmenorrhoea': [
+        'dysmenorrhea', 'period pain',],
+    'Ear wax impaction': [
+        'cerumen', 'wax',],
+    'Epididymo-orchitis': [
+        'epididimorchitis',],
+    'Epistaxis': [
+        'nose bleed', 'nosebleed',],
+    'Feet corns / calluses': [
+        'feet corns/calluses',],
+    'Fungal infection / tinea / dermatophyte': [
+        "athlete's foot", 'fungal infections/tineas/ dermatophyte',
+        'ringworm',],
+    'GERD / oesophageal sphincter dysfunction': [
+        'gastro-oesophageal reflux',
+        'gerd / esophageal sphincter dysfunction', 'heartburn', 'reflux',],
+    "Golfer's elbow": [
+        'medial epicondylitis',],
+    'Grief / bereavement': [
+        'grief/bereavement',],
+    'HHS': [
+        'hyperosmolar hyperglycaemic state',],
+    'HIV': [
+        'human immunodeficiency virus', 'retroviral',],
+    'HIV-associated vasculitis': [
+        'hiv -associated vasculitis',],
+    'HTN': [
+        'blood pressure', 'bp', 'high blood pressure', 'hypertension',],
+    'HTN / DM': [
+        'blood pressure diabetes', 'htn/dm', 'hypertension diabetes',],
+    'Hallux valgus deformity': [
+        'bunion', 'hallus valgus deformity',],
+    'Headache (tension, migraine, cluster etc)': [
+        'headaches (tension, migrane, cluster etc)',],
+    'Herpes labialis (cold sore)': [
+        'cold sore', 'fever blister',],
+    'Herpes zoster': [
+        'shingles',],
+    'Hypercholesterolaemia': [
+        'cholesterol', 'high cholesterol',],
+    'Hyperglycaemia': [
+        'high sugar', 'hyperglycemia',],
+    'Hypertriglyceridaemia': [
+        'triglycerides',],
+    'Hypoglycaemia': [
+        'hypoglycemia', 'low sugar',],
+    'I & D': [
+        'incision and drainage',],
+    'Iliotibial band syndrome': [
+        'illio-tibial band syndrome',],
+    'Inflammatory bowel disease / IBS': [
+        'ibd', 'inflamatory bowel disease / ibs', 'irritable bowel syndrome',],
+    'Injury': [
+        'injuries',],
+    'Ingrown toenail': [
+        'ingrowing toenail', 'ingrown', 'onychocryptosis',],
+    'Pelvic congestion syndrome': [
+        'pelvic congestion', 'pelvic hypertension', 'pelvic varices',],
+    'Injury (RTA)': [
+        'car accident', 'mva', 'road traffic accident',],
+    'Injury on duty': [
+        'injuries on duty', 'iod', 'work injury', 'workplace injury',],
+    'Internal / external haemorrhoids': [
+        'hemorrhoids', 'internal/external haemorrhoids', 'piles',],
+    "Kaposi's sarcoma": [
+        'kaposi', 'kaposis sarcoma',],
+    'LRTI': [
+        'chest infection', 'lower respiratory tract infection',],
+    'Ligament sprain': [
+        'ligmament sprain',],
+    'Lightning injury': [
+        'lightening injury',],
+    'Mechanical low back pain': [
+        'back pain', 'backache',],
+    'Medication-induced cough (ACE-I etc)': [
+        'medication induced cough(ace-i etc)',],
+    'Myalgia / muscle tension / spasm': [
+        'myalgia/muscle tension/ spasm',],
+    'Myocardial infarction / ACS': [
+        'acute coronary syndrome', 'heart attack',
+        'myocardiac infaction/ acs',],
+    'Nasal lesion / infection': [
+        'nasal lession/infection',],
+    'Non-specific spinal pain': [
+        'non specific spinal pain',],
+    'Normal menstrual period': [
+        'normal mentrual period',],
+    'Obstructive sleep apnoea': [
+        'obstructive sleep apnea', 'sleep apnea', 'snoring',],
+    'Oral lesion(s)': [
+        'oral lession(s)',],
+    'Osteoarthritis': [
+        'arthritis', 'oa',],
+    'PCOS': [
+        'polycystic ovary syndrome',],
+    'PID': [
+        'pelvic inflammatory disease',],
+    'PJP': [
+        'pneumocystis pneumonia',],
+    'PUD / gastritis': [
+        'peptic ulcer disease', 'pud/gastritis', 'stomach ulcer',],
+    'Papules, pustules': [
+        'papule, pastules',],
+    'Paraesthesia': [
+        'numbness', 'parasthesia', 'paresthesia', 'pins and needles',],
+    'Peri-orbital lesion': [
+        'peri-orbital lession',],
+    'Pica': [
+        'pica',],
+    'Plantar fasciitis': [
+        'heel pain', 'planta fascitis',],
+    'Pleuritic chest pain / pleuritis': [
+        'pleuritic chest pain/pleuritis',],
+    'Post-COVID hyperactive airway disease': [
+        'post covid hyperactive airway dx',],
+    'Post-menopausal bleeding': [
+        'post menauposal bleeding',],
+    'Post-menopausal syndrome': [
+        'post menopausal syndrome',],
+    'Post-operative adhesions': [
+        'post operative adhessions',],
+    "Raynaud's phenomenon": [
+        'raynaud', 'raynauds', 'rynaulds phenomenon',],
+    'Rheumatoid arthritis': [
+        'arthritis', 'ra',],
+    'STI (MUS, VDS, herpes genitalia, syphilis etc)': [
+        'discharge', 'gonorrhoea', 'sexually transmitted infection', 'std',
+        'syphilis',],
+    'Scabies': [
+        'itch mite',],
+    'Secondary amenorrhoea': [
+        'secondary ammenorrhoea',],
+    'Septic nasal piercing': [
+        'sceptic nasal piercing',],
+    'Smoke inhalation injury': [
+        'smoke inhilation injury',],
+    'Spondylosis / spondylolisthesis': [
+        'spondylosis/spondylolisthesis',],
+    'Stye (hordeolum)': [
+        'eyelid', 'hordeolum', 'stye /',],
+    'TB': [
+        'tuberculosis',],
+    'TB meningitis': [
+        'tuberculous meningitis',],
+    'TIA / CVA': [
+        'cerebrovascular accident', 'stroke', 'transient ischaemic attack',],
+    'Tennis elbow': [
+        'lateral epicondylitis',],
+    'Torticollis': [
+        'torticolis',],
+    'URTI': [
+        'cold', 'flu', 'upper respiratory tract infection',],
+    'UTI': [
+        'bladder infection', 'urinary tract infection',],
+    'Urethral stricture / urinary outlet obstruction': [
+        'urethral stricture/urinary outlet obstruction',],
+    'Urinary incontinence': [
+        'urine incontinence',],
+    'Urticaria': [
+        'hives',],
+    'Vaginal candidiasis': [
+        'candida', 'thrush',],
+    'Viral conjunctivitis': [
+        'pink eye', 'red eye',],
+    'Viral rhinitis / common cold': [
+        'viral rhinitis/ common cold',],
+    'Worm infestation': [
+        'helminth', 'worms',],
+}
 
 # Login required decorator
 def login_required(f):
@@ -1156,6 +1419,13 @@ DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
     </div>
     <div class="diag-section">
         <h3>Diagnoses (up to 3)</h3>
+        {# The list only standardises anything if it is easier to hit than
+           typing something of your own, so say how to hit it. #}
+        <p style="font-size:12px; color:#555; margin:0 0 8px;">
+        Suggestions come from the standard list. Type the short form
+        (<strong>HTN</strong>), the full name (<strong>hypertension</strong>)
+        or the everyday word (<strong>high blood pressure</strong>) &mdash; all
+        three find it. Anything not on the list can still be typed in full.</p>
         <datalist id="diag_suggestions"></datalist>
         <div id="diagnoses">
             {% if tx_data and tx_data.diags %}
@@ -11255,12 +11525,55 @@ def delete_receive():
 # API endpoints
 # -----------------------------------------------------------------------
 
+DIAGNOSIS_SUGGESTION_LIMIT = 10
+
+
+def _diagnosis_matches(query, limit=DIAGNOSIS_SUGGESTION_LIMIT):
+    """The standard diagnoses worth offering for what has been typed.
+
+    Ranked, because the old version returned the first ten entries in list
+    order that contained the text anywhere — so typing "cold" offered
+    "Alcohol intoxication" before "Common cold", and the standard term was
+    further away than typing one of your own.
+
+    Order: an entry whose name starts with what you typed, then one where a
+    WORD starts with it, then one that merely contains it, then the same
+    three again for its other search terms. Shorter names win ties, because
+    the short name is nearly always the everyday one.
+    """
+    q = (query or '').strip().lower()
+    if not q:
+        return []
+    # One or two letters match far too much in the middle of a word: "tb"
+    # offered GERD, because one of its search terms is "heartburn". For a
+    # query this short, only the start of a word counts.
+    loose = len(q) >= 3
+    scored = []
+    for label in DIAGNOSES_OPTIONS:
+        best = None
+        terms = [(label.lower(), 0)] + [
+            (t, 1) for t in DIAGNOSIS_SEARCH_TERMS.get(label, ())]
+        for text, offset in terms:
+            if text.startswith(q):
+                rank = 0
+            elif re.search(r'\b' + re.escape(q), text):
+                rank = 1
+            elif loose and q in text:
+                rank = 2
+            else:
+                continue
+            rank += offset
+            best = rank if best is None else min(best, rank)
+        if best is not None:
+            scored.append((best, len(label), label.lower(), label))
+    scored.sort()
+    return [label for _r, _n, _l, label in scored[:limit]]
+
+
 @app.route('/api/diagnoses', methods=['GET'])
 @login_required
 def get_diagnosis_suggestions():
-    query = request.args.get('query', '').lower()
-    matching = [d for d in DIAGNOSES_OPTIONS if query in d.lower()][:10]
-    return jsonify(matching)
+    return jsonify(_diagnosis_matches(request.args.get('query', '')))
 
 
 # These names SEED an empty database. They are not the suggestion list any
