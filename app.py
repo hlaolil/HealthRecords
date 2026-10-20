@@ -1,7 +1,9 @@
 import os
 import re
+import csv
+import io
 import requests
-from flask import Flask, request, render_template_string, jsonify, redirect, url_for, session, flash, get_flashed_messages
+from flask import Flask, request, render_template_string, jsonify, redirect, url_for, session, flash, get_flashed_messages, make_response
 from functools import wraps
 from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import ServerSelectionTimeoutError, DuplicateKeyError
@@ -1667,7 +1669,17 @@ item's AMC and the order request will replace it.</p>
         </div>
         <div>
             <label>Requested / Received By:</label>
-            <input name="issued_to" type="text" value="{{ current_user }}" required>
+            {# NOT the logged-in user. This names whoever in the department
+               asked for the stock and took it; the pharmacist issuing it is
+               recorded separately from the session. Defaulting it to the
+               person at the keyboard put the issuer's own name in the
+               receiver's column on every transfer. Previous receivers are
+               offered instead, which is quick without being untrue. #}
+            <input name="issued_to" type="text" list="receiver_suggestions"
+                   placeholder="who in the department is taking it" required>
+            <datalist id="receiver_suggestions">
+                {% for r in past_receivers %}<option value="{{ r }}">{% endfor %}
+            </datalist>
         </div>
         <div>
             <label>Note (optional):</label>
@@ -1735,7 +1747,11 @@ inflate AMC and the order request will not reorder against it.</p>
             <td>{% if r.type == 'damage' %}Loss{% else %}Issue{% endif %}</td>
             <td>{{ r.med_name }}</td>
             <td>{{ r.quantity if r.type != 'damage' else -r.quantity }}</td>
-            <td>R{{ "%.2f"|format(r.line_value if r.line_value >= 0 else -r.line_value) }}</td>
+            {# Older records, and any written before line_value existed, have to
+               fall back to quantity x price rather than break the whole page. #}
+            {% set rv = r.get('line_value') if r.get('line_value') is not none
+                        else (r.get('quantity') or 0) * (r.get('price') or 0) %}
+            <td>R{{ "%.2f"|format(rv if rv >= 0 else -rv) }}</td>
             <td>{{ r.get('department') or r.get('reason') or '-' }}</td>
             <td>{{ r.get('issued_to') or r.get('note') or '-' }}</td>
             <td>{{ r.user }}</td>
@@ -2716,6 +2732,12 @@ Signature: ______________________ &nbsp;&nbsp; Date: ______________</p>
 
 
 RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
+<style>
+  .draft-note { font-size: 12px; color: #0c5460; background: #d1ecf1;
+                border-radius: 4px; padding: 4px 8px; margin-top: 4px;
+                display: none; }
+  .draft-note.shown { display: block; }
+</style>
 <h1>Receiving</h1>
 <p>LD-HSE/NMC/HRD/6.1.3.3</p>
 {{ nav_links|safe }}
@@ -2868,6 +2890,10 @@ priced singly, leave pack size as 1.</p>
             <input name="pack_price" type="number" step="0.01" min="0" required></div>
         <div><label>Batch:</label><input name="batch" required></div>
         <div><label>Expiry Date:</label><input name="expiry_date" type="date" required></div>
+        {# The draft note belongs HERE, beside the line being typed — not on the
+           Start a Delivery form, where it was and where the user typing a line
+           would never see it. #}
+        <div id="line-draft-note" class="draft-note"></div>
     </div>
     {# FIX (Bug): the schedule dropdown used to live here, and receiving wrote it
        onto the medication. Picking the wrong option while receiving a controlled
@@ -3126,6 +3152,79 @@ document.addEventListener('DOMContentLoaded', async () => {
         el.addEventListener('change', () => fillFromMedication(el));
         el.addEventListener('blur', () => fillFromMedication(el));
     });
+
+    // A delivery line is six fields read off a box, and a twenty-line
+    // delivery is a long sitting. Losing one to a timeout or a stray click
+    // means fetching the box again. The part-typed line is kept in the
+    // browser, per tab, and cleared the moment the line is accepted.
+    var LINE_KEY = 'delivery-line-draft';
+    var LINE_POSTED = {{ (request.args.get('line_added') == '1')|tojson }};
+    var LINE_FIELDS = ['med_name', 'quantity', 'pack_size', 'pack_price',
+                       'batch', 'expiry_date'];
+
+    function lineForm() {
+        var el = document.querySelector('[name="med_name"]');
+        return el ? el.closest('form') : null;
+    }
+    function lineDraftClear() {
+        try { sessionStorage.removeItem(LINE_KEY); } catch (e) {}
+        var n = document.getElementById('line-draft-note');
+        if (n) n.className = 'draft-note';
+    }
+    function lineDraftSave() {
+        var form = lineForm();
+        if (!form) return;
+        var data = {};
+        var any = false;
+        LINE_FIELDS.forEach(function (f) {
+            var el = form.querySelector('[name="' + f + '"]');
+            if (!el) return;
+            data[f] = el.value;
+            // pack_size arrives pre-filled, so it alone is not a draft.
+            if (el.value && f !== 'pack_size') any = true;
+        });
+        try {
+            if (any) sessionStorage.setItem(LINE_KEY, JSON.stringify(data));
+            else sessionStorage.removeItem(LINE_KEY);
+        } catch (e) {}
+    }
+    function lineDraftRestore() {
+        var form = lineForm();
+        if (!form) return;
+        var d;
+        try {
+            var raw = sessionStorage.getItem(LINE_KEY);
+            d = raw ? JSON.parse(raw) : null;
+        } catch (e) { d = null; }
+        if (!d) return;
+        LINE_FIELDS.forEach(function (f) {
+            var el = form.querySelector('[name="' + f + '"]');
+            if (el && d[f]) el.value = d[f];
+        });
+        var n = document.getElementById('line-draft-note');
+        if (n) {
+            n.textContent = 'This is the line you had started. Nothing was lost.';
+            n.className = 'draft-note shown';
+        }
+    }
+
+    // BUG (mine): this used to look for the words "units received onto" in the
+    // page text to decide whether a line had posted. document.body.textContent
+    // includes the text of <script> elements, so the sentence in THIS comment's
+    // own code matched itself on every load — the draft was wiped the instant
+    // the page came back, which is the one moment it exists for. The server
+    // knows the answer, so it says so in the redirect instead of the page being
+    // asked to guess from its own prose.
+    if (LINE_POSTED) {
+        lineDraftClear();
+    } else if (lineForm()) {
+        lineDraftRestore();
+    }
+    if (lineForm()) {
+        ['input', 'change'].forEach(function (evt) {
+            lineForm().addEventListener(evt, lineDraftSave, true);
+        });
+    }
 });
 </script>
 """
@@ -3194,7 +3293,7 @@ Receiving page.</p>
         </div>
         <div>
             <label>Counted By:</label>
-            <input name="stock_receiver">
+            <input name="stock_receiver" value="{{ current_user }}">
         </div>
     </div>
     <datalist id="med_suggestions"></datalist>
@@ -3349,6 +3448,10 @@ REPORTS_TEMPLATE = CSS_STYLE + """
         {% endfor %}
     </select><br>
     <input type="submit" value="Generate Report">
+    {# Submits the same form with the same period, so the file is the report
+       you are looking at rather than a second, possibly different, query. #}
+    <button type="submit" name="export" value="csv"
+            formnovalidate>Download CSV</button>
 </form>
 {% if report_type in ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list'] and stock_data %}
 <form method="POST" action="{{ url_for('reports') }}" class="filter-form">
@@ -5693,7 +5796,11 @@ def receive():
                 flash(f'{med_name}: {quantity} units received onto {d["reference"]} '
                       f'({packs:g} x pack of {pack_size} at R{pack_price:.2f} = '
                       f'R{line_value:.2f}; unit price R{price:.4f}).')
-                return redirect(url_for('receive', delivery_id=str(d['_id'])))
+                # line_added tells the page the line really posted, so the
+                # half-typed draft can be dropped. The page must not try to
+                # work this out by reading its own text.
+                return redirect(url_for('receive', delivery_id=str(d['_id']),
+                                        line_added=1))
 
             if action == 'close':
                 d = _load_delivery(deliveries, request.form.get('delivery_id'))
@@ -7218,6 +7325,25 @@ def reports():
             else:
                 message = 'Please select a report type.'
 
+        # The download is the report on screen, built from exactly the same
+        # data — never a second query that could disagree with it.
+        if request.form.get('export') == 'csv':
+            made = _report_csv(report_type, {
+                'report_data': report_data, 'stock_data': stock_data,
+                'receive_list': receive_list, 'order_request': order_request,
+                'controlled_register': controlled_register, 'monthly': monthly,
+                'writeoffs': writeoffs, 'unmet_list': unmet_list,
+                'issues': issues, 'sick_leave': sick_leave,
+            }, is_admin=is_admin)
+            if made:
+                filename, body = made
+                resp = make_response(body)
+                resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+                resp.headers['Content-Disposition'] = \
+                    f'attachment; filename="{filename}"'
+                return resp
+            flash('That report has no table to download.')
+
         return render_template_string(
             REPORTS_TEMPLATE,
             report_type=report_type, report_data=report_data,
@@ -7550,6 +7676,149 @@ def _pager(page, page_size, total):
             'last': min(page * page_size, total)}
 
 
+
+# ---------------------------------------------------------------------------
+# CSV download.
+#
+# Every report was print-only, so anything that had to leave the pharmacy —
+# the requisition above all — was read off the screen and typed again
+# somewhere else. The figures are already computed; handing them over as a
+# file costs nothing and removes a whole re-keying job.
+#
+# Each report names its columns explicitly rather than dumping dictionary
+# keys, so the file reads the way the printed report does and does not change
+# shape whenever an internal field is added.
+# ---------------------------------------------------------------------------
+# The inventory table is the one report whose COLUMNS change with the role:
+# an admin sees Dispensed with Adjustment, Expired and Damaged beside it, while
+# a non-admin sees one honest "Issued" figure with those three already folded
+# in. The download has to follow that, for two separate reasons. Giving a
+# non-admin the admin columns would hand them figures the screen withholds; and
+# putting dispensed_effective in the same sheet as the Adjustment, Expired and
+# Damaged columns would double-count them, so the row would not reconcile.
+INVENTORY_TAIL = [
+    ('current_balance', 'Current Balance'), ('amc', 'AMC'),
+    ('unmet', 'Unmet'), ('adjusted_amc', 'Adjusted AMC'),
+    ('fill_rate', 'Fill Rate %'), ('amount_to_order', 'Amount to Order')]
+INVENTORY_HEAD = [
+    ('med_name', 'Item'), ('category', 'Category'),
+    ('beginning_balance', 'Beginning Balance'), ('received', 'Received')]
+INVENTORY_COLUMNS_ADMIN = INVENTORY_HEAD + [
+    ('dispensed', 'Dispensed'), ('adjustment', 'Adjustment'),
+    ('expired', 'Expired'), ('issued', 'To Departments'),
+    ('damaged', 'Damaged')] + INVENTORY_TAIL
+INVENTORY_COLUMNS_USER = INVENTORY_HEAD + [
+    ('dispensed_effective', 'Issued'),
+    ('issued', 'To Departments')] + INVENTORY_TAIL
+
+CSV_REPORTS = {
+    'inventory': ('Inventory Report', 'report_data', INVENTORY_COLUMNS_USER),
+    'stock_on_hand': ('Stock on Hand', 'stock_data', [
+        ('name', 'Medication'), ('balance', 'Balance'),
+        ('expiry_date', 'Expiry Date'), ('batch', 'Batch'), ('price', 'Unit Price')]),
+    'expired_list': ('Expired Stock', 'stock_data', [
+        ('name', 'Medication'), ('balance', 'Balance'),
+        ('expiry_date', 'Expiry Date'), ('batch', 'Batch'), ('price', 'Unit Price')]),
+    'near_expired_list': ('Expiring Soon', 'stock_data', [
+        ('name', 'Medication'), ('balance', 'Balance'),
+        ('expiry_date', 'Expiry Date'), ('batch', 'Batch'), ('price', 'Unit Price')]),
+    'out_of_stock_list': ('Out of Stock', 'stock_data', [
+        ('name', 'Medication'), ('balance', 'Balance'),
+        ('expiry_date', 'Expiry Date'), ('batch', 'Batch')]),
+    'sick_leave': ('Sick Leave Register', 'sick_leave', [
+        ('date', 'Date'), ('patient', 'Name'), ('company', 'Company'),
+        ('days', 'Days Given'), ('diagnoses', 'Diagnosis'),
+        ('prescriber', 'Prescriber')]),
+    'expiry_writeoffs': ('Losses', 'writeoffs', [
+        ('date', 'Date'), ('med_name', 'Item Description'), ('quantity', 'Qty'),
+        ('expiry_date', 'Expiry Date'), ('batch', 'Batch/Lot'),
+        ('line_value', 'Total Cost'), ('remarks', 'Remarks')]),
+    'internal_issues': ('Internal Issues', 'issues', [
+        ('date', 'Date'), ('med_name', 'Medication'), ('quantity', 'Qty'),
+        ('department', 'Department'), ('issued_to', 'Received By'),
+        ('line_value', 'Value'), ('user', 'Issued By')]),
+    'unmet_demand': ('Unmet Demand', 'unmet_list', [
+        ('date', 'Date'), ('med_name', 'Medication'),
+        ('quantity_requested', 'Requested'), ('patient', 'Patient')]),
+    'receive_list': ('Receipts', 'receive_list', [
+        ('date', 'Date'), ('med_name', 'Medication'), ('quantity', 'Qty'),
+        ('batch', 'Batch'), ('expiry_date', 'Expiry'), ('supplier', 'Supplier'),
+        ('invoice_number', 'Invoice'), ('line_value', 'Value')]),
+    'controlled_drug_register': ('Controlled Drug Register', 'controlled_register', [
+        ('date', 'Date'), ('med_name', 'Medication'), ('type', 'Movement'),
+        ('quantity', 'Qty'), ('balance', 'Balance'), ('patient', 'Patient'),
+        ('user', 'By')]),
+}
+
+ORDER_REQUEST_COLUMNS = [
+    ('supplier', 'Supplier'), ('med_name', 'Medication'), ('amc', 'AMC'),
+    ('balance', 'Balance on Hand'), ('mos_label', 'Months of Stock'),
+    ('shortfall', 'Shortfall (units)'), ('pack_size', 'Pack Size'),
+    ('packs', 'Packs to Order'), ('units', 'Units Received'),
+    ('pack_price', 'Price per Pack'), ('line_cost', 'Line Cost'),
+]
+
+
+def _csv_value(v):
+    """Flatten anything a report row might hold into one cell."""
+    if v is None:
+        return ''
+    if isinstance(v, (list, tuple)):
+        return '; '.join(str(x) for x in v)
+    if isinstance(v, datetime):
+        return v.strftime('%Y-%m-%d')
+    return str(v)
+
+
+def _report_csv(report_type, ctx, is_admin=False):
+    """(filename, csv text) for the report on screen, or None if it has none."""
+    if report_type == 'inventory':
+        columns = INVENTORY_COLUMNS_ADMIN if is_admin else INVENTORY_COLUMNS_USER
+        rows = ctx.get('report_data') or []
+        title = 'Inventory Report'
+    elif report_type == 'order_request':
+        order = ctx.get('order_request') or {}
+        rows = []
+        for group in order.get('groups') or []:
+            for line in group.get('lines') or []:
+                row = dict(line)
+                row['supplier'] = group.get('supplier', '')
+                rows.append(row)
+        columns = ORDER_REQUEST_COLUMNS
+        title = 'Order Request'
+    else:
+        spec = CSV_REPORTS.get(report_type)
+        if not spec:
+            return None
+        title, key, columns = spec
+        rows = ctx.get(key) or []
+
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow([label for _f, label in columns])
+    for row in rows:
+        writer.writerow([_csv_value(row.get(f)) for f, _lab in columns])
+    stamp = local_now().strftime('%Y%m%d')
+    name = title.lower().replace(' ', '-')
+    return f'{name}-{stamp}.csv', out.getvalue()
+
+
+def _past_receivers(db, limit=40):
+    """People who have taken stock for a department before.
+
+    Offered as suggestions rather than filled in: the right answer changes
+    with every transfer, so the app can shorten the typing but must not
+    choose.
+    """
+    try:
+        names = db['transactions'].distinct(
+            'issued_to', {'type': 'internal_issue',
+                          'issued_to': {'$nin': [None, '']}})
+        return sorted(names)[:limit]
+    except Exception:
+        return []
+
+
 def _new_visit_defaults(current_user):
     """What a fresh dispensing form starts with.
 
@@ -7790,12 +8059,14 @@ def internal_issue():
         return render_template_string(
             INTERNAL_ISSUE_TEMPLATE, nav_links=get_nav_links(), message=message,
             current_user=session['user']['name'],
+            past_receivers=_past_receivers(db),
             departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=recent)
     except ServerSelectionTimeoutError:
         return render_template_string(
             INTERNAL_ISSUE_TEMPLATE, nav_links=get_nav_links(),
             message='Database connection failed. Please try again later.',
             current_user=session.get('user', {}).get('name', ''),
+            past_receivers=[],
             departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=[]), 500
 
 
