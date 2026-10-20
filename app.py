@@ -3389,6 +3389,17 @@ Receiving page.</p>
         <div>
             <label>Medication Name:</label>
             <input name="med_name" id="med_name" list="med_suggestions" required>
+            {# The suggestions here are what is already on file, so a name
+               appearing as you type means the item exists and needs
+               Receiving, not adding. It is also how a near-duplicate shows
+               itself: "Pyridoxine, 025 mg" appearing while you type
+               "Pyridoxine, 25 mg" is the warning that one of them is a
+               second version of the same thing. #}
+            <p style="font-size:12px; color:#555; margin:4px 0 0;">
+            A name suggested here is <strong>already on file</strong> &mdash;
+            use Receiving to add stock to it. If something close to what you
+            are typing appears, check it is not the same item under another
+            spelling.</p>
         </div>
         <div>
             <label>Category:</label>
@@ -11117,11 +11128,16 @@ def get_diagnosis_suggestions():
     return jsonify(matching)
 
 
-# FIX (Performance): new endpoint that replaces the three copies of the
-# medication list that were previously inlined in HTML templates.
-MEDICATION_OPTIONS = [
-    # Updated 2026-10-20 from the pharmacy's own Stock on Hand
-    # listing, so the suggestions match what is actually on file.
+# These names SEED an empty database. They are not the suggestion list any
+# more: that comes from the medications collection, which already knows what
+# is on file (see _medication_names). Keeping a hand-edited list as the
+# suggestions meant editing this file whenever stock changed, and when the two
+# drifted apart the app offered names that did not exist — so a prescription
+# could be typed out in full and then fail with "item not on file". This list
+# is therefore only a fallback for a pharmacy with nothing on file yet, and it
+# does not need updating as stock changes.
+MEDICATION_SEED_NAMES = [
+    # Taken 2026-10-20 from the pharmacy's own Stock on Hand listing.
     '3HP 300/300mg',
     'ABC/3TC 600/300mg',
     'Acetylsalisylic Acid, 100 mg',
@@ -11519,12 +11535,43 @@ def get_medication_defaults():
         return jsonify({})
 
 
+def _medication_names():
+    """Every medication on file, for the name suggestions.
+
+    Asked of the medications collection rather than kept in a list here, so
+    that adding an item under Add Medication makes it suggestable everywhere
+    at once and nothing has to be edited by hand. A name that is suggested is
+    therefore a name that exists, which is the whole point: the old list could
+    offer "Morpine tabs, 10mg" long after the register had been corrected to
+    "Morphine", and the dispense only failed at the end.
+
+    Zero-balance items are included on purpose. Dispensing one records the
+    shortfall as unmet demand, which is a figure the pharmacy orders against —
+    hiding those names would quietly stop that being recorded.
+    """
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        names = db['medications'].distinct('name')
+        out = sorted((n.strip() for n in names if n and str(n).strip()),
+                     key=lambda t: t.lower())
+        # Only while nothing is on file: a brand-new pharmacy gets something
+        # to type against rather than a blank box.
+        return out or sorted(MEDICATION_SEED_NAMES, key=lambda t: t.lower())
+    except Exception as e:
+        app.logger.warning(f'medication name list unavailable: {e}')
+        # Free typing still works, and the server checks the name either way.
+        return []
+
+
 @app.route('/api/medications', methods=['GET'])
 @login_required
 def get_medication_options():
-    """Return the static medication autocomplete list as JSON.
-    Templates fetch this once and cache it in JS module scope."""
-    return jsonify(MEDICATION_OPTIONS)
+    """The medication names to suggest, as JSON.
+
+    Templates fetch this once per page load and cache it in JS module scope,
+    so a medication added in one tab appears in the next page that loads.
+    """
+    return jsonify(_medication_names())
 
 
 # FIX (Bug, regression): init_audit() must run at module level, not inside
