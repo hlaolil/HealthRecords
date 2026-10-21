@@ -1,8 +1,10 @@
 import os
 import re
 import csv
+import hmac
 import io
 import json
+import secrets
 import zipfile
 import requests
 from flask import Flask, request, render_template_string, jsonify, redirect, url_for, session, flash, get_flashed_messages, make_response
@@ -33,6 +35,116 @@ if not app.secret_key:
         "SECRET_KEY environment variable is not set. "
         "Set it to a long random string before starting the server."
     )
+
+# ---------------------------------------------------------------------
+# The session cookie itself.
+#
+# HttpOnly keeps it out of reach of any script on the page. SameSite=Lax
+# means a form on somebody else's site cannot post to this one carrying the
+# pharmacist's session — which is the whole shape of a cross-site request
+# forgery. Secure means it is never sent over plain HTTP.
+#
+# Secure is switched on by the VERCEL variable, which Vercel sets for you,
+# so the deployed app is protected and a local copy served over http still
+# works. COOKIE_SECURE=1 forces it on anywhere.
+# ---------------------------------------------------------------------
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=bool(os.environ.get('VERCEL')
+                               or os.environ.get('COOKIE_SECURE') == '1'),
+)
+
+# ---------------------------------------------------------------------
+# Cross-site request forgery.
+#
+# Every one of the 23 POST routes in this file changed data on the word of
+# a session cookie alone. A page on another site could therefore put up a
+# form aimed at this one — write off stock, delete a visit, add a user —
+# and a pharmacist who happened to be logged in would submit it by clicking
+# anything on that page. Nothing in the audit log would look unusual,
+# because as far as this app was concerned the pharmacist did it.
+#
+# The fix is the standard one: a random token, kept in the session, which
+# every state-changing request must carry back. An attacker's page can make
+# the browser send the cookie, but cannot read the token to send with it.
+#
+# The token is put into every POST form automatically, after the page is
+# rendered (see _add_csrf_field). That is deliberate: there are 43 forms
+# across 17 templates, and a scheme that depends on remembering to add a
+# line to each one is a scheme that protects 42 forms.
+# ---------------------------------------------------------------------
+CSRF_FIELD_NAME = '_csrf_token'
+CSRF_SESSION_KEY = '_csrf_token'
+CSRF_HEADER = 'X-CSRF-Token'
+CSRF_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
+_POST_FORM_TAG = re.compile(
+    rb'(<form\b[^>]*\bmethod\s*=\s*["\']post["\'][^>]*>)', re.I)
+
+
+def csrf_token():
+    """The token for this session, made on first use."""
+    token = session.get(CSRF_SESSION_KEY)
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session[CSRF_SESSION_KEY] = token
+    return token
+
+
+@app.before_request
+def _require_csrf_token():
+    """Refuse a state-changing request that does not carry the token.
+
+    Checked only when the session actually holds a token. A session that has
+    expired holds nothing, and those requests are better answered by the
+    login redirect than by a bare rejection: the pharmacist gets the login
+    page and the browser draft puts their half-finished visit back. A fresh
+    visitor posting to /login is in the same position.
+    """
+    if request.method not in CSRF_METHODS:
+        return None
+    expected = session.get(CSRF_SESSION_KEY)
+    if not expected:
+        return None
+    sent = (request.form.get(CSRF_FIELD_NAME)
+            or request.headers.get(CSRF_HEADER) or '')
+    if hmac.compare_digest(str(sent), str(expected)):
+        return None
+    app.logger.warning(
+        f'CSRF token missing or wrong on {request.method} {request.path} '
+        f'from {request.remote_addr}')
+    return render_template_string(CSRF_FAILED_TEMPLATE), 400
+
+
+app.jinja_env.globals['csrf_token'] = csrf_token
+
+
+@app.after_request
+def _add_csrf_field(response):
+    """Put the token into every POST form on the way out.
+
+    Rendered HTML rather than the templates, so no form can be forgotten and
+    a form added later is covered the day it is written.
+    """
+    try:
+        if response.direct_passthrough:
+            return response
+        if not (response.content_type or '').startswith('text/html'):
+            return response
+        body = response.get_data()
+        if b'<form' not in body:
+            return response
+        field = ('<input type="hidden" name="%s" value="%s">'
+                 % (CSRF_FIELD_NAME, csrf_token())).encode()
+        patched = _POST_FORM_TAG.sub(lambda m: m.group(1) + field, body)
+        if patched != body:
+            response.set_data(patched)
+    except Exception as e:
+        # A page that renders without the field is caught loudly by the
+        # check above; a page that does not render at all helps nobody.
+        app.logger.warning(f'CSRF field not added: {e}')
+    return response
+
 
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
 
@@ -882,7 +994,11 @@ SESSION_GUARD_JS = """
 
     function ping() {
         lastPing = Date.now();
-        fetch('/api/session-ping', {method: 'POST'})
+        var tokenMeta = document.querySelector('meta[name="csrf-token"]');
+        fetch('/api/session-ping', {
+            method: 'POST',
+            headers: tokenMeta ? {'X-CSRF-Token': tokenMeta.content} : {}
+        })
             .then(function (r) { if (!r.ok) markExpired(); })
             .catch(function () { /* offline: leave the countdown alone */ });
     }
@@ -977,6 +1093,9 @@ CSS_STYLE = """<!DOCTYPE html>
     — which is why the Medication and Quantity labels sat on top of each
     other on a real phone but not in a narrow desktop window. -#}
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{# The keep-alive ping below is a POST that is not a form, so it reads the
+   token from here instead. #}
+<meta name="csrf-token" content="{{ csrf_token() }}">
 <title>{{ page_title|default('NMC Pharmacy', true) }}</title>
 <style>
     body {
@@ -1492,6 +1611,38 @@ CSS_STYLE = """<!DOCTYPE html>
 
 # FIX (Performance): medication options are now served from a single endpoint
 # /api/medications instead of being duplicated verbatim in three HTML templates.
+CSRF_FAILED_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NMC Pharmacy</title>
+<style>
+  body { font-family: Arial, sans-serif; max-width: 640px; margin: 40px auto;
+         padding: 0 16px; color: #333; background: #f8f9fa; }
+  h1 { color: #0056b3; font-size: 22px; }
+  .box { background: #fff; border: 1px solid #dee2e6; border-radius: 8px;
+         padding: 16px; }
+  a { color: #0056b3; font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>That form could not be accepted</h1>
+<div class="box">
+<p>Nothing was saved and nothing was changed.</p>
+<p>This almost always means the page had been open for a long time, or you
+signed in again in another tab, so the form was sent with an old security
+token. It can also mean the form did not come from this app at all, which is
+exactly what the check is for.</p>
+<p><strong>Your typing is probably not lost.</strong> Sign in again, go back
+to the page you were on, and a dispensing visit or a delivery line you had
+started will offer to come back.</p>
+<p><a href="/login">Sign in again</a></p>
+</div>
+</body>
+"""
+
+
 # Templates reference MEDICATION_OPTIONS_JS which injects a small loader snippet.
 MEDICATION_OPTIONS_JS = """
 <script>
