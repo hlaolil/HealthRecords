@@ -1,3 +1,9 @@
+# Every annotation in this file is a string at runtime because of this line,
+# so none of them is ever evaluated when the app starts. That matters for a
+# deployment: a name that only exists for the type checker cannot bring the
+# pharmacy down, and the TYPE_CHECKING imports below cost nothing at import.
+from __future__ import annotations
+
 import os
 import re
 import csv
@@ -7,12 +13,28 @@ import json
 import secrets
 import zipfile
 import requests
-from flask import Flask, request, render_template_string, jsonify, redirect, url_for, session, flash, get_flashed_messages, make_response
+from flask import Flask, request, render_template, jsonify, redirect, url_for, session, flash, get_flashed_messages, make_response
 from functools import wraps
 from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import ServerSelectionTimeoutError, DuplicateKeyError
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence, cast
 from uuid import uuid4
+
+if TYPE_CHECKING:                       # imported for the checker, never at run time
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from pymongo.collection import Collection
+    from pymongo.database import Database
+
+# What comes out of Mongo, and what goes into it as a filter. Naming them
+# says the useful part — that these are documents and queries, not any old
+# dictionary — without pretending the shapes are fixed, which they are not:
+# a transaction written in 2024 has fewer fields than one written today, and
+# the code has to keep reading both.
+Doc = dict[str, Any]
+Docs = list[Doc]
+Query = dict[str, Any]
 from collections import defaultdict
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -24,7 +46,26 @@ from error_logger import init_error_logging, write_app_warning
 from bson import ObjectId
 from bson.errors import InvalidId
 
-app = Flask(__name__)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_TEMPLATES = os.path.join(_HERE, 'templates')
+app = Flask(__name__, template_folder=_TEMPLATES)
+
+# The pages are files in templates/ now, so that folder has to be deployed
+# alongside this one. Said plainly at startup, because the alternative is
+# every page answering 500 with a Jinja TemplateNotFound in the logs, which
+# is a much longer way round to the same sentence.
+#
+# The path is pinned to this file's own directory rather than left to Flask's
+# default, which is relative to the working directory: a serverless handler
+# does not necessarily run from the directory its code is in.
+if not os.path.isdir(_TEMPLATES):
+    raise RuntimeError(
+        f"The templates folder is missing: {_TEMPLATES}\n"
+        "Every page of this app is a file in it. Deploy the templates/ "
+        "directory next to app.py — on Vercel, make sure it is committed "
+        "and, if the project uses includeFiles, that templates/** is listed."
+    )
+
 init_error_logging(app)
 app.secret_key = os.getenv('SECRET_KEY')
 
@@ -82,7 +123,7 @@ _POST_FORM_TAG = re.compile(
     rb'(<form\b[^>]*\bmethod\s*=\s*["\']post["\'][^>]*>)', re.I)
 
 
-def csrf_token():
+def csrf_token() -> str:
     """The token for this session, made on first use."""
     token = session.get(CSRF_SESSION_KEY)
     if not token:
@@ -92,7 +133,7 @@ def csrf_token():
 
 
 @app.before_request
-def _require_csrf_token():
+def _require_csrf_token() -> tuple[str, int] | None:
     """Refuse a state-changing request that does not carry the token.
 
     Checked only when the session actually holds a token. A session that has
@@ -113,14 +154,14 @@ def _require_csrf_token():
     app.logger.warning(
         f'CSRF token missing or wrong on {request.method} {request.path} '
         f'from {request.remote_addr}')
-    return render_template_string(CSRF_FAILED_TEMPLATE), 400
+    return render_template('csrf_failed.html'), 400
 
 
 app.jinja_env.globals['csrf_token'] = csrf_token
 
 
 @app.after_request
-def _add_csrf_field(response):
+def _add_csrf_field(response: Response) -> Response:
     """Put the token into every POST form on the way out.
 
     Rendered HTML rather than the templates, so no form can be forgotten and
@@ -177,12 +218,12 @@ PHARMACY_UTC_OFFSET_HOURS = float(os.environ.get('PHARMACY_UTC_OFFSET', '2'))
 PHARMACY_TZ = timezone(timedelta(hours=PHARMACY_UTC_OFFSET_HOURS))
 
 
-def local_now():
+def local_now() -> datetime:
     """Wall-clock time at the pharmacy, naive, to match stored datetimes."""
     return datetime.now(timezone.utc).astimezone(PHARMACY_TZ).replace(tzinfo=None)
 
 
-def local_session():
+def local_session() -> str:
     """Which round a check done right now belongs to."""
     return 'Morning' if local_now().hour < TEMP_NOON_HOUR else 'Afternoon'
 
@@ -199,9 +240,9 @@ ACCOUNT_MAX_AGE_DAYS = 730
 # Previously a new MongoClient was created and closed on every request,
 # which is slow and defeats PyMongo's built-in connection pool.
 # -----------------------------------------------------------------------
-_mongo_client = None
+_mongo_client: MongoClient | None = None
 
-def get_mongo_client():
+def get_mongo_client() -> MongoClient:
     global _mongo_client
     if _mongo_client is None:
         mongouri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
@@ -223,7 +264,7 @@ def get_mongo_client():
 # CollectionInvalid if it already exists, which we just swallow, and
 # create_index is idempotent by definition.
 # -----------------------------------------------------------------------
-def init_db_collections():
+def init_db_collections() -> None:
     try:
         client = get_mongo_client()
         db = client['pharmacy_db']
@@ -900,7 +941,7 @@ _DIAGNOSIS_CANONICAL = {old.strip().lower(): new
                         for old, new in DIAGNOSIS_RENAMES.items()}
 
 
-def _canonical_diagnosis(name):
+def _canonical_diagnosis(name: str) -> str:
     """The name this diagnosis is called NOW.
 
     An old record says "Injury"; the list calls it "Injury, site unspecified".
@@ -913,7 +954,7 @@ def _canonical_diagnosis(name):
     return _DIAGNOSIS_CANONICAL.get(name.strip().lower(), name.strip())
 
 # Login required decorator
-def login_required(f):
+def login_required(f: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user' not in session:
@@ -929,9 +970,9 @@ def login_required(f):
 # still satisfy login_required's `if 'user' not in session` check even
 # though the user has been inactive well past the timeout.
 @app.before_request
-def enforce_session_timeout():
+def enforce_session_timeout() -> ResponseReturnValue | None:
     if 'user' not in session:
-        return  # not logged in, nothing to enforce
+        return None            # not logged in, nothing to enforce
 
     now = datetime.now(timezone.utc)
     last_active_str = session.get('last_active')
@@ -961,6 +1002,9 @@ def enforce_session_timeout():
         'change_expired_password', 'logout', 'static'
     ):
         return redirect('/change-expired-password')
+
+    return None               # nothing to enforce: carry on to the route
+
 
 # FIX (Security/XSS): escape user-controlled values before inserting into nav HTML.
 # Previously the user's display name came straight from the DB and was rendered
@@ -1038,7 +1082,7 @@ SESSION_GUARD_JS = """
 </script>
 """
 
-def get_nav_links():
+def get_nav_links() -> str:
     if 'user' in session:
         user = session['user']
         is_admin = user.get('role') == 'admin'
@@ -1076,4889 +1120,24 @@ def get_nav_links():
         </p>
         """
 
-# CSS for all templates
-CSS_STYLE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-{#- The single most important line in this file for anyone on a phone.
-
-    Without it a mobile browser does not use the phone's width to lay the
-    page out. It assumes a desktop, lays everything out at 980px, and then
-    shrinks the result to fit the screen: measured on a Pixel-class phone,
-    the dashboard came out at 0.40 scale and the dispensing page at 0.25,
-    so the 16px body text was drawn at about 4px and every tap needed a
-    pinch-zoom first. It also meant the small-screen rules below never ran,
-    because as far as the browser was concerned the window was 980px wide
-    — which is why the Medication and Quantity labels sat on top of each
-    other on a real phone but not in a narrow desktop window. -#}
-<meta name="viewport" content="width=device-width, initial-scale=1">
-{# The keep-alive ping below is a POST that is not a form, so it reads the
-   token from here instead. #}
-<meta name="csrf-token" content="{{ csrf_token() }}">
-<title>{{ page_title|default('NMC Pharmacy', true) }}</title>
-<style>
-    body {
-        font-family: Arial, sans-serif;
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 20px;
-        background-color: #f8f9fa;
-        color: #333;
-    }
-    h1 {
-        color: #0056b3;
-        text-align: center;
-        margin-bottom: 20px;
-    }
-    h2 {
-        color: #343a40;
-        margin-top: 30px;
-    }
-    h3 {
-        color: #495057;
-        margin-top: 10px;
-    }
-    .nav-links {
-        text-align: center;
-        margin-bottom: 20px;
-        font-size: 16px;
-        position: sticky;
-        top: 0;
-        background-color: #f8f9fa;
-        z-index: 100;
-        padding: 10px 0;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        border-bottom: 1px solid #dee2e6;
-    }
-    .nav-links a {
-        color: #0056b3;
-        text-decoration: none;
-        margin: 0 10px;
-        font-weight: bold;
-    }
-    .nav-links a:hover {
-        text-decoration: underline;
-        color: #003d80;
-    }
-    form {
-        background-color: #fff;
-        padding: 20px;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        max-width: 900px;
-        margin: 0 auto 20px;
-    }
-    /* FIX (Bug): the generic `form` rule above applies to every <form> on
-       the page, including the tiny inline delete forms inside table action
-       cells (e.g. <form class="delete-btn" style="display:inline;">).
-       That gave each delete form a 20px padded card with its own shadow,
-       rendering as an oversized red block around the Delete button instead
-       of a normal-sized button. Action-cell forms opt back out of all of
-       that card styling here. */
-    .action-buttons form {
-        background-color: transparent;
-        padding: 0;
-        border-radius: 0;
-        box-shadow: none;
-        max-width: none;
-        margin: 0;
-    }
-    .dispense-form,
-    .receive-form,
-    .add-medication-form,
-    .edit-medication-form {
-        display: block;
-    }
-    .common-section {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 15px;
-        margin-bottom: 20px;
-    }
-    .med-section, .diag-section {
-        margin-bottom: 20px;
-    }
-    #medications, #diagnoses {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 15px;
-    }
-    .med-row, .diag-row {
-        display: grid;
-        grid-template-columns: 1fr 1fr auto;
-        gap: 10px;
-        margin-bottom: 10px;
-        padding: 10px;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        align-items: end;
-    }
-    .diag-row > div:first-of-type {
-        grid-column: span 2;
-    }
-    .med-row label, .diag-row label {
-        display: block;
-        margin: 0 0 5px;
-        font-weight: bold;
-    }
-    .med-row input, .diag-row input {
-        width: 100%;
-        padding: 8px;
-        border: 1px solid #ced4da;
-        border-radius: 4px;
-        box-sizing: border-box;
-    }
-    form label {
-        display: block;
-        margin: 10px 0 5px;
-        font-weight: bold;
-    }
-    form input, form select, form datalist {
-        width: 100%;
-        padding: 8px;
-        margin-bottom: 10px;
-        border: 1px solid #ced4da;
-        border-radius: 4px;
-        box-sizing: border-box;
-    }
-    .form-buttons {
-        text-align: center;
-    }
-    form input[type="submit"],
-    form button {
-        background-color: #0056b3;
-        color: #fff;
-        border: none;
-        padding: 12px 26px;
-        border-radius: 6px;
-        cursor: pointer;
-        margin: 10px 8px;
-        display: inline-block;
-        font-weight: bold;
-        font-size: 15px;
-        transition: all 0.25s ease-in-out;
-        box-shadow: 0 3px 6px rgba(0,0,0,0.15);
-    }
-    form input[type="submit"]:hover,
-    form button:hover {
-        background-color: #003d80;
-        transform: translateY(-2px);
-        box-shadow: 0 5px 10px rgba(0,0,0,0.2);
-    }
-    form input[type="submit"]:active,
-    form button:active {
-        transform: scale(0.97);
-        box-shadow: 0 2px 4px rgba(0,0,0,0.15);
-    }
-    .action-buttons {
-        /* FIX (UX): this class is applied to the <td> containing Edit/Delete.
-           It previously had no layout rules of its own, so the edit <a> and
-           the delete <form style="display:inline;"> sat flush against each
-           other with their buttons' margin/padding forced to 0 below —
-           making accidental delete clicks on a misaimed edit click likely,
-           especially on touch. Flex + gap gives consistent, deliberate
-           spacing regardless of markup (a/form/span mix). */
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
-    }
-    .action-buttons a,
-    .action-buttons form {
-        display: inline-flex;
-    }
-    .action-buttons button {
-        padding: 6px 14px;
-        border-radius: 4px;
-        font-size: 13px;
-        font-weight: 600;
-        border: none;
-        cursor: pointer;
-        transition: all 0.2s ease;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    .action-buttons button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 3px 6px rgba(0,0,0,0.2);
-    }
-    .action-buttons .delete-btn {
-        background-color: #dc3545;
-        color: #fff;
-    }
-    .action-buttons .delete-btn:hover {
-        background-color: #c82333;
-        color: #fff;
-    }
-    .action-buttons .edit-btn {
-        background-color: #ffc107;
-        color: #212529;
-    }
-    .action-buttons .edit-btn:hover {
-        background-color: #e0a800;
-    }
-    .action-buttons .view-btn {
-        background-color: #28a745;
-        color: white;
-    }
-    .action-buttons .view-btn:hover {
-        background-color: #218838;
-    }
-    form button.delete-btn {
-        /* FIX (UX): no longer zeroes out margin/padding — that was the
-           direct cause of the delete button having no spacing buffer
-           around it. Sizing now comes from .action-buttons button above;
-           this rule only keeps delete's distinct red color/shadow. */
-        background-color: #dc3545 !important;
-        color: #fff !important;
-        font-size: 13px !important;
-        border-radius: 4px !important;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
-        transition: all 0.2s ease !important;
-    }
-    form button.delete-btn:hover {
-        background-color: #c82333 !important;
-        transform: translateY(-2px) !important;
-        box-shadow: 0 3px 6px rgba(0,0,0,0.2) !important;
-    }
-    /* Every table sits in one of these. A register that mirrors a paper
-       form cannot drop columns to fit — Dispensing has 19 and the Key
-       Register 16, each one on the official form — so the register scrolls
-       sideways inside its own box and the page does not. The form above it,
-       the buttons and the nav stay put; only the register moves.
-
-       It has to be a wrapper rather than making the table itself scroll:
-       a table set to display:block stops stretching to fill its space, so
-       the 7-column Audit Log shrank to 556px of a 1200px page. */
-    .table-scroll {
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        max-width: 100%;
-        /* Shadows at the edges, so it reads as "there is more this way"
-           rather than as the end of the table. They are painted on the
-           scrolling content, so they appear only on the side with more. */
-        background-image:
-            linear-gradient(to right, #f8f9fa 30%, rgba(248,249,250,0)),
-            linear-gradient(to left, #f8f9fa 30%, rgba(248,249,250,0)),
-            linear-gradient(to right, rgba(0,0,0,.16), rgba(0,0,0,0)),
-            linear-gradient(to left, rgba(0,0,0,.16), rgba(0,0,0,0));
-        background-position: 0 0, 100% 0, 0 0, 100% 0;
-        background-repeat: no-repeat;
-        background-size: 40px 100%, 40px 100%, 14px 100%, 14px 100%;
-        background-attachment: local, local, scroll, scroll;
-    }
-
-    table {
-        width: 100%;
-        border-collapse: collapse;
-        background-color: #fff;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        margin-top: 20px;
-    }
-    table th, table td {
-        padding: 12px;
-        text-align: left;
-        border: 1px solid #dee2e6;
-    }
-    table th {
-        background-color: #0056b3;
-        color: #fff;
-        font-weight: bold;
-    }
-    table tr:nth-child(even) {
-        background-color: #f8f9fa;
-    }
-    table tr:hover {
-        background-color: #e0e7f5;
-    }
-    .expired {
-        background-color: #f8d7da !important;
-        color: #721c24 !important;
-    }
-    .out-of-stock {
-        background-color: #e3f2fd !important;
-        color: #1976d2 !important;
-    }
-    .close-to-expire {
-        background-color: #fff3cd !important;
-        color: #856404 !important;
-    }
-    .normal {
-        background-color: inherit !important;
-        color: inherit !important;
-    }
-    .message {
-        padding: 10px;
-        margin-bottom: 20px;
-        border-radius: 4px;
-        text-align: center;
-        font-weight: bold;
-    }
-    .message.success {
-        background-color: #d4edda;
-        color: #155724;
-    }
-    .message.partial {
-        background-color: #fff3cd;
-        color: #856404;
-        border: 1px solid #ffeeba;
-    }
-    .message.error {
-        background-color: #f8d7da;
-        color: #721c24;
-    }
-    /* Session guard banner, fixed so it is seen wherever the page is scrolled. */
-    .session-warn { display: none; }
-    .session-warn.shown {
-        display: block;
-        position: fixed;
-        top: 0; left: 0; right: 0;
-        z-index: 9999;
-        padding: 12px 16px;
-        text-align: center;
-        font-weight: bold;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.2);
-    }
-    .session-warn.session-soon { background-color: #fff3cd; color: #856404; }
-    .session-warn.session-expired { background-color: #f8d7da; color: #721c24; }
-    @media print {
-        .session-warn { display: none !important; }
-        /* A box that scrolls on screen must not clip on paper: the printed
-           register has to carry every column, which is the whole reason
-           these forms are printed at all. */
-        .table-scroll {
-            overflow: visible !important;
-            background-image: none !important;
-        }
-        .nav-links { position: static; }
-    }
-    .filter-form {
-        background-color: #fff;
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        margin-bottom: 20px;
-    }
-    .filter-section {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 15px;
-        align-items: end;
-    }
-    .filter-section label {
-        display: block;
-        font-weight: bold;
-        margin-bottom: 5px;
-    }
-    .filter-section input {
-        width: 100%;
-        padding: 8px;
-        border: 1px solid #ced4da;
-        border-radius: 4px;
-        box-sizing: border-box;
-    }
-    .filter-section a {
-        color: #0056b3;
-        text-decoration: none;
-        margin-left: 10px;
-    }
-    .filter-section a:hover {
-        text-decoration: underline;
-    }
-    .button-div {
-        display: flex;
-        align-items: end;
-        gap: 5px;
-    }
-    .login-form, .register-form {
-        max-width: 400px;
-        margin: 100px auto;
-        padding: 20px;
-        background-color: #fff;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        text-align: center;
-    }
-    /* ------------------------------------------------------------------
-       Screens narrower than a laptop.
-
-       The breakpoint used to be 600px, which is narrower than most phones
-       in landscape and every tablet in portrait, so a 700px-wide screen
-       got the full desktop layout squeezed into it. 820px covers a tablet
-       held upright; the second block below is for phones proper.
-
-       A register that mirrors a paper form cannot drop columns — the
-       Dispensing table has 19 and the Key Register 16, and every one of
-       them is on the official form. So the TABLE scrolls sideways inside
-       its own box instead of making the whole PAGE scroll sideways. The
-       difference matters: the form above it, the buttons and the nav stay
-       where they belong, and only the register moves under your finger.
-       ------------------------------------------------------------------ */
-    @media (max-width: 820px) {
-        body { padding: 10px; }
-        form { max-width: 100%; }
-        .common-section { grid-template-columns: 1fr; }
-        #medications, #diagnoses { grid-template-columns: 1fr; }
-        .med-row, .diag-row { grid-template-columns: 1fr; }
-        .filter-section { grid-template-columns: 1fr; }
-        table th, table td { font-size: 14px; padding: 8px; }
-
-        /* Fingers, not mice. Anything below about 44px is a mis-tap
-           waiting to happen, and the Remove buttons beside a medication
-           row were 21px high. */
-        input, select, button, input[type="submit"], .nav-links a {
-            min-height: 44px;
-        }
-        input[type="checkbox"], input[type="radio"] { min-height: 0; }
-        /* Twelve links wrapped over five rows of 44px filled the whole
-           first screen of a phone, and it is sticky, so it stayed there.
-           One swipeable row instead: same links, same tap size, a tenth of
-           the height. The edge shadows say there is more to the side, the
-           same way the registers do. */
-        .nav-links {
-            white-space: nowrap;
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-            text-align: left;
-            padding: 4px 0;
-            background-image:
-                linear-gradient(to right, #f8f9fa 30%, rgba(248,249,250,0)),
-                linear-gradient(to left, #f8f9fa 30%, rgba(248,249,250,0)),
-                linear-gradient(to right, rgba(0,0,0,.16), rgba(0,0,0,0)),
-                linear-gradient(to left, rgba(0,0,0,.16), rgba(0,0,0,0));
-            background-position: 0 0, 100% 0, 0 0, 100% 0;
-            background-repeat: no-repeat;
-            background-size: 40px 100%, 40px 100%, 14px 100%, 14px 100%;
-            background-attachment: local, local, scroll, scroll;
-        }
-        .nav-links a {
-            display: inline-block;
-            line-height: 36px;
-            min-height: 36px;
-            padding: 0 4px;
-        }
-        .form-buttons input[type="submit"],
-        .form-buttons button { width: 100%; }
-    }
-
-    /* Phones proper. */
-    @media (max-width: 480px) {
-        body { padding: 8px; }
-        h1 { font-size: 24px; }
-        h2 { font-size: 19px; margin-top: 20px; }
-        .nav-links { font-size: 15px; padding: 6px 0; }
-        .nav-links a { margin: 0 6px; }
-        table th, table td { font-size: 13px; padding: 6px; }
-    }
-
-    /* Touch devices of any width: the same mis-tap problem on a tablet. */
-    @media (pointer: coarse) {
-        input, select, button, input[type="submit"] { min-height: 44px; }
-        input[type="checkbox"], input[type="radio"] { min-height: 0; }
-    }
-</style>
-<script>
-// NEW: client-side inactivity auto-logout.
-//
-// The server already enforces a 30-minute inactivity timeout (see
-// enforce_session_timeout() / before_request in app.py), but that only
-// gets checked on the NEXT request the browser happens to make. If
-// someone leaves a form open and doesn't click anything for 30+ minutes,
-// nothing visibly happens until they finally submit — at which point
-// they're bounced to login and lose whatever they were typing.
-//
-// This timer runs entirely in the browser, independent of any server
-// request, and redirects to /login the moment 30 minutes of no mouse/
-// keyboard/touch activity has passed — so the redirect happens on its
-// own, before the user has invested time filling out a form that's
-// about to be thrown away.
-(function() {
-    // Skip entirely on the login page itself — nothing to time out.
-    if (window.location.pathname === '/login') return;
-
-    var TIMEOUT_MINUTES = 30;
-    var TIMEOUT_MS = TIMEOUT_MINUTES * 60 * 1000;
-    var timer = null;
-    var lastReset = 0;
-    var THROTTLE_MS = 1000; // ignore activity bursts within 1 second of each other
-
-    function goToLogin() {
-        window.location.href = '/login';
-    }
-
-    function resetTimer() {
-        var nowMs = Date.now();
-        if (nowMs - lastReset < THROTTLE_MS) return;
-        lastReset = nowMs;
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(goToLogin, TIMEOUT_MS);
-    }
-
-    // Any of these count as activity and push the timeout back out,
-    // matching how the server-side last_active timestamp is refreshed
-    // on every request.
-    ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart', 'click']
-        .forEach(function(evt) {
-            document.addEventListener(evt, resetTimer, { passive: true });
-        });
-
-    resetTimer();
-})();
-</script>
-</head>
-<body>
-"""
-
-# FIX (Performance): medication options are now served from a single endpoint
-# /api/medications instead of being duplicated verbatim in three HTML templates.
-CSRF_FAILED_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NMC Pharmacy</title>
-<style>
-  body { font-family: Arial, sans-serif; max-width: 640px; margin: 40px auto;
-         padding: 0 16px; color: #333; background: #f8f9fa; }
-  h1 { color: #0056b3; font-size: 22px; }
-  .box { background: #fff; border: 1px solid #dee2e6; border-radius: 8px;
-         padding: 16px; }
-  a { color: #0056b3; font-weight: bold; }
-</style>
-</head>
-<body>
-<h1>That form could not be accepted</h1>
-<div class="box">
-<p>Nothing was saved and nothing was changed.</p>
-<p>This almost always means the page had been open for a long time, or you
-signed in again in another tab, so the form was sent with an old security
-token. It can also mean the form did not come from this app at all, which is
-exactly what the check is for.</p>
-<p><strong>Your typing is probably not lost.</strong> Sign in again, go back
-to the page you were on, and a dispensing visit or a delivery line you had
-started will offer to come back.</p>
-<p><a href="/login">Sign in again</a></p>
-</div>
-</body>
-"""
-
-
-# Templates reference MEDICATION_OPTIONS_JS which injects a small loader snippet.
-MEDICATION_OPTIONS_JS = """
-<script>
-// FIX: medication list is fetched once from /api/medications instead of being
-// duplicated in every template. Results are cached in module scope.
-let _medicationOptions = null;
-let _peopleOptionsLoaded = null;
-
-// Companies and positions, from the record rather than from this file.
-async function loadPeopleOptions() {
-    if (_peopleOptionsLoaded) return _peopleOptionsLoaded;
-    _peopleOptionsLoaded = (async function () {
-        try {
-            const res = await fetch('/api/people-options');
-            if (!res.ok) return;
-            const d = await res.json();
-            if (Array.isArray(d.companies)) companyOptions = d.companies;
-            if (Array.isArray(d.positions)) positionOptions = d.positions;
-        } catch (e) { /* the boxes still take anything typed */ }
-    })();
-    return _peopleOptionsLoaded;
-}
-document.addEventListener('DOMContentLoaded', loadPeopleOptions);
-
-async function getMedicationOptions() {
-    if (_medicationOptions) return _medicationOptions;
-    try {
-        const res = await fetch('/api/medications');
-        _medicationOptions = await res.json();
-    } catch(e) {
-        console.error('Failed to load medication list', e);
-        _medicationOptions = [];
-    }
-    return _medicationOptions;
-}
-</script>
-"""
-
-DISPENSE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
-<style>
-  .patient-recall { font-size: 12px; color: #856404; background: #fff3cd;
-                    border-radius: 4px; padding: 4px 8px; margin-top: 4px;
-                    display: none; }
-  .patient-recall.shown { display: block; }
-  .draft-note { font-size: 12px; color: #0c5460; background: #d1ecf1;
-                border-radius: 4px; padding: 4px 8px; margin-top: 4px;
-                display: none; }
-  .draft-note.shown { display: block; }
-</style>
-<h1>Dispensing</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-{{ nav_links|safe }}
-{% if message %}
-    <p class="message {% if message_class %}{{ message_class }}{% elif 'partial' in message|lower %}partial{% elif 'successfully' in message|lower or 'updated' in message|lower or 'deleted' in message|lower or 'restored' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
-{% endif %}
-<h2>{% if tx_data %}Edit Dispense{% else %}Dispense Medication{% endif %}</h2>
-<form method="POST" action="{{ url_for('dispense') }}" class="dispense-form">
-    {# FIX (UX): transaction_id field now has id="transaction_id_field" so
-       clearForm() can reset it, preventing a Clear → Submit from accidentally
-       updating an existing record instead of creating a new one. #}
-    <input type="hidden" name="transaction_id" id="transaction_id_field" value="{{ tx_data.transaction_id if tx_data else '' }}">
-    <div class="common-section">
-        <div>
-            <label>Patient:</label>
-            <input name="patient" id="patient" type="text" value="{{ tx_data.patient if tx_data else '' }}" {% if not tx_data %}required{% endif %}>
-            <div id="patient_recall" class="patient-recall"></div>
-            <div id="draft-note" class="draft-note"></div>
-        </div>
-        <div>
-            <label for="company">Company:</label>
-            <input id="company" name="company" list="company_suggestions" type="text" value="{{ tx_data.company if tx_data else '' }}" {% if tx_data and tx_data.company %}data-autofilled="1"{% endif %} {% if not tx_data %}required{% endif %}>
-        </div>
-        <div>
-            <label for="position">Position:</label>
-            <input id="position" name="position" list="position_suggestions" type="text" value="{{ tx_data.position if tx_data else '' }}" {% if tx_data and tx_data.position %}data-autofilled="1"{% endif %} {% if not tx_data %}required{% endif %}>
-        </div>
-        <div>
-            {# NEW: the prescription states a year of birth, not an age band.
-               Asking for the band made the dispenser convert on the spot, which
-               is both slower and lossy — and a band recorded today is wrong next
-               year, whereas a birth year stays true. Age is derived where it is
-               needed. #}
-            <label>Year of Birth (decade):</label>
-            <select name="birth_decade" {% if tx_data and tx_data.birth_decade %}data-autofilled="1"{% endif %} {% if not tx_data %}required{% endif %}>
-                <option value="">-- Select Decade --</option>
-                {% for d in birth_decades %}
-                <option value="{{ d }}" {% if tx_data and tx_data.birth_decade == d %}selected{% endif %}>{{ d }}&ndash;{{ d + 9 }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Gender:</label>
-            <select name="gender" {% if tx_data and tx_data.gender %}data-autofilled="1"{% endif %} {% if not tx_data %}required{% endif %}>
-                <option value="">-- Select --</option>
-                <option value="Male" {% if tx_data and tx_data.gender == 'Male' %}selected{% endif %}>Male</option>
-                <option value="Female" {% if tx_data and tx_data.gender == 'Female' %}selected{% endif %}>Female</option>
-            </select>
-        </div>
-        <div>
-            {# NEW: not every visit ends in sick leave. The old required
-               "number of days" field forced a 0 onto referrals and admissions,
-               which made those outcomes invisible. Outcome is now optional and
-               names what actually happened. #}
-            {# NEW: "Outpatient" replaces the empty option. An ordinary visit
-               that ends with the patient going home IS an outcome, and naming it
-               means every visit has one — which gives the other three a
-               denominator. With a blank option those visits were simply absent,
-               so a referral rate could not be worked out at all. #}
-            <label>Outcome:</label>
-            <select name="outcome" id="outcome-select" {% if not tx_data %}required{% endif %}
-                    onchange="toggleOutcomeDays()">
-                {% for opt in ['Outpatient', 'Sick leave', 'Referral', 'Admission'] %}
-                <option value="{{ opt }}" {% if (tx_data and tx_data.outcome == opt) or (not tx_data and opt == form_defaults.outcome) %}selected{% endif %}>{{ opt }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        {# Days apply to sick leave only, so the field is shown only then. It
-           starts hidden and is revealed by the script, EXCEPT when editing a
-           record that already carries sick leave — then it must be visible
-           immediately, before any script runs, or the days look lost. #}
-        <div id="outcome-days-field"
-             {% if not (tx_data and tx_data.outcome == 'Sick leave') %}style="display:none;"{% endif %}>
-            <label>Days of Sick Leave:</label>
-            <input name="outcome_days" id="outcome-days-input" type="number" min="0"
-                   value="{{ tx_data.outcome_days if tx_data and tx_data.outcome_days else '' }}"
-                   placeholder="number of days">
-        </div>
-        <div>
-            <label>Prescriber (Doctor):</label>
-            {# From the staff roster, not written in here: see STAFF_SEED. #}
-            <select name="prescriber" {% if not tx_data %}required{% endif %}>
-                <option value="">-- Select Doctor --</option>
-                {% for p in prescribers %}
-                    <option value="{{ p }}" {% if tx_data and tx_data.prescriber == p %}selected{% endif %}>{{ p }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Dispenser (Issuer):</label>
-            {# From the staff roster, not written in here: see STAFF_SEED.
-               The roster is edited on the key register page; this form is
-               used all day and does not need a link to it. #}
-            <select name="dispenser" {% if not tx_data %}required{% endif %}>
-                <option value="">-- Select Issuer --</option>
-                {% for d in dispensers %}
-                    {# Pre-selects whoever is logged in when their name is one of
-                       the issuers, which it normally is. Falls back to the prompt
-                       when it is not, rather than quietly picking somebody. #}
-                    <option value="{{ d }}" {% if (tx_data and tx_data.dispenser == d) or (not tx_data and d == form_defaults.dispenser) %}selected{% endif %}>{{ d }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Date:</label>
-            <input name="date" type="date" value="{{ tx_data.date if tx_data else form_defaults.date }}" max="{{ form_defaults.date }}" {% if not tx_data %}required{% endif %}>
-        </div>
-    </div>
-    <div class="diag-section">
-        <h3>Diagnoses (up to 3)</h3>
-        {# The list only standardises anything if it is easier to hit than
-           typing something of your own, so say how to hit it. #}
-        <p style="font-size:12px; color:#555; margin:0 0 8px;">
-        Suggestions come from the standard list. Type the short form
-        (<strong>HTN</strong>), the full name (<strong>hypertension</strong>)
-        or the everyday word (<strong>high blood pressure</strong>) &mdash; all
-        three find it. Anything not on the list can still be typed in full.</p>
-        <datalist id="diag_suggestions"></datalist>
-        <div id="diagnoses">
-            {% if tx_data and tx_data.diags %}
-                {% for d in tx_data.diags %}
-                    <div class="diag-row">
-                        <div>
-                            <label>Diagnosis:</label>
-                            <input name="diagnoses" list="diag_suggestions" type="text" class="diag-input" value="{{ d }}" {% if loop.first %}required{% endif %}>
-                        </div>
-                        <div>
-                            <button type="button" onclick="removeDiagRow(this)">Remove</button>
-                        </div>
-                    </div>
-                {% endfor %}
-            {% else %}
-                <div class="diag-row">
-                    <div>
-                        <label>Diagnosis:</label>
-                        <input name="diagnoses" list="diag_suggestions" type="text" class="diag-input" required>
-                    </div>
-                    <div>
-                        <button type="button" onclick="removeDiagRow(this)">Remove</button>
-                    </div>
-                </div>
-            {% endif %}
-        </div>
-        <button type="button" onclick="addDiagRow()">Add Diagnosis</button>
-    </div>
-    <div class="med-section">
-        <h3>Medications (up to 12)</h3>
-        <datalist id="med_suggestions"></datalist>
-        <div id="medications">
-            {% if tx_data and tx_data.meds %}
-                {% for med in tx_data.meds %}
-                    <div class="med-row">
-                        <div>
-                            <label>Medication:</label>
-                            <input name="med_names" list="med_suggestions" class="med-input" value="{{ med[0] }}">
-                        </div>
-                        <div>
-                            <label>Quantity:</label>
-                            <input name="quantities" type="number" min="1" value="{{ med[1] }}">
-                        </div>
-                        <div>
-                            <button type="button" onclick="removeRow(this)">Remove</button>
-                        </div>
-                    </div>
-                {% endfor %}
-            {% else %}
-                <div class="med-row">
-                    <div>
-                        <label>Medication:</label>
-                        <input name="med_names" list="med_suggestions" class="med-input" required>
-                    </div>
-                    <div>
-                        <label>Quantity:</label>
-                        <input name="quantities" type="number" min="1" required>
-                    </div>
-                    <div>
-                        <button type="button" onclick="removeRow(this)">Remove</button>
-                    </div>
-                </div>
-            {% endif %}
-        </div>
-        <button type="button" onclick="addRow()">Add Medication</button>
-    </div>
-    <div class="form-buttons">
-        <input type="submit" value="{% if tx_data %}Update{% else %}Dispense{% endif %}">
-        <button type="button" onclick="clearForm()">Clear Form</button>
-    </div>
-    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
-    <input type="hidden" name="search" value="{{ search or '' }}">
-    <datalist id="company_suggestions"></datalist>
-    <datalist id="position_suggestions"></datalist>
-</form>
-<hr>
-<h3>Dispense Transactions</h3>
-
-{% if window_defaulted %}
-<p class="message" style="font-size:13px;">Showing <strong>this month</strong> by
-default. Set a date range to look further back, or use the search box &mdash; a
-search looks across all records, not just this month.</p>
-{% endif %}
-{% macro pagebar(pager, endpoint, start_date, end_date, search, unit) %}
-{% if pager.total %}
-<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:10px 0;">
-    <span style="font-size:13px;">Showing {{ pager.first }}&ndash;{{ pager.last }} of {{ pager.total }} {{ unit }}</span>
-    {% if pager.pages > 1 %}
-    {% if pager.has_prev %}
-        <a href="{{ url_for(endpoint, page=1, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">&laquo; First</button></a>
-        <a href="{{ url_for(endpoint, page=pager.page-1, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">&lsaquo; Previous</button></a>
-    {% endif %}
-    <span style="font-size:13px;">Page {{ pager.page }} of {{ pager.pages }}</span>
-    {% if pager.has_next %}
-        <a href="{{ url_for(endpoint, page=pager.page+1, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">Next &rsaquo;</button></a>
-        <a href="{{ url_for(endpoint, page=pager.pages, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">Last &raquo;</button></a>
-    {% endif %}
-    {% endif %}
-</div>
-{% endif %}
-{% endmacro %}
-
-<form method="GET" action="{{ url_for('dispense') }}" class="filter-form">
-    <div class="filter-section">
-        <div>
-            <label>Start Date:</label>
-            {# BUG: this showed the month the APP had chosen when no range was
-               asked for. The route drops that default as soon as there is a
-               search — so a search really does look at everything — but the
-               form submitted the dates sitting in these boxes along with it,
-               which put the month straight back on. The promise under the
-               heading was true on the first load and a lie from the second.
-               So when the window was defaulted, these start empty. #}
-            <input name="start_date" type="date"
-                   value="{% if not window_defaulted %}{{ start_date or '' }}{% endif %}">
-        </div>
-        <div>
-            <label>End Date:</label>
-            <input name="end_date" type="date"
-                   value="{% if not window_defaulted %}{{ end_date or '' }}{% endif %}">
-        </div>
-        <div>
-            <label>Search:</label>
-            <input name="search" type="text" value="{{ search or '' }}" placeholder="Search patient, medication, company...">
-        </div>
-        <div class="button-div">
-            <input type="submit" value="Filter">
-            {# Same form, so the download obeys the dates and search already
-               set rather than asking for them a second time. #}
-            <button type="submit" name="export" value="csv" formnovalidate>Download CSV</button>
-            <a href="{{ url_for('dispense') }}">Clear</a>
-        </div>
-    </div>
-</form>
-<p style="font-size:13px;">The download is every visit the filter above
-matches, not just this page &mdash; one row per medication, with the visit's
-details repeated down its rows.</p>
-{{ pagebar(pager, 'dispense', '' if window_defaulted else start_date, '' if window_defaulted else end_date, search, unit) }}
-<div class="table-scroll"><table>
-    <thead>
-        <tr>
-            <th>#</th>
-            <th>Date</th>
-            <th>Patient</th>
-            <th>Company</th>
-            <th>Position</th>
-            <th>Gender</th>
-            <th>Born</th>
-            <th>Timestamp</th>
-            <th>User</th>
-            <th>Diagnoses</th>
-            <th>Prescriber</th>
-            <th>Dispenser</th>
-            <th>Outcome</th>
-            <th>Medication</th>
-            <th>Quantity</th>
-            <th>Unit Cost</th>
-            <th>Line Cost</th>
-            <th>Visit Cost</th>
-            <th>Actions</th>
-        </tr>
-    </thead>
-    <tbody>
-        {# FIX (UX/Correctness): Group rows by transaction_id in Python (see route)
-           instead of relying on consecutive ordering in the template.
-           tx_groups is a list of (transaction_id, [rows]) in display order. #}
-        {% set tx_number = namespace(value=1) %}
-        {% for group_id, group_rows in tx_groups %}
-            {% for t in group_rows %}
-                {% if loop.first %}
-                <tr style="border-top: 3px double #0056b3;">
-                    <td rowspan="{{ group_rows|length }}"
-                        style="vertical-align: middle; font-weight: bold; font-size: 1.1em; color: #0056b3;">
-                        {{ tx_number.value }}.
-                        {% set tx_number.value = tx_number.value + 1 %}
-                    </td>
-                {% else %}
-                <tr>
-                {% endif %}
-                    <td>{{ t.date }}</td>
-                    <td>
-                        {% if session['user']['role'] == 'viewer' %}
-                            ***HIDDEN***
-                        {% else %}
-                            {{ t.patient }}
-                        {% endif %}
-                    </td>
-                    <td>{{ t.company }}</td>
-                    <td>{{ t.position }}</td>
-                    <td>{{ t.gender }}</td>
-                    <td>{% if t.get('birth_decade') %}{{ t.birth_decade }}&ndash;{{ t.birth_decade + 9 }}{% else %}{{ t.get('birth_year') or t.get('age_group') or '-' }}{% endif %}</td>
-                    <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-                    <td>{{ t.user }}</td>
-                    <td>{{ t.diagnoses | join(', ') if t.diagnoses else '' }}</td>
-                    <td>{{ t.prescriber }}</td>
-                    <td>{{ t.dispenser }}</td>
-                    <td>{{ t.get('outcome') or '-' }}{% if t.get('outcome_days') %} ({{ t.outcome_days }}d){% endif %}</td>
-                    <td>{{ t.med_name }}</td>
-                    <td>{{ t.quantity }}</td>
-                    <td>{% if t.get('price') %}R{{ "%.4f"|format(t.price) }}{% else %}&ndash;{% endif %}</td>
-                    <td>{% if t.get('price') %}R{{ "%.2f"|format(t.get('line_value') if t.get('line_value') is not none else t.quantity * t.price) }}{% else %}&ndash;{% endif %}</td>
-                    {% if loop.first %}
-                    <td rowspan="{{ group_rows|length }}" style="vertical-align: middle; font-weight: bold;">
-                        {% set vc = namespace(v=0, known=true) %}
-                        {% for row in group_rows %}
-                            {% if row.get('price') %}
-                                {% set vc.v = vc.v + (row.get('line_value') if row.get('line_value') is not none else row.quantity * row.price) %}
-                            {% else %}
-                                {% set vc.known = false %}
-                            {% endif %}
-                        {% endfor %}
-                        R{{ "%.2f"|format(vc.v) }}{% if not vc.known %}*{% endif %}
-                    </td>
-                    {% endif %}
-                    <td class="action-buttons">
-                        {% if loop.first %}
-                            {% if session['user']['role'] != 'viewer' %}
-                                <a href="{{ url_for('dispense',
-                                                    edit=t.transaction_id,
-                                                    start_date=start_date,
-                                                    end_date=end_date,
-                                                    search=search) }}">
-                                    <button type="button" class="edit-btn">Edit</button>
-                                </a>
-                            {% endif %}
-                            {% if session['user']['role'] == 'admin' %}
-                                <form class="delete-btn" method="POST"
-                                      action="{{ url_for('delete_dispense') }}"
-                                      style="display:inline;"
-                                      onsubmit="return confirm('Permanently delete this dispense transaction?\\nStock will be restored.');">
-                                    <input type="hidden" name="transaction_id" value="{{ t.transaction_id }}">
-                                    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-                                    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
-                                    <input type="hidden" name="search" value="{{ search or '' }}">
-                                    <button type="submit" class="delete-btn">Delete</button>
-                                </form>
-                            {% endif %}
-                            {% if session['user']['role'] == 'viewer' %}
-                                <span>—</span>
-                            {% endif %}
-                        {% endif %}
-                    </td>
-                </tr>
-            {% endfor %}
-        {% else %}
-        <tr><td colspan="16">No dispense transactions.</td></tr>
-        {% endfor %}
-    </tbody>
-</table></div>
-{{ pagebar(pager, 'dispense', '' if window_defaulted else start_date, '' if window_defaulted else end_date, search, unit) }}
-<script>
-let medRowCount = {{ (tx_data.meds|length if tx_data else 1) }};
-let diagRowCount = {{ (tx_data.diags|length if tx_data else 1) }};
-
-// Filled from /api/people-options, which answers with the companies and
-// positions actually on record plus the standing list below it. Written in
-// here, the two lists went stale the moment a new contractor arrived: the
-// name was not offered, so it got typed three different ways and the
-// sick-leave-by-company report split across all three.
-var companyOptions = [];
-var positionOptions = [];
-
-function addInputListener(input, type) {
-    input.addEventListener('input', async function() {
-        const query = this.value.toLowerCase();
-        let datalist, options;
-        switch(type) {
-            case 'company':
-                datalist = document.getElementById('company_suggestions');
-                options = companyOptions;
-                break;
-            case 'position':
-                datalist = document.getElementById('position_suggestions');
-                options = positionOptions;
-                break;
-            case 'medication':
-                // FIX (Performance): fetch from API instead of using inline array
-                datalist = document.getElementById('med_suggestions');
-                options = await getMedicationOptions();
-                break;
-            case 'diagnosis':
-                datalist = document.getElementById('diag_suggestions');
-                fetch(`/api/diagnoses?query=${encodeURIComponent(query)}`)
-                    .then(r => r.json())
-                    .then(suggestions => {
-                        if (suggestions.error) return;
-                        datalist.innerHTML = '';
-                        suggestions.forEach(s => {
-                            const o = document.createElement('option');
-                            o.value = s;
-                            datalist.appendChild(o);
-                        });
-                    })
-                    .catch(e => console.error('Error fetching diagnoses:', e));
-                return;
-            default:
-                return;
-        }
-        datalist.innerHTML = '';
-        if (query.length < 1) return;
-        options.filter(o => o.toLowerCase().includes(query)).forEach(s => {
-            const o = document.createElement('option');
-            o.value = s;
-            datalist.appendChild(o);
-        });
-    });
-}
-
-function addRow() {
-    if (medRowCount >= 12) { alert('Maximum 12 medications allowed.'); return; }
-    medRowCount++;
-    const container = document.getElementById('medications');
-    const newRow = document.createElement('div');
-    newRow.className = 'med-row';
-    newRow.innerHTML = `
-        <div><label>Medication:</label><input name="med_names" list="med_suggestions" class="med-input" required></div>
-        <div><label>Quantity:</label><input name="quantities" type="number" min="1" required></div>
-        <div><button type="button" onclick="removeRow(this)">Remove</button></div>
-    `;
-    container.appendChild(newRow);
-    addInputListener(newRow.querySelector('.med-input'), 'medication');
-}
-
-function removeRow(btn) {
-    btn.closest('.med-row').remove();
-    medRowCount--;
-}
-
-function addDiagRow() {
-    if (diagRowCount >= 3) { alert('Maximum 3 diagnoses allowed.'); return; }
-    diagRowCount++;
-    const container = document.getElementById('diagnoses');
-    const newRow = document.createElement('div');
-    newRow.className = 'diag-row';
-    newRow.innerHTML = `
-        <div><label>Diagnosis:</label><input name="diagnoses" list="diag_suggestions" type="text" class="diag-input"></div>
-        <div><button type="button" onclick="removeDiagRow(this)">Remove</button></div>
-    `;
-    container.appendChild(newRow);
-    addInputListener(newRow.querySelector('.diag-input'), 'diagnosis');
-}
-
-function removeDiagRow(btn) {
-    btn.closest('.diag-row').remove();
-    diagRowCount--;
-}
-
-function clearForm() {
-    // FIX (UX): also reset the hidden transaction_id so a Clear → Submit
-    // creates a new record instead of updating the previously-edited one.
-    document.getElementById('transaction_id_field').value = '';
-
-    document.querySelector('.common-section').querySelectorAll('input, select').forEach(el => el.value = '');
-
-    // Blanking everything also wiped the fields the app fills in for you, so
-    // after a successful dispense the date went empty and the issuer went
-    // back to "-- Select Issuer --". Put those back: a default that survives
-    // only until the first patient is not a default.
-    // tojson quotes and escapes these, so a name with an apostrophe in it
-    // cannot break the script.
-    Object.keys(FORM_DEFAULTS).forEach(function (n) {
-        const el = document.querySelector('.common-section [name="' + n + '"]');
-        if (el) el.value = FORM_DEFAULTS[n];
-    });
-
-    const diagContainer = document.getElementById('diagnoses');
-    while (diagContainer.children.length > 1) diagContainer.removeChild(diagContainer.lastChild);
-    diagContainer.firstElementChild.querySelectorAll('input').forEach(el => el.value = '');
-    diagRowCount = 1;
-
-    const medsContainer = document.getElementById('medications');
-    while (medsContainer.children.length > 1) medsContainer.removeChild(medsContainer.lastChild);
-    medsContainer.firstElementChild.querySelectorAll('input').forEach(el => el.value = '');
-    medRowCount = 1;
-
-    ['med_suggestions','diag_suggestions','company_suggestions','position_suggestions']
-        .forEach(id => document.getElementById(id).innerHTML = '');
-
-    // Clearing blanks the outcome select, so the days field must hide with it.
-    toggleOutcomeDays();
-    draftClear();
-    const recall = document.getElementById('patient_recall');
-    if (recall) { recall.textContent = ''; recall.className = 'patient-recall'; }
-    RECALL_FIELDS.forEach(function (pair) {
-        const el = recallField(pair[0]);
-        if (el) delete el.dataset.autofilled;
-    });
-    // The form is empty, so the lookup state has to say so too, or the next
-    // submit would stop to wait for an answer about a name nobody typed.
-    recallDetailsFor = '';
-    recallInFlightFor = null;
-}
-
-document.addEventListener('DOMContentLoaded', function() {
-    const companyInput = document.getElementById('company');
-    if (companyInput) addInputListener(companyInput, 'company');
-    const positionInput = document.getElementById('position');
-    if (positionInput) addInputListener(positionInput, 'position');
-    document.querySelectorAll('.med-input').forEach(i => addInputListener(i, 'medication'));
-    document.querySelectorAll('.diag-input').forEach(i => addInputListener(i, 'diagnosis'));
-});
-
-// ---------------------------------------------------------------------
-// Keep a draft of the form in the browser while it is being filled in.
-//
-// A dispensing visit is a lot of typing, and losing it — to a session that
-// timed out, a mis-click, a closed tab — means asking the patient everything
-// again. The draft lives in sessionStorage: it never leaves the browser, it
-// is per-tab, it goes when the tab closes, and it is cleared the moment the
-// visit is saved. Wrapped throughout, because private windows can refuse it.
-// ---------------------------------------------------------------------
-var DRAFT_KEY = 'dispense-draft';
-
-function draftRead() {
-    try {
-        var raw = sessionStorage.getItem(DRAFT_KEY);
-        return raw ? JSON.parse(raw) : null;
-    } catch (e) { return null; }
-}
-
-function draftClear() {
-    try { sessionStorage.removeItem(DRAFT_KEY); } catch (e) {}
-    var n = document.getElementById('draft-note');
-    if (n) n.className = 'draft-note';
-}
-
-function draftSave() {
-    // Never save over an edit: that form belongs to an existing record.
-    var tid = document.getElementById('transaction_id_field');
-    if (tid && tid.value) return;
-    var form = document.querySelector('.common-section');
-    if (!form) return;
-    // BUG: the draft stored the VALUES but not who put them there. The
-    // patient's details are filled in by the app and marked as the app's, so
-    // that correcting the name can refresh them. Restoring them without that
-    // mark turned them into values the app believed the user had typed — and
-    // the app never overwrites those. So after any reload or timeout, the
-    // recall looked dead for the rest of the tab: change the name and the
-    // previous patient's employer just sat there.
-    var data = {single: {}, auto: {}, meds: [], qtys: [], diags: []};
-    form.querySelectorAll('input, select').forEach(function (el) {
-        if (!el.name) return;
-        data.single[el.name] = el.value;
-        if (el.dataset.autofilled === '1') data.auto[el.name] = 1;
-    });
-    document.querySelectorAll('[name="med_names"]').forEach(function (el) {
-        data.meds.push(el.value);
-    });
-    document.querySelectorAll('[name="quantities"]').forEach(function (el) {
-        data.qtys.push(el.value);
-    });
-    document.querySelectorAll('[name="diagnoses"]').forEach(function (el) {
-        data.diags.push(el.value);
-    });
-    var anything = Object.keys(data.single).some(function (k) {
-        return k !== 'date' && k !== 'dispenser' && data.single[k];
-    }) || data.meds.some(Boolean) || data.diags.some(Boolean);
-    try {
-        if (anything) sessionStorage.setItem(DRAFT_KEY, JSON.stringify(data));
-        else sessionStorage.removeItem(DRAFT_KEY);
-    } catch (e) {}
-}
-
-function draftRestore() {
-    var tid = document.getElementById('transaction_id_field');
-    if (tid && tid.value) return;            // editing: leave it alone
-    var d = draftRead();
-    if (!d) return;
-    var form = document.querySelector('.common-section');
-    if (!form) return;
-    Object.keys(d.single || {}).forEach(function (n) {
-        var el = form.querySelector('[name="' + n + '"]');
-        if (!el || !d.single[n]) return;
-        el.value = d.single[n];
-        // Put the ownership back with the value, so a detail the app filled in
-        // is still the app's to refresh when the patient name changes.
-        if ((d.auto || {})[n]) el.dataset.autofilled = '1';
-        else delete el.dataset.autofilled;
-    });
-    while (document.querySelectorAll('[name="diagnoses"]').length < (d.diags || []).length) addDiagRow();
-    document.querySelectorAll('[name="diagnoses"]').forEach(function (el, i) {
-        if (d.diags[i]) el.value = d.diags[i];
-    });
-    while (document.querySelectorAll('[name="med_names"]').length < (d.meds || []).length) addRow();
-    document.querySelectorAll('[name="med_names"]').forEach(function (el, i) {
-        if (d.meds[i]) el.value = d.meds[i];
-    });
-    document.querySelectorAll('[name="quantities"]').forEach(function (el, i) {
-        if (d.qtys[i]) el.value = d.qtys[i];
-    });
-    var n = document.getElementById('draft-note');
-    if (n) {
-        n.textContent = 'This is the visit you had started. Nothing was lost. '
-            + 'Save it, or clear the form to start again.';
-        n.className = 'draft-note shown';
-    }
-    toggleOutcomeDays();
-}
-
-document.addEventListener('DOMContentLoaded', function () {
-    draftRestore();
-    ['input', 'change'].forEach(function (evt) {
-        document.addEventListener(evt, draftSave, true);
-    });
-});
-
-// A returning patient's employer, position, birth decade and gender are the
-// same as last time, so they are filled from that visit rather than retyped.
-//
-// The app must be able to tell its OWN fill apart from what the user typed.
-// Without that, changing the name after a first lookup left the previous
-// patient's details sitting in the form, because the fields were no longer
-// empty and so were never refreshed. That is how one patient's visit ends up
-// recorded against another's employer.
-//
-// So each field this fills is marked. On every new lookup the marked ones are
-// cleared first — including when the new name has no record at all, which is
-// the case that would otherwise leave the most convincing wrong data. Typing
-// in a field removes the mark: from then on it is the user's, and is left
-// alone.
-// Exactly what the server put on a fresh form, so clearing restores it.
-// The template renders from this same dict, so the two cannot disagree — the
-// outcome was missing from here and went blank after every saved visit, which
-// is how the second patient of the day lost the Outpatient default.
-var FORM_DEFAULTS = {{ form_defaults|tojson }};
-
-var RECALL_FIELDS = [['company', 'Company'], ['position', 'Position'],
-                     ['birth_decade', 'Birth decade'], ['gender', 'Gender']];
-var RECALL_DEBOUNCE_MS = 350;
-// The name whose details are the ones currently on screen.
-var recallDetailsFor = null;
-var recallSubmitting = false;
-// The name the details on screen were fetched for. A lookup that finishes
-// after the name has moved on again must not be allowed to paint stale
-// details over the newer ones.
-var recallInFlightFor = null;
-
-function recallField(f) {
-    return document.querySelector('.common-section [name="' + f + '"]');
-}
-
-function clearRecalled() {
-    RECALL_FIELDS.forEach(function (pair) {
-        var el = recallField(pair[0]);
-        if (el && el.dataset.autofilled === '1') {
-            el.value = '';
-            delete el.dataset.autofilled;
-        }
-    });
-}
-
-async function recallPatient() {
-    const nameEl = document.getElementById('patient');
-    const note = document.getElementById('patient_recall');
-    if (!nameEl || !note) return;
-    const name = nameEl.value.trim();
-
-    // BUG: this used to blank the four detail fields HERE, before the lookup,
-    // and that broke the page in a way nothing on screen explained. Clicking
-    // Dispense right after changing the name first blurs the name box, which
-    // runs this function, which emptied four REQUIRED fields — so the click's
-    // own submission failed validation and nothing happened at all. The user
-    // clicks Dispense and the app just sits there.
-    //
-    // So nothing is blanked on the way out any more. The details stay on
-    // screen, marked as belonging to the previous name, and are replaced when
-    // the answer arrives. Only a name that matches nobody clears them, and
-    // only once we know that for certain.
-    note.className = 'patient-recall';
-    note.textContent = '';
-    if (name.length < 3) {
-        clearRecalled();
-        recallDetailsFor = name;
-        return;
-    }
-
-    // recallInFlightFor says a lookup for this name has STARTED;
-    // recallDetailsFor says one has FINISHED and the screen reflects it. The
-    // submit guard needs the second, and conflating the two is what let a
-    // record save Palesa's name with the previous patient's employer: the
-    // guard saw the name it was waiting for and let the POST go while the
-    // answer was still on the wire.
-    recallInFlightFor = name;
-    let d;
-    try {
-        try {
-            const res = await fetch('/api/patient-lookup?name=' + encodeURIComponent(name));
-            if (!res.ok) return;
-            d = await res.json();
-        } catch (e) { return; }
-        // Typing fires several lookups, and they can come back out of order.
-        // Only the answer to the name CURRENTLY in the box may fill the form.
-        if (nameEl.value.trim() !== name) return;
-
-        // A name nobody has been seen under before: whatever the app put
-        // there belongs to someone else and has to go.
-        if (!d || !d.patient) {
-            clearRecalled();
-            return;
-        }
-
-        const filled = [];
-        RECALL_FIELDS.forEach(function (pair) {
-            const f = pair[0], label = pair[1];
-            const el = recallField(f);
-            if (!el) return;
-            // Never write into the box the cursor is sitting in. Typing the
-            // name and going straight on to Company let the answer land
-            // mid-word, so the field ended up reading
-            // "Letseng DiamondsMy Own Answer". If the user is in the field,
-            // they are answering it themselves.
-            if (document.activeElement === el) return;
-            // The app may replace what the app put there, and may fill a
-            // blank. What the user typed is theirs and is never touched.
-            if (el.dataset.autofilled !== '1' && el.value) return;
-            if (d[f]) {
-                el.value = d[f];
-                el.dataset.autofilled = '1';
-                filled.push(label);
-            } else {
-                // This patient has no record of it, so the last patient's
-                // answer must not be left standing in its place.
-                el.value = '';
-                delete el.dataset.autofilled;
-            }
-        });
-        if (filled.length) {
-            note.textContent = 'Filled from the last visit on ' +
-                (d.last_visit || 'record') + ': ' + filled.join(', ') +
-                '. Check it is the same person.';
-            note.className = 'patient-recall shown';
-            // The draft only saves itself when a field raises an event, and
-            // these were filled in by code, which raises none. Without this
-            // the draft kept the patient's NAME but not their details, so a
-            // restored visit came back half empty.
-            if (typeof draftSave === 'function') draftSave();
-        }
-    } finally {
-        // Only the newest lookup may declare the screen settled. An older one
-        // finishing late leaves the flag alone, so the submit guard keeps
-        // waiting for the one that matters.
-        if (recallInFlightFor === name) {
-            recallInFlightFor = null;
-            recallDetailsFor = name;
-        }
-    }
-}
-
-// BUG (reported twice): the lookup was bound to 'change' and 'blur' only. A
-// text input fires 'change' when the value is COMMITTED — on blur or Enter —
-// not while it is being typed. So correcting the patient name and looking
-// straight at the Company box showed the PREVIOUS patient's employer, and it
-// stayed that way until the field was left. Worse, pressing Enter to submit
-// fires change and the POST in the same breath, so the stale details could be
-// saved against the new name.
-//
-// So the lookup now also runs as the name is typed, debounced: one request
-// once the typing settles, not one per keystroke. change and blur stay, as
-// the belt to this braces — a name pasted in or picked from autofill may
-// never raise a single keystroke.
-var recallTimer = null;
-function recallSoon() {
-    if (recallTimer) clearTimeout(recallTimer);
-    recallTimer = setTimeout(recallPatient, RECALL_DEBOUNCE_MS);
-}
-
-document.addEventListener('DOMContentLoaded', function () {
-    const nameEl = document.getElementById('patient');
-    if (nameEl) {
-        // On an edit, the details already on screen are this patient's.
-        recallDetailsFor = nameEl.value.trim();
-        nameEl.addEventListener('input', recallSoon);
-        nameEl.addEventListener('change', recallPatient);
-        nameEl.addEventListener('blur', recallPatient);
-    }
-
-    // Pressing Enter in the name box fires change and submits in the same
-    // breath, so the lookup would still be in the air when the record was
-    // written — saving one patient's name against another's employer. If the
-    // details on screen have not caught up with the name, the submit waits
-    // for the lookup, and goes ahead regardless after a moment so a slow or
-    // failed lookup can never block a dispense.
-    const form = document.querySelector('form.dispense-form');
-    if (form && nameEl) {
-        form.addEventListener('submit', function (e) {
-            if (recallSubmitting) return;
-            if (recallInFlightFor === null
-                && nameEl.value.trim() === (recallDetailsFor || '')) return;
-            e.preventDefault();
-            recallSubmitting = true;
-            if (recallTimer) clearTimeout(recallTimer);
-            const settled = Promise.resolve(recallPatient()).catch(function () {});
-            const giveUp = new Promise(function (r) { setTimeout(r, 1500); });
-            Promise.race([settled, giveUp]).then(function () {
-                form.submit();
-            });
-        });
-    }
-    // Once the user edits one of these, it is theirs and is never cleared.
-    RECALL_FIELDS.forEach(function (pair) {
-        const el = recallField(pair[0]);
-        if (!el) return;
-        ['input', 'change'].forEach(function (evt) {
-            el.addEventListener(evt, function () {
-                if (el.dataset.autofilled === '1') delete el.dataset.autofilled;
-            });
-        });
-        // A field the lookup skipped because the cursor was in it, and which
-        // the user then left empty, still deserves its answer. Debounced, so
-        // leaving several empty boxes in a row costs one lookup.
-        el.addEventListener('blur', function () {
-            if (!el.value) recallSoon();
-        });
-    });
-});
-
-// Days apply to sick leave only. Clearing the box as it is hidden means a
-// number typed against Sick leave cannot be carried into a Referral by a
-// change of mind. The server enforces the same rule, so this is convenience,
-// not the control.
-function toggleOutcomeDays() {
-    const sel = document.getElementById('outcome-select');
-    const field = document.getElementById('outcome-days-field');
-    const input = document.getElementById('outcome-days-input');
-    if (!sel || !field) return;
-    const isSickLeave = sel.value === 'Sick leave';
-    field.style.display = isSickLeave ? '' : 'none';
-    if (!isSickLeave && input) input.value = '';
-}
-document.addEventListener('DOMContentLoaded', toggleOutcomeDays);
-
-{# form_saved comes from the route: it is true whenever the visit was
-   actually recorded, including a partial one. Reading the message text
-   instead left a recorded visit sitting in the form, one click away from
-   being dispensed twice. #}
-{% if form_saved %}
-    {% if not tx_data %}
-        draftClear();
-        clearForm();
-    {% endif %}
-{% endif %}
-</script>
-"""
-
-INTERNAL_ISSUE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
-<h1>Internal Issues &amp; Damage</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-{{ nav_links|safe }}
-{% if message %}
-    <p class="message {% if 'recorded' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
-{% endif %}
-
-{# NEW: stock leaves the store for reasons other than dispensing to a patient.
-   The two here are deliberately separate because they mean opposite things for
-   ordering: stock ISSUED to a department was used and must be replaced, so it
-   counts as consumption and raises AMC. Stock DAMAGED was lost and must not be
-   replaced on that account, so it is excluded from AMC exactly like expiry.
-   Recording both as one "adjustment" would make the difference invisible. #}
-
-<h2>Issue Stock to a Department</h2>
-<p style="font-size:13px;">Counts as <strong>consumption</strong>: it raises the
-item's AMC and the order request will replace it.</p>
-<form method="POST" action="{{ url_for('internal_issue') }}" class="dispense-form">
-    <input type="hidden" name="action" value="issue">
-    <div class="common-section">
-        <div>
-            <label>Department:</label>
-            <select name="department" required>
-                <option value="">-- Select Department --</option>
-                {% for d in departments %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>If Other, specify:</label>
-            <input name="department_other" type="text" placeholder="Only if Other is selected">
-        </div>
-        <div>
-            <label>Requested / Received By:</label>
-            {# NOT the logged-in user. This names whoever in the department
-               asked for the stock and took it; the pharmacist issuing it is
-               recorded separately from the session. Defaulting it to the
-               person at the keyboard put the issuer's own name in the
-               receiver's column on every transfer. Previous receivers are
-               offered instead, which is quick without being untrue. #}
-            <input name="issued_to" type="text" list="receiver_suggestions"
-                   placeholder="who in the department is taking it" required>
-            <datalist id="receiver_suggestions">
-                {% for r in past_receivers %}<option value="{{ r }}">{% endfor %}
-            </datalist>
-        </div>
-        <div>
-            <label>Note (optional):</label>
-            <input name="note" type="text" placeholder="Requisition number, remarks">
-        </div>
-    </div>
-    <h3>Items</h3>
-    <div class="table-scroll"><table>
-        <thead><tr><th>Medication</th><th>Quantity</th></tr></thead>
-        <tbody>
-        {% for i in range(6) %}
-            <tr>
-                <td><input name="med_name" list="med_suggestions" autocomplete="off" style="width:18em;"></td>
-                <td><input name="quantity" type="number" min="0" style="width:8em;"></td>
-            </tr>
-        {% endfor %}
-        </tbody>
-    </table></div>
-    <datalist id="med_suggestions"></datalist>
-    <div class="form-buttons"><input type="submit" value="Record Issue"></div>
-</form>
-
-<hr>
-<h2>Record Damaged or Lost Stock</h2>
-<p style="font-size:13px;">A <strong>loss</strong>, like expiry: the stock leaves
-the shelf but is <strong>not</strong> counted as consumption, so it does not
-inflate AMC and the order request will not reorder against it.</p>
-<form method="POST" action="{{ url_for('internal_issue') }}" class="dispense-form">
-    <input type="hidden" name="action" value="damage">
-    <div class="common-section">
-        <div>
-            <label>Medication:</label>
-            <input name="med_name" list="med_suggestions2" required autocomplete="off">
-            <datalist id="med_suggestions2"></datalist>
-        </div>
-        <div>
-            <label>Quantity Lost:</label>
-            <input name="quantity" type="number" min="1" required>
-        </div>
-        <div>
-            <label>Reason:</label>
-            <select name="reason" required>
-                <option value="">-- Select --</option>
-                {% for r in damage_reasons %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Note (optional):</label>
-            <input name="note" type="text" placeholder="Batch, circumstances">
-        </div>
-    </div>
-    <div class="form-buttons"><input type="submit" value="Record Loss"></div>
-</form>
-
-<h2>Recent Internal Issues &amp; Losses ({{ recent|length }})</h2>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Date</th><th>Type</th><th>Medication</th><th>Quantity</th><th>Value</th>
-            <th>Department / Reason</th><th>To / Note</th><th>User</th></tr>
-    </thead>
-    <tbody>
-    {% for r in recent %}
-        <tr class="{% if r.type == 'damage' %}expired{% else %}normal{% endif %}">
-            <td>{{ r.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td>{% if r.type == 'damage' %}Loss{% else %}Issue{% endif %}</td>
-            <td>{{ r.med_name }}</td>
-            <td>{{ r.quantity if r.type != 'damage' else -r.quantity }}</td>
-            {# Older records, and any written before line_value existed, have to
-               fall back to quantity x price rather than break the whole page. #}
-            {% set rv = r.get('line_value') if r.get('line_value') is not none
-                        else (r.get('quantity') or 0) * (r.get('price') or 0) %}
-            <td>R{{ "%.2f"|format(rv if rv >= 0 else -rv) }}</td>
-            <td>{{ r.get('department') or r.get('reason') or '-' }}</td>
-            <td>{{ r.get('issued_to') or r.get('note') or '-' }}</td>
-            <td>{{ r.user }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="8">Nothing recorded yet.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-<script>
-document.addEventListener('DOMContentLoaded', async function() {
-    const options = await getMedicationOptions();
-    ['med_suggestions', 'med_suggestions2'].forEach(function(id) {
-        const dl = document.getElementById(id);
-        if (!dl) { return; }
-        options.forEach(function(m) {
-            const o = document.createElement('option');
-            o.value = m;
-            dl.appendChild(o);
-        });
-    });
-});
-</script>
-"""
-
-
-LOAN_ITEMS_TEMPLATE = CSS_STYLE + """
-<style>
-  @media print { .nav-links, .no-print, form { display: none !important; } }
-  .loan-out { background-color: #fff3cd !important; }
-  .loan-overdue { background-color: #f8d7da !important; }
-  .loan-off { color: #777; }
-  .loan-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
-  /* Keep the inline status form inside its column: the page's form styling
-     is full-width and would otherwise push it out of the cell. */
-  .loan-actions { display: flex; gap: 6px; align-items: center; }
-  .loan-actions form { display: inline; margin: 0; padding: 0;
-                       background: none; box-shadow: none; }
-  .loan-actions select { width: auto; min-width: 96px; padding: 5px; margin: 0; }
-  .loan-actions button { padding: 6px 10px; font-size: 13px; margin: 0; }
-</style>
-<h1>Equipment Register</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-{{ nav_links|safe }}
-{% if message %}
-    <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
-{% endif %}
-
-<h2>Add an Item</h2>
-<p class="loan-hint">One entry per physical item. Two pairs of crutches are two
-entries, each with its own code, so you can tell which one is with which
-patient and which one keeps coming back damaged. Leave the code blank and one
-is generated for you.</p>
-<form method="POST" action="{{ url_for('loan_items') }}" class="dispense-form">
-    <input type="hidden" name="action" value="add_item">
-    <div class="common-section">
-        <div>
-            <label>Item Type:</label>
-            <select name="item_type" required>
-                {% for t in item_types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Item Code:</label>
-            <input name="item_code" type="text" maxlength="20" placeholder="auto">
-        </div>
-        <div>
-            <label>Size / Description:</label>
-            <input name="size" type="text" maxlength="40" placeholder="Adult L">
-        </div>
-        <div>
-            <label>Condition:</label>
-            <select name="condition">
-                {% for ccc in conditions %}<option value="{{ ccc }}">{{ ccc }}</option>{% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Note:</label>
-            <input name="note" type="text" maxlength="120">
-        </div>
-    </div>
-    <button type="submit">Add Item</button>
-</form>
-
-<h2>Register &mdash; {{ rows|length }} item{{ '' if rows|length == 1 else 's' }}</h2>
-<p class="loan-hint">Availability is worked out from the loan ledger, not
-stored on the item, so this table cannot disagree with what is actually out.</p>
-<div class="table-scroll"><table>
-    <tr>
-        <th>Code</th><th>Type</th><th>Size</th><th>Condition</th>
-        <th>State</th><th>With</th><th>Due</th><th>Note</th><th>Action</th>
-    </tr>
-    {% for r in rows %}
-    <tr class="{% if r.overdue %}loan-overdue{% elif r.loan %}loan-out{% endif %}">
-        <td>{{ r.code }}</td>
-        <td>{{ r.item_type }}</td>
-        <td>{{ r.size or '-' }}</td>
-        <td>{{ r.condition or '-' }}</td>
-        <td{% if r.shelf in ['Retired', 'Lost'] and not r.loan %} class="loan-off"{% endif %}>{{ r.state }}</td>
-        <td>{{ r.loan.patient_name if r.loan else '-' }}</td>
-        <td>{{ r.loan.due_date.strftime('%Y-%m-%d') if r.loan and r.loan.due_date else '-' }}</td>
-        <td>{{ r.note or '-' }}</td>
-        <td>
-            {% if not r.loan %}
-            <div class="loan-actions">
-            <form method="POST" action="{{ url_for('loan_items') }}">
-                <input type="hidden" name="action" value="set_status">
-                <input type="hidden" name="item_id" value="{{ r.id }}">
-                <select name="status">
-                    {% for s in shelf_statuses %}
-                    <option value="{{ s }}" {% if s == r.shelf %}selected{% endif %}>{{ s }}</option>
-                    {% endfor %}
-                </select>
-                <button type="submit">Set</button>
-            </form>
-            </div>
-            {% else %}
-            <span class="loan-hint">out &mdash; cannot change</span>
-            {% endif %}
-        </td>
-    </tr>
-    {% else %}
-    <tr><td colspan="9">No items yet. Add the first one above.</td></tr>
-    {% endfor %}
-</table></div>
-"""
-
-
-LOANS_TEMPLATE = CSS_STYLE + """
-<style>
-  @media print {
-    .nav-links, .no-print, form { display: none !important; }
-    body { margin: 0; }
-    @page { size: A4 landscape; margin: 10mm; }
-  }
-  .loan-overdue { background-color: #f8d7da !important; }
-  .loan-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
-  .loan-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-                gap: 12px; margin: 14px 0 20px; }
-  .loan-tile { background: #fff; border-radius: 8px; padding: 12px;
-               box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center; }
-  .loan-tile .n { font-size: 26px; font-weight: bold; display: block; }
-  .loan-tile.alert { background: #f8d7da; }
-  .loan-tile.warn { background: #fff3cd; }
-  /* The two inline forms in the Return cell inherit the page's full-width
-     form styling and spill out of the column. Keep them on one line and
-     sized to their content. */
-  .loan-actions { display: flex; gap: 6px; align-items: center; }
-  .loan-actions form { display: inline; margin: 0; padding: 0;
-                       background: none; box-shadow: none; }
-  .loan-actions select { width: auto; min-width: 80px; padding: 5px;
-                         margin: 0; }
-  .loan-actions button { padding: 6px 10px; font-size: 13px; margin: 0;
-                         white-space: nowrap; }
-</style>
-<h1>Equipment Loans</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-{{ nav_links|safe }}
-{% if message %}
-    <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
-{% endif %}
-
-<div class="loan-tiles">
-    <div class="loan-tile"><span class="n">{{ tiles.available }}</span>Available</div>
-    <div class="loan-tile {% if tiles.out %}warn{% endif %}"><span class="n">{{ tiles.out }}</span>On loan</div>
-    <div class="loan-tile {% if tiles.overdue %}alert{% endif %}"><span class="n">{{ tiles.overdue }}</span>Overdue</div>
-    <div class="loan-tile"><span class="n">{{ tiles.unusable }}</span>Damaged / Retired / Lost</div>
-</div>
-
-<div class="no-print">
-<h2>Issue an Item</h2>
-{% if available %}
-<form method="POST" action="{{ url_for('loans') }}" class="dispense-form">
-    <input type="hidden" name="action" value="issue">
-    <div class="common-section">
-        <div>
-            <label>Item:</label>
-            <select name="item_code" required>
-                {% for it in available %}
-                <option value="{{ it.item_code }}">{{ it.item_code }} &mdash; {{ it.item_type }}{% if it.size %} ({{ it.size }}){% endif %}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Patient Name:</label>
-            <input name="patient_name" type="text" maxlength="80" required>
-        </div>
-        <div>
-            <label>Contact Number:</label>
-            <input name="patient_contact" type="text" maxlength="30">
-        </div>
-        <div>
-            <label>OPD / File No:</label>
-            <input name="patient_id" type="text" maxlength="30">
-        </div>
-        <div>
-            <label>Date Issued:</label>
-            <input name="issued_date" type="date" value="{{ today }}" max="{{ today }}" required>
-        </div>
-        <div>
-            <label>Due Back:</label>
-            <input name="due_date" type="date" value="{{ default_due }}" required>
-        </div>
-        <div>
-            <label>Condition Out:</label>
-            <select name="condition_out">
-                {% for ccc in conditions %}<option value="{{ ccc }}">{{ ccc }}</option>{% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Note:</label>
-            <input name="note" type="text" maxlength="120">
-        </div>
-    </div>
-    <button type="submit">Issue</button>
-</form>
-{% else %}
-<p class="loan-hint">Nothing is available to lend. Every item is either out,
-damaged, retired or lost &mdash; or the register is empty.</p>
-{% endif %}
-</div>
-
-<h2>Currently Out &mdash; {{ out_rows|length }}</h2>
-{% if overdue_count %}
-<p class="loan-hint"><strong>{{ overdue_count }}</strong> past due. Those rows are red.</p>
-{% endif %}
-<div class="table-scroll"><table>
-    <tr>
-        <th>Item</th><th>Type</th><th>Patient</th><th>Contact</th><th>OPD No</th>
-        <th>Issued</th><th>Due</th><th>Days Out</th><th>Issued By</th>
-        <th class="no-print">Return</th>
-    </tr>
-    {% for r in out_rows %}
-    <tr class="{% if r.overdue %}loan-overdue{% endif %}">
-        <td>{{ r.item_code }}</td>
-        <td>{{ r.item_type }}</td>
-        <td>{{ r.patient_name }}</td>
-        <td>{{ r.patient_contact or '-' }}</td>
-        <td>{{ r.patient_id or '-' }}</td>
-        <td>{{ r.issued_date.strftime('%Y-%m-%d') if r.issued_date else '&ndash;'|safe }}</td>
-        <td>{{ r.due_date.strftime('%Y-%m-%d') if r.due_date else '-' }}</td>
-        <td>{{ r.days_out }}{% if r.overdue %} ({{ r.days_over }} over){% endif %}</td>
-        <td>{{ r.issued_by }}</td>
-        <td class="no-print">
-          <div class="loan-actions">
-            <form method="POST" action="{{ url_for('loans') }}">
-                <input type="hidden" name="action" value="return">
-                <input type="hidden" name="loan_id" value="{{ r.id }}">
-                <select name="condition_in">
-                    {% for ccc in conditions %}<option value="{{ ccc }}">{{ ccc }}</option>{% endfor %}
-                </select>
-                <button type="submit">Returned</button>
-            </form>
-            {% if is_admin %}
-            <form method="POST" action="{{ url_for('loans') }}"
-                  onsubmit="return confirm('Write this item off as lost? It will leave the available pool.');">
-                <input type="hidden" name="action" value="mark_lost">
-                <input type="hidden" name="loan_id" value="{{ r.id }}">
-                <button type="submit">Lost</button>
-            </form>
-            {% endif %}
-          </div>
-        </td>
-    </tr>
-    {% else %}
-    <tr><td colspan="10">Nothing is out.</td></tr>
-    {% endfor %}
-</table></div>
-
-<h2>Loan History</h2>
-<p class="loan-hint">This filter narrows the history table below. The
-&ldquo;Currently Out&rdquo; list above always shows everything that is out
-&mdash; a filtered list of what is outstanding can look empty when it is not.</p>
-<form method="GET" action="{{ url_for('loans') }}" class="filter-form no-print">
-    <div class="filter-section">
-        <div>
-            <label>Search patient, item or OPD no:</label>
-            <input name="q" type="text" value="{{ q }}">
-        </div>
-        <div>
-            <label>Status:</label>
-            <select name="status">
-                <option value="">All</option>
-                {% for s in ['Out', 'Returned', 'Lost'] %}
-                <option value="{{ s }}" {% if s == status_filter %}selected{% endif %}>{{ s }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>&nbsp;</label>
-            <button type="submit">Filter</button>
-            <button type="submit" name="export" value="csv" formnovalidate>Download CSV</button>
-            <button type="button" onclick="window.print()">Print</button>
-        </div>
-    </div>
-</form>
-<div class="table-scroll"><table>
-    <tr>
-        <th>Ref</th><th>Item</th><th>Patient</th><th>Issued</th><th>Due</th>
-        <th>Returned</th><th>Days</th><th>Out</th><th>Back</th>
-        <th>Status</th><th>By</th><th>Note</th>
-    </tr>
-    {% for r in history %}
-    <tr>
-        <td>{{ r.loan_ref }}</td>
-        <td>{{ r.item_code }}</td>
-        <td>{{ r.patient_name }}</td>
-        <td>{{ r.issued_date.strftime('%Y-%m-%d') if r.issued_date else '&ndash;'|safe }}</td>
-        <td>{{ r.due_date.strftime('%Y-%m-%d') if r.due_date else '-' }}</td>
-        <td>{{ r.returned_date.strftime('%Y-%m-%d') if r.returned_date else '-' }}</td>
-        <td>{{ r.days if r.days is not none else '-' }}</td>
-        <td>{{ r.condition_out or '-' }}</td>
-        <td>{{ r.condition_in or '-' }}</td>
-        <td>{{ r.status }}</td>
-        <td>{{ r.issued_by }}</td>
-        <td>{{ r.note or '-' }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="12">No loans match.</td></tr>
-    {% endfor %}
-</table></div>
-
-<h2>Activity by Month</h2>
-<div class="table-scroll"><table>
-    <tr><th>Month</th><th>Issued</th><th>Returned</th><th>Average Days Out</th></tr>
-    {% for r in activity %}
-    <tr>
-        <td>{{ r.label }}</td>
-        <td>{{ r.issued }}</td>
-        <td>{{ r.returned }}</td>
-        <td>{{ r.avg_days if r.avg_days is not none else '-' }}</td>
-    </tr>
-    {% endfor %}
-</table></div>
-<p class="loan-hint">Average days out counts loans by the month they came
-back, so a long loan is measured against the month it ended.</p>
-<p style="margin-top:24px;">Checked by: ____________________________
-&nbsp;&nbsp;&nbsp; Date: ____________________</p>
-"""
-
-
-KEY_REGISTER_TEMPLATE = CSS_STYLE + """
-<style>
-  @media print {
-    .nav-links, .no-print { display: none !important; }
-    body { margin: 0; }
-    @page { size: A4 landscape; margin: 8mm; }
-    table { font-size: 10px; }
-    table th, table td { padding: 3px 4px; }
-    .key-sign { min-width: 70px; }
-  }
-  .key-state { padding: 16px; border-radius: 8px; margin: 12px 0 18px;
-               font-size: 17px; }
-  .key-out { background: #fff3cd; border: 2px solid #ffc107; }
-  .key-in { background: #d4edda; border: 2px solid #28a745; }
-  .key-late { background: #f8d7da; border: 2px solid #dc3545; }
-  .key-weekend { background: #e2e3f3; border: 2px solid #6f76c9; }
-  .key-tag { display: inline-block; font-size: 12px; font-weight: bold;
-             background: #fff; border: 1px solid #999; border-radius: 10px;
-             padding: 2px 9px; margin-left: 6px; vertical-align: middle; }
-  .key-tag-warn { background: #f8d7da; border-color: #dc3545; color: #721c24; }
-  .key-roster summary, .key-edit summary { cursor: pointer; font-weight: bold;
-                                           padding: 8px 0; }
-  .key-roster { margin-top: 20px; }
-  .key-big-btn { font-size: 19px; padding: 14px 34px; margin: 6px 0 14px;
-                 cursor: pointer; }
-  .key-manual summary { cursor: pointer; font-weight: bold; padding: 8px 0;
-                        color: #555; font-size: 14px; }
-  .key-auto { font-size: 11px; color: #666; font-style: italic; }
-  .key-roster table { max-width: 820px; }
-  .key-off-roster td { background-color: #fdecea !important; }
-  .key-state strong { font-size: 21px; }
-  .key-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
-  /* Signature columns are deliberately empty: the app records names and
-     times, it does not claim anybody signed. They print as ruled space.
-     The tint is on the body cells only: on a header cell it would overpaint
-     the dark header background and hide its white text. */
-  td.key-sign { background: #fcfcfc; }
-  .key-sign { min-width: 90px; }
-  .key-overdue td { background-color: #f8d7da !important; }
-</style>
-<h1>Pharmacy Store Key Register</h1>
-<p>LD-HSE/NMC/PSKR/6.1.3.3 &nbsp;&middot;&nbsp; Revision 2 of 2018
-&nbsp;&middot;&nbsp; Responsible: SNO</p>
-{{ nav_links|safe }}
-{% if message %}
-    <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
-{% endif %}
-
-{% if open_entry %}
-<div class="key-state {% if open_entry.overdue %}key-late{% elif open_entry.weekend %}key-weekend{% else %}key-out{% endif %}">
-    The store key is <strong>OUT</strong> with
-    <strong>{{ open_entry.recipient_name }}</strong>
-    {% if open_entry.weekend %}<span class="key-tag">weekend handover</span>{% endif %}
-    {% if open_entry.off_roster %}<span class="key-tag key-tag-warn">not on the roster as in charge</span>{% endif %}
-    <br>
-    Given {{ open_entry.issued_date.strftime('%a %d %b') }} at
-    {{ open_entry.issued_time }} by {{ open_entry.pharmacist }}
-    &mdash; {{ open_entry.held_for }} ago.<br>
-    Due back {{ open_entry.due_back.strftime('%a %d %b at %H:%M') }}.
-    {% if open_entry.overdue %}<br>
-    <strong>That has passed &mdash; the key is overdue.</strong>
-    {% endif %}
-</div>
-{% else %}
-<div class="key-state key-in">
-    The store key is <strong>IN</strong> the pharmacy.
-    {% if last_return %}Last returned {{ last_return }}.{% endif %}
-</div>
-{% endif %}
-
-<div class="no-print">
-{% if open_entry %}
-<h2>Record the Key Coming Back</h2>
-{% if user_in_charge %}
-<p class="key-hint">One click. The date, the time now,
-{{ open_entry.recipient_name }} as returning officer and you as receiving
-officer and pharmacist are all taken from the record and the clock.</p>
-<form method="POST" action="{{ url_for('key_register') }}">
-    <input type="hidden" name="action" value="return_key">
-    <input type="hidden" name="entry_id" value="{{ open_entry.id }}">
-    <input type="hidden" name="returning_officer" value="{{ open_entry.recipient_name }}">
-    <input type="hidden" name="receiving_officer" value="{{ current_user }}">
-    <input type="hidden" name="return_pharmacist" value="{{ current_user }}">
-    <button type="submit" class="key-big-btn">Key Returned</button>
-</form>
-{% endif %}
-
-<details class="key-manual"{% if not user_in_charge %} open{% endif %}>
-<summary>{% if user_in_charge %}Record the return with different details{% else %}Record the return{% endif %}</summary>
-<p class="key-hint">Change the returning officer if somebody other than
-{{ open_entry.recipient_name }} is handing it back.{% if not user_in_charge %}
-Your own name is not offered as receiving officer, because you are not on the
-roster as in charge &mdash; name the officer who is taking the key back. The
-entry still records that you typed it.{% endif %}</p>
-<form method="POST" action="{{ url_for('key_register') }}" class="dispense-form">
-    <input type="hidden" name="action" value="return_key">
-    <input type="hidden" name="entry_id" value="{{ open_entry.id }}">
-    <div class="common-section">
-        <div>
-            <label>Returning Officer:</label>
-            <input name="returning_officer" type="text" maxlength="80"
-                   value="{{ open_entry.recipient_name }}" required>
-        </div>
-        <div>
-            <label>Receiving Officer:</label>
-            {% if user_in_charge %}
-            <input name="receiving_officer" type="text" maxlength="80"
-                   value="{{ current_user }}" required>
-            {% else %}
-            <select name="receiving_officer" required>
-                <option value="">-- who is receiving it? --</option>
-                {% for n in officer_names %}
-                <option value="{{ n }}">{{ n }}</option>
-                {% endfor %}
-            </select>
-            {% endif %}
-        </div>
-        <div>
-            <label>Pharmacist:</label>
-            {% if user_in_charge %}
-            <input name="return_pharmacist" type="text" maxlength="80"
-                   value="{{ current_user }}" required>
-            {% else %}
-            <select name="return_pharmacist" required>
-                <option value="">-- officer in charge --</option>
-                {% for n in officer_names %}
-                <option value="{{ n }}">{{ n }}</option>
-                {% endfor %}
-            </select>
-            {% endif %}
-        </div>
-        <div>
-            <label>Comments (optional):</label>
-            <input name="comments" type="text" maxlength="120">
-        </div>
-    </div>
-    <div class="form-buttons"><input type="submit" value="Record Return"></div>
-</form>
-</details>
-{% else %}
-<h2>The Key Is In</h2>
-<p class="key-hint">Nothing to do. When you log out, whoever logs in next is
-recorded as holding the key &mdash; you do not need to fill anything in. Use
-the form below only if somebody takes the key without logging in.</p>
-<details class="key-manual">
-<summary>Hand the key over without a login</summary>
-<p class="key-hint">Choose who is taking it and save. The date and the time now
-are filled in for you.{% if not user_in_charge %} Your own name is not offered
-as the officer in charge, because you are not on the roster as in charge &mdash;
-name the officer who actually handed the key over. The entry still records that
-you were the one who typed it.{% endif %}</p>
-<form method="POST" action="{{ url_for('key_register') }}" class="dispense-form">
-    <input type="hidden" name="action" value="issue_key">
-    <div class="common-section">
-        <div>
-            <label>Key Given To:</label>
-            <select name="recipient_name" id="key-recipient" autofocus required
-                    onchange="toggleKeyOther()">
-                <option value="">-- choose the officer in charge --</option>
-                {% for n in officer_names %}
-                <option value="{{ n }}">{{ n }}</option>
-                {% endfor %}
-                <option value="__other__">Someone else (not on the roster)</option>
-            </select>
-        </div>
-        <div id="key-other-field" style="display:none;">
-            <label>Their Name:</label>
-            <input name="recipient_other" type="text" maxlength="80"
-                   id="key-recipient-other">
-        </div>
-        <div>
-            <label>Issuing Pharmacist:</label>
-            {% if user_in_charge %}
-            <input name="pharmacist" type="text" maxlength="80"
-                   value="{{ current_user }}" required>
-            {% else %}
-            <select name="pharmacist" required>
-                <option value="">-- who handed it over? --</option>
-                {% for n in officer_names %}
-                <option value="{{ n }}">{{ n }}</option>
-                {% endfor %}
-            </select>
-            {% endif %}
-        </div>
-        <div>
-            <label>Comments (optional):</label>
-            <input name="comments" type="text" maxlength="120">
-        </div>
-    </div>
-    <div class="form-buttons"><input type="submit" value="Issue Key"></div>
-</form>
-</details>
-{% endif %}
-</div>
-
-<form method="GET" action="{{ url_for('key_register') }}" class="filter-form no-print">
-    <div class="filter-section">
-        <div>
-            <label>From:</label>
-            <input name="start_date" type="date" value="{{ start_date }}">
-        </div>
-        <div>
-            <label>To:</label>
-            <input name="end_date" type="date" value="{{ end_date }}">
-        </div>
-        <div>
-            <label>Search name:</label>
-            <input name="q" type="text" value="{{ q }}">
-        </div>
-        <div>
-            <label>&nbsp;</label>
-            <input type="submit" value="Show">
-            <button type="submit" name="export" value="csv" formnovalidate>Download CSV</button>
-            <button type="button" onclick="window.print()">Print Register</button>
-        </div>
-    </div>
-</form>
-
-{% if edit_entry %}
-<div class="key-edit no-print">
-<h2>Correct Entry &mdash; {{ edit_entry.recipient_name }},
-    {{ edit_entry.issued_date.strftime('%d %b %Y') }}</h2>
-<p class="key-hint">Put the names right where the person at the counter was not
-the officer in charge. The change and what it replaced both go to the audit log.</p>
-<form method="POST" action="{{ url_for('key_register') }}" class="dispense-form">
-    <input type="hidden" name="action" value="edit_entry">
-    <input type="hidden" name="entry_id" value="{{ edit_entry.id }}">
-    <div class="common-section">
-        <div>
-            <label>Issuing Pharmacist:</label>
-            <input name="pharmacist" type="text" maxlength="80"
-                   value="{{ edit_entry.pharmacist }}">
-        </div>
-        <div>
-            <label>Key Given To:</label>
-            <input name="recipient_name" type="text" maxlength="80"
-                   value="{{ edit_entry.recipient_name }}" list="key-officer-list">
-        </div>
-        <div>
-            <label>Time Given:</label>
-            <input name="issued_time" type="time" value="{{ edit_entry.issued_time_raw }}">
-        </div>
-        <div>
-            <label>Returning Officer:</label>
-            <input name="returning_officer" type="text" maxlength="80"
-                   value="{{ edit_entry.returning_officer or '' }}" list="key-officer-list">
-        </div>
-        <div>
-            <label>Receiving Officer:</label>
-            <input name="receiving_officer" type="text" maxlength="80"
-                   value="{{ edit_entry.receiving_officer or '' }}" list="key-officer-list">
-        </div>
-        <div>
-            <label>Pharmacist (return):</label>
-            <input name="return_pharmacist" type="text" maxlength="80"
-                   value="{{ edit_entry.return_pharmacist or '' }}" list="key-officer-list">
-        </div>
-        <div>
-            <label>Time Returned:</label>
-            <input name="returned_time" type="time" value="{{ edit_entry.returned_time_raw }}">
-        </div>
-        <div>
-            <label>Comments:</label>
-            <input name="comments" type="text" maxlength="200"
-                   value="{{ edit_entry.comments or '' }}">
-        </div>
-    </div>
-    <div class="form-buttons">
-        <input type="submit" value="Save Correction">
-        <a href="{{ url_for('key_register') }}">Cancel</a>
-    </div>
-</form>
-</div>
-<datalist id="key-officer-list">
-    {% for n in officer_names %}<option value="{{ n }}">{% endfor %}
-</datalist>
-{% endif %}
-
-<h2>Register &mdash; {{ start_date }} to {{ end_date }}</h2>
-<p class="key-hint no-print">The pharmacist signs twice &mdash; column 4 for
-the issue and column 13 for the return &mdash; and both print empty for a wet
-signature, as do the recipient's and the two officers'.<br>
-This register writes itself from who is logged in:
-when the pharmacist logs out, whoever logs in next is recorded as holding the
-key until he takes it back. One issue covers the whole absence; anybody else
-who logs in while it is out is noted against that same row as also on duty,
-rather than splitting it. Nobody has to fill a form in.<br>
-The app records the names, the times and who was logged in; it does not record
-a signature it never saw.</p>
-<div class="table-scroll"><table>
-    <thead>
-    <tr>
-        <th>Date Key given</th>
-        <th>Time</th>
-        <th>Pharmacist</th>
-        <th class="key-sign">Pharmacist signature</th>
-        <th>Recipient's Name</th>
-        <th class="key-sign">Recipient's signature</th>
-        <th>Date returned</th>
-        <th>Time</th>
-        <th>Returning officer's name</th>
-        <th class="key-sign">Returning officer's signature</th>
-        <th>Receiving officer</th>
-        <th class="key-sign">Receiving officer's signature</th>
-        <th class="key-sign">Pharmacist signature</th>
-        <th>Comments</th>
-        <th class="no-print">Entered by</th>
-        {% if is_admin %}<th class="no-print">Action</th>{% endif %}
-    </tr>
-    </thead>
-    <tbody>
-    {% for r in entries %}
-    <tr class="{% if r.overdue %}key-overdue{% elif r.off_roster %}key-off-roster{% endif %}">
-        <td>{{ r.issued_date.strftime('%Y-%m-%d') if r.issued_date else '&ndash;'|safe }}</td>
-        <td>{{ r.issued_time }}</td>
-        <td>{{ r.pharmacist }}</td>
-        <td class="key-sign">&nbsp;</td>
-        <td>{{ r.recipient_name }}</td>
-        <td class="key-sign">&nbsp;</td>
-        <td>{{ r.returned_date.strftime('%Y-%m-%d') if r.returned_date else '' }}</td>
-        <td>{{ r.returned_time or '' }}</td>
-        <td>{{ r.returning_officer or '' }}</td>
-        <td class="key-sign">&nbsp;</td>
-        <td>{{ r.receiving_officer or '' }}</td>
-        <td class="key-sign">&nbsp;</td>
-        {# Column 13 is the pharmacist's signature on the RETURN, the
-           counterpart of column 4 on the issue. It prints empty to be signed
-           by hand. Who oversaw the return is still recorded electronically
-           and shown in the on-screen column at the end of the row. #}
-        <td class="key-sign">&nbsp;</td>
-        <td>{{ r.comments or '' }}
-            {%- if r.also_on_duty %}{% if r.comments %}; {% endif %}also on duty: {{ r.also_on_duty|join(', ') }}{% endif %}
-            {%- if r.status == 'Out' %}<em> (still out{% if r.weekend %}, weekend{% endif %})</em>{% endif %}</td>
-        <td class="no-print">{{ r.entered_by or '-' }}
-            {%- if r.return_pharmacist %}<br><small>return overseen by {{ r.return_pharmacist }}</small>{% endif %}
-            {%- if r.auto_source %}<br><span class="key-auto">from {{ 'their login' if r.auto_source in ['login', 'away-window'] else 'shift handover' }}</span>{% endif %}
-            {%- if r.auto_closed %}<br><span class="key-auto">closed by handover</span>{% endif %}
-            {%- if r.off_roster %}<br><span class="key-tag key-tag-warn">not in charge</span>{% endif %}
-            {%- if r.corrected_by %}<br><small>corrected by {{ r.corrected_by }}</small>{% endif %}</td>
-        {% if is_admin %}
-        <td class="no-print">
-            <a href="{{ url_for('key_register', edit=r.id, start_date=start_date, end_date=end_date) }}">Edit</a>
-            <form method="POST" action="{{ url_for('key_register') }}" style="display:inline"
-                  onsubmit="return confirm('Delete this key register entry?');">
-                <input type="hidden" name="action" value="delete_entry">
-                <input type="hidden" name="entry_id" value="{{ r.id }}">
-                <button type="submit" class="delete-btn">Delete</button>
-            </form>
-        </td>
-        {% endif %}
-    </tr>
-    {% else %}
-    <tr><td colspan="{{ 16 if is_admin else 15 }}">No key movements in this period.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-<p class="key-hint">{{ entries|length }} movement{{ '' if entries|length == 1 else 's' }}
-in this period{% if still_out_count %}, {{ still_out_count }} not returned{% endif %}.</p>
-<p style="margin-top:20px;">Checked by: ______________________________
-&nbsp;&nbsp;&nbsp; Signature: __________________
-&nbsp;&nbsp;&nbsp; Date: ____________________</p>
-
-{% if is_admin %}
-<details class="key-roster no-print" id="roster">
-<summary>Staff roster &mdash; who may hold the key, prescribe and dispense</summary>
-<p class="key-hint">This is the only list of people in the app. Whoever is
-ticked here is who the <strong>Prescriber</strong> and <strong>Dispenser</strong>
-boxes on the dispensing page offer, and who is offered when the key is issued.
-Add a nurse once, here, and she appears wherever she should. Somebody can be on
-the roster, and use the app, without being in charge of the key &mdash; that is
-what that flag is for. Marking somebody <strong>inactive</strong> takes them out
-of every list at once without touching anything they have already recorded.</p>
-<div class="table-scroll"><table>
-    <tr><th>Name</th><th>Role</th><th>Key</th><th>Prescribes</th>
-        <th>Dispenses</th><th>Active</th><th>Set</th></tr>
-    {% for o in roster %}
-    <tr>
-        <td>{{ o.name }}</td>
-        <td>{{ o.role }}</td>
-        <td>{{ 'Yes' if o.in_charge else 'No' }}</td>
-        <td>{{ 'Yes' if o.prescriber else 'No' }}</td>
-        <td>{{ 'Yes' if o.dispenser else 'No' }}</td>
-        <td>{{ 'Yes' if o.active else 'No' }}</td>
-        <td>
-            <form method="POST" action="{{ url_for('key_register') }}" style="display:inline">
-                <input type="hidden" name="action" value="set_officer">
-                <input type="hidden" name="officer_id" value="{{ o._id }}">
-                <select name="in_charge" aria-label="May hold the key">
-                    <option value="yes" {% if o.in_charge %}selected{% endif %}>Key: yes</option>
-                    <option value="no" {% if not o.in_charge %}selected{% endif %}>Key: no</option>
-                </select>
-                <select name="prescriber" aria-label="May prescribe">
-                    <option value="yes" {% if o.prescriber %}selected{% endif %}>Prescribes</option>
-                    <option value="no" {% if not o.prescriber %}selected{% endif %}>Does not prescribe</option>
-                </select>
-                <select name="dispenser" aria-label="May dispense">
-                    <option value="yes" {% if o.dispenser %}selected{% endif %}>Dispenses</option>
-                    <option value="no" {% if not o.dispenser %}selected{% endif %}>Does not dispense</option>
-                </select>
-                <select name="active" aria-label="On the staff">
-                    <option value="yes" {% if o.active %}selected{% endif %}>Active</option>
-                    <option value="no" {% if not o.active %}selected{% endif %}>Inactive</option>
-                </select>
-                <button type="submit">Set</button>
-            </form>
-        </td>
-    </tr>
-    {% endfor %}
-</table></div>
-<h3>Add Someone</h3>
-<form method="POST" action="{{ url_for('key_register') }}" class="dispense-form">
-    <input type="hidden" name="action" value="add_officer">
-    <div class="common-section">
-        <div>
-            <label>Name:</label>
-            <input name="officer_name" type="text" maxlength="80" required>
-        </div>
-        <div>
-            <label>Role:</label>
-            <input name="officer_role" type="text" maxlength="40"
-                   placeholder="Nursing Officer">
-        </div>
-        <div>
-            <label>In charge of the key?</label>
-            <select name="in_charge">
-                <option value="yes">Yes &mdash; may hold the key</option>
-                <option value="no">No &mdash; may use the app only</option>
-            </select>
-        </div>
-        <div>
-            <label>May prescribe?</label>
-            <select name="prescriber">
-                <option value="yes">Yes &mdash; offered as Prescriber</option>
-                <option value="no">No</option>
-            </select>
-        </div>
-        <div>
-            <label>May dispense?</label>
-            <select name="dispenser">
-                <option value="yes">Yes &mdash; offered as Dispenser</option>
-                <option value="no">No</option>
-            </select>
-        </div>
-    </div>
-    <div class="form-buttons"><input type="submit" value="Add to Roster"></div>
-</form>
-</details>
-{% endif %}
-
-<script>
-// The recipient is chosen from the roster. "Someone else" reveals a text box
-// so an off-roster holder can still be recorded — the register has to be able
-// to say what actually happened, and the row is flagged for review.
-function toggleKeyOther() {
-    var sel = document.getElementById('key-recipient');
-    var field = document.getElementById('key-other-field');
-    var box = document.getElementById('key-recipient-other');
-    if (!sel || !field) return;
-    var other = sel.value === '__other__';
-    field.style.display = other ? '' : 'none';
-    if (box) { box.required = other; if (!other) box.value = ''; }
-}
-document.addEventListener('DOMContentLoaded', toggleKeyOther);
-</script>
-"""
-
-
-TEMPERATURE_TEMPLATE = CSS_STYLE + """
-<style>
-  /* Scoped to this page: the chart and register print, the controls do not. */
-  @media print {
-    .nav-links, .no-print, form.filter-form, .temp-entry { display: none !important; }
-    body { margin: 0; }
-    @page { size: A4 landscape; margin: 10mm; }
-  }
-  .temp-chart { border: 1px solid #ccc; padding: 8px; background: #fff; margin: 10px 0; }
-  .temp-breach { background-color: #f8d7da !important; }
-  .temp-round { max-width: 760px; margin-bottom: 8px; }
-  .temp-round-input { width: 110px; font-size: 20px; padding: 8px; text-align: center; }
-  /* The round is walked, so it is the page most likely to be done on a
-     phone. At 110px the input pushed the acceptable range off the edge,
-     and the range is the thing that tells you whether to act on the
-     reading — so on a narrow screen the box gives up the width instead. */
-  @media (max-width: 480px) {
-    .temp-round-input { width: 68px; font-size: 18px; padding: 8px 4px; }
-    .temp-round th, .temp-round td { padding: 6px 4px; font-size: 13px; }
-  }
-  .temp-round-note { font-size: 13px; margin: 4px 0 14px; }
-  .temp-already { font-size: 12px; color: #856404; }
-  .temp-manual { margin-top: 18px; }
-  .temp-manual summary { cursor: pointer; font-weight: bold; padding: 8px 0; }
-</style>
-<h1>Temperature Register</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-{{ nav_links|safe }}
-{% if message %}
-    <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
-{% endif %}
-
-<div class="temp-entry">
-<h2>{{ round_session }} Round &mdash; {{ round_date_label }}</h2>
-<p class="temp-round-note">Everything except the readings is filled in for you:
-today's date, the <strong>{{ round_session|lower }}</strong> round from the
-current time ({{ round_time }}), each room's own thermometer, and your initials.
-Type the four temperatures and save. Leave a box empty if that room was not
-checked &mdash; nothing is recorded for it.</p>
-<form method="POST" action="{{ url_for('temperature') }}" class="dispense-form">
-    <input type="hidden" name="action" value="record_round">
-    <input type="hidden" name="month" value="{{ month_value }}">
-    <input type="hidden" name="location" value="{{ location }}">
-    <div class="table-scroll"><table class="temp-round">
-        <tr>
-            {# Soft hyphens: these one-word headings set the column width on
-               a phone, where "Thermometer" alone was 92px for a single
-               digit. &shy; lets them break only when the screen is too
-               narrow; on a desktop, and in print, they read as normal. #}
-            <th>Room</th><th>Thermo&shy;meter</th><th>Temp&shy;erature &deg;C</th>
-            <th>Accept&shy;able</th><th>Already recorded</th>
-        </tr>
-        {% for r in round_rows %}
-        <tr>
-            <td><strong>{{ r.location }}</strong></td>
-            <td>{{ r.thermometer }}</td>
-            <td><input name="temp_{{ loop.index0 }}" type="number" step="0.1"
-                       class="temp-round-input" inputmode="decimal"
-                       {% if loop.first %}autofocus{% endif %}
-                       placeholder="{{ r.existing if r.existing is not none else '' }}"></td>
-            <td>{{ "%g"|format(r.lo) }} to {{ "%g"|format(r.hi) }}</td>
-            <td>{% if r.existing is not none %}<span class="temp-already">{{ "%g"|format(r.existing) }}&deg;C
-                &mdash; typing here corrects it</span>{% else %}&ndash;{% endif %}</td>
-        </tr>
-        {% endfor %}
-    </table></div>
-    <div class="form-buttons">
-        <input type="submit" value="Save {{ round_session }} Round">
-    </div>
-</form>
-
-<details class="temp-manual">
-<summary>Record or correct a single reading (another day, or the other round)</summary>
-<p style="font-size:13px;">Use this to catch up a missed check or fix an earlier
-one. Recording the same room, date and round again corrects that entry rather
-than adding a second.</p>
-<form method="POST" action="{{ url_for('temperature') }}" class="dispense-form">
-    <input type="hidden" name="action" value="record">
-    <div class="common-section">
-        <div>
-            <label>Date:</label>
-            <input name="date" type="date" value="{{ today }}" max="{{ today }}" required>
-        </div>
-        <div>
-            <label>Location:</label>
-            <select name="location" required>
-                {% for loc in locations %}
-                <option value="{{ loc }}" {% if loc == location %}selected{% endif %}>{{ loc }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Session:</label>
-            <select name="session" required>
-                {% for s in sessions %}
-                <option value="{{ s }}" {% if s == round_session %}selected{% endif %}>{{ s }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Temperature (&deg;C):</label>
-            <input name="temp" type="number" step="0.1" required>
-        </div>
-        <div>
-            <label>Initials:</label>
-            <input name="initials" type="text" maxlength="4" size="4"
-                   value="{{ default_initials }}" required>
-        </div>
-        <div>
-            <label>Time of Check:</label>
-            <input name="check_time" type="time" value="{{ round_time }}" required>
-        </div>
-        <div>
-            <label>Note (optional):</label>
-            <input name="note" type="text" placeholder="Thermometer reset, remarks">
-        </div>
-    </div>
-    <div class="form-buttons"><input type="submit" value="Save Reading"></div>
-</form>
-</details>
-</div>
-
-<form method="GET" action="{{ url_for('temperature') }}" class="filter-form">
-    <div class="filter-section">
-        <div>
-            <label>Location:</label>
-            <select name="location">
-                {% for loc in locations %}
-                <option value="{{ loc }}" {% if loc == location %}selected{% endif %}>{{ loc }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Month:</label>
-            <input name="month" type="month" value="{{ month_value }}">
-        </div>
-        <div class="button-div">
-            <input type="submit" value="Show Month">
-            <button type="submit" name="export" value="csv" formnovalidate>Download CSV</button>
-            <button type="button" onclick="window.print();">Print Chart &amp; Register</button>
-        </div>
-    </div>
-</form>
-
-<h2>{{ location }} &mdash; {{ month_label }}</h2>
-<p style="font-size:13px;">
-Acceptable range for this location: <strong>{{ "%g"|format(limit_lo) }}&deg;C to
-{{ "%g"|format(limit_hi) }}&deg;C</strong>.
-Checks recorded: <strong>{{ recorded_count }} of {{ expected_count }}</strong>
-({{ days_complete }} of {{ days_in_month }} days with both checks).
-{% if breach_count %}<strong style="color:#c62828;">Readings outside the
-acceptable range: {{ breach_count }}.</strong>{% else %}No reading fell outside
-the acceptable range.{% endif %}
-<br><span style="color:#555;">On the chart the morning reading is the blue
-line, the afternoon reading is the red line, and the black line is the average
-of the two. A day missing either check has no average, so the black line breaks
-there.</span>
-</p>
-
-<div class="temp-chart">{{ chart|safe }}</div>
-
-<h3>Register</h3>
-<div class="table-scroll"><table>
-    <thead>
-        <tr>
-            <th rowspan="2">Day</th>
-            <th colspan="3">Temperature &deg;C</th>
-            <th rowspan="2">Initials</th>
-            <th rowspan="2">Times</th>
-            <th rowspan="2">Notes</th>
-            {% if is_admin %}<th rowspan="2" class="no-print">Actions</th>{% endif %}
-        </tr>
-        <tr>
-            <th>Morning</th><th>Afternoon</th><th>Average</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for row in rows %}
-        <tr class="{% if row.breach %}temp-breach{% endif %}">
-            <td>{{ row.day }}</td>
-            {% for cell in row.cells %}
-            <td>{% if cell is not none %}{{ "%g"|format(cell) }}{% else %}&ndash;{% endif %}</td>
-            {% endfor %}
-            <td>{{ row.initials or '-' }}</td>
-            <td>{{ row.times or '-' }}</td>
-            <td>{{ row.note or '-' }}</td>
-            {% if is_admin %}
-            <td class="action-buttons no-print">
-            {% if row.ids %}
-                {% for s, rid in row.ids %}
-                <form method="POST" action="{{ url_for('temperature') }}" style="display:inline;">
-                    <input type="hidden" name="action" value="delete">
-                    <input type="hidden" name="reading_id" value="{{ rid }}">
-                    <input type="hidden" name="location" value="{{ location }}">
-                    <input type="hidden" name="month" value="{{ month_value }}">
-                    <button type="submit" class="delete-btn"
-                            onclick="return confirm('Delete the {{ s|lower }} reading for day {{ row.day }}?');">{{ s[0] }}</button>
-                </form>
-                {% endfor %}
-            {% else %}<span>-</span>{% endif %}
-            </td>
-            {% endif %}
-        </tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-<p style="font-size:13px;">A dash means no reading was recorded for that check.
-Each line on the chart runs straight through the readings that exist, with a
-mark only where one was taken; a missed check shows as a blank column in the
-Initials and Write time rows and as a dash in this table.</p>
-<p style="margin-top:18px;">Checked by: ______________________ &nbsp;&nbsp;
-Signature: ______________________ &nbsp;&nbsp; Date: ______________</p>
-"""
-
-
-RECEIVE_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
-<style>
-  .draft-note { font-size: 12px; color: #0c5460; background: #d1ecf1;
-                border-radius: 4px; padding: 4px 8px; margin-top: 4px;
-                display: none; }
-  .draft-note.shown { display: block; }
-</style>
-<h1>Receiving</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-{{ nav_links|safe }}
-
-{% if message %}
-<p class="message {% if 'successfully' in message|lower or 'deleted' in message|lower or 'reduced' in message|lower %}success{% else %}error{% endif %}">
-    {{ message }}
-</p>
-{% endif %}
-
-{# NEW (Deliveries): receiving now happens inside a DELIVERY, which carries
-
-# NEW (Deliveries): receiving now happens inside a DELIVERY, which carries
-   the supplier, order number + order total, and invoice number + invoice total
-   ONCE. Line items inherit them, so those four fields are typed once per
-   delivery instead of once per medication.
-
-   That is the convenience benefit. The control benefit is the three-way match:
-   what was ordered vs what was invoiced vs what actually arrived. Mismatches
-   are surfaced immediately but never block receiving — stock physically on the
-   shelf must always be recordable. #}
-
-{% if rx_data %}
-<h2>Edit Receive Line</h2>
-<form method="POST" action="{{ url_for('edit_receive', receive_id=rx_data.receive_id) }}" class="receive-form">
-    <input type="hidden" name="receive_id" value="{{ rx_data.receive_id }}">
-    <div class="common-section">
-        <div><label>Medication:</label>
-            <input name="med_name" id="med_name" list="med_suggestions" value="{{ rx_data.med_name }}" required></div>
-        <div><label>Quantity:</label>
-            <input name="quantity" type="number" min="1" value="{{ rx_data.quantity }}" required></div>
-        <div><label>Batch:</label><input name="batch" value="{{ rx_data.batch }}" required></div>
-        <div><label>Price per Unit:</label>
-            <input name="price" type="number" step="0.01" min="0" value="{{ rx_data.price }}" required></div>
-        <div><label>Expiry Date:</label>
-            <input name="expiry_date" type="date" value="{{ rx_data.expiry_date }}" required></div>
-        <div><label>Schedule:</label>
-            <select name="schedule" required>
-            {% for opt in ['controlled', 'not controlled'] %}
-                <option value="{{ opt }}" {% if rx_data.schedule == opt %}selected{% endif %}>{{ opt|title }}</option>
-            {% endfor %}
-            </select></div>
-        <div><label>Stock Receiver:</label>
-            <input name="stock_receiver" value="{{ rx_data.stock_receiver if rx_data else current_user }}" required></div>
-        <div><label>Order Number:</label>
-            <input name="order_number" value="{{ rx_data.order_number }}" required></div>
-        <div><label>Supplier:</label>
-            <input name="supplier" value="{{ rx_data.supplier }}" required></div>
-        <div><label>Invoice Number:</label>
-            <input name="invoice_number" value="{{ rx_data.invoice_number }}" required></div>
-    </div>
-    <datalist id="med_suggestions"></datalist>
-    <div class="form-buttons">
-        <input type="submit" value="Update Receive">
-        <a href="{{ url_for('receive') }}"><button type="button">Cancel</button></a>
-    </div>
-</form>
-
-{% elif delivery %}
-<h2>{{ delivery.reference }} &mdash; {{ delivery.supplier }}</h2>
-<p><strong>Status:</strong> {{ delivery.status|upper }} &nbsp;|&nbsp;
-   <strong>Order:</strong> {{ delivery.order_number }} &nbsp;|&nbsp;
-   <strong>Invoice:</strong> {{ delivery.invoice_number }} &nbsp;|&nbsp;
-   Opened {{ delivery.opened_at.strftime('%Y-%m-%d %H:%M') }} by {{ delivery.received_by }}
-   {% if delivery.closed_at %}&nbsp;|&nbsp; Closed {{ delivery.closed_at.strftime('%Y-%m-%d %H:%M') }} by {{ delivery.closed_by }}{% endif %}
-</p>
-<p><a href="{{ url_for('receive') }}">&larr; All deliveries</a></p>
-
-{% if order_summary and order_summary.invoice_count %}
-<h3>Order {{ order_summary.order_number }}</h3>
-<p style="font-size:13px;">One order is often filled by several part-deliveries, each
-with its own invoice. This is the position across <strong>all</strong> invoices
-raised against this order number.</p>
-<div class="table-scroll"><table>
-    <thead><tr><th>Order Total</th><th>Invoices</th><th>Invoiced to Date</th>
-               <th>Goods Received</th><th>Still to Invoice</th><th>Status</th></tr></thead>
-    <tbody>
-        <tr class="{% if order_summary.over_invoiced %}expired{% elif order_summary.fully_invoiced %}normal{% else %}close-to-expire{% endif %}">
-            <td>R{{ "%.2f"|format(order_summary.order_total) }}</td>
-            <td>{{ order_summary.invoice_count }}</td>
-            <td>R{{ "%.2f"|format(order_summary.invoiced) }}</td>
-            <td>R{{ "%.2f"|format(order_summary.goods) }}</td>
-            <td>R{{ "%.2f"|format(order_summary.outstanding) }}</td>
-            <td>{% if order_summary.over_invoiced %}Invoiced beyond the order
-                {% elif order_summary.fully_invoiced %}Fully invoiced
-                {% else %}Part-delivered{% endif %}</td>
-        </tr>
-    </tbody>
-</table></div>
-{% if order_summary.conflicting_totals %}
-<p class="message error" style="font-size:13px;">The invoices recorded against this
-order do not agree on the order total. The figure above is from the most recently
-opened delivery. Check the paperwork.</p>
-{% endif %}
-{% if order_summary.invoice_count > 1 %}
-<div class="table-scroll"><table>
-    <thead><tr><th>Delivery</th><th>Invoice</th><th>Invoice Total</th><th>Status</th></tr></thead>
-    <tbody>
-    {% for sib in order_summary.siblings %}
-        <tr {% if sib.id == delivery._id|string %}style="font-weight:bold;"{% endif %}>
-            <td><a href="{{ url_for('receive', delivery_id=sib.id) }}">{{ sib.reference }}</a></td>
-            <td>{{ sib.invoice_number }}</td>
-            <td>R{{ "%.2f"|format(sib.invoice_total) }}</td>
-            <td>{{ sib.status|upper }}</td>
-        </tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% endif %}
-{% endif %}
-
-<h3>This Invoice vs Goods Received</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Document</th><th>Total</th><th>Compared With</th><th>Difference</th><th>Status</th></tr></thead>
-    <tbody>
-        <tr class="{{ recon.goods_class }}">
-            <td>Invoice {{ delivery.invoice_number }}</td>
-            <td>R{{ "%.2f"|format(delivery.invoice_total) }}</td>
-            <td>Goods received R{{ "%.2f"|format(recon.goods_value) }}</td>
-            <td>{{ recon.goods_diff_label }}</td>
-            <td>{{ recon.goods_note }}</td>
-        </tr>
-    </tbody>
-</table></div>
-<p style="font-size:13px;">Goods received is the sum of the line values captured
-below, each computed from the pack price rather than a rounded unit price, so a
-pack size that does not divide cleanly cannot cause a false mismatch. A mismatch is flagged but never blocks
-receiving &mdash; stock that is physically on the shelf must always be
-recordable. Investigate it, then close the delivery.</p>
-
-{% if delivery.status == 'open' %}
-<h3>Add a Line</h3>
-<p style="font-size:13px;">Supplier, order number and invoice number come from the
-delivery above &mdash; you do not re-enter them per item.<br>
-Enter the quantity in <strong>single units</strong> (the way stock is counted) and
-the price of a <strong>whole pack</strong> (the way the supplier bills). The unit
-price is worked out from the two, so stock values are correct. For an item already
-priced singly, leave pack size as 1.</p>
-<form method="POST" action="{{ url_for('receive') }}" class="receive-form">
-    <input type="hidden" name="action" value="line">
-    <input type="hidden" name="delivery_id" value="{{ delivery._id|string }}">
-    <div class="common-section">
-        <div><label>Medication:</label>
-            <input name="med_name" id="med_name" list="med_suggestions" required autocomplete="off"></div>
-        <div><label>Quantity (single units):</label>
-            <input name="quantity" type="number" min="1" required></div>
-        <div><label>Pack Size (units per pack):</label>
-            <input name="pack_size" type="number" min="1" value="1" required></div>
-        <div><label>Price per Pack (R):</label>
-            <input name="pack_price" type="number" step="0.01" min="0" required></div>
-        <div><label>Batch:</label><input name="batch" required></div>
-        <div><label>Expiry Date:</label><input name="expiry_date" type="date" required></div>
-        {# The draft note belongs HERE, beside the line being typed — not on the
-           Start a Delivery form, where it was and where the user typing a line
-           would never see it. #}
-        <div id="line-draft-note" class="draft-note"></div>
-    </div>
-    {# FIX (Bug): the schedule dropdown used to live here, and receiving wrote it
-       onto the medication. Picking the wrong option while receiving a controlled
-       drug silently RECLASSIFIED it as not controlled, and the item then
-       disappeared from the controlled drug register with nothing to show why.
-       Schedule is a property of the medication, not of a consignment, so it is
-       set once under Add Medication and inherited here. Batch, expiry, price and
-       pack size genuinely do vary per delivery and are still captured above. #}
-    <datalist id="med_suggestions"></datalist>
-    <div class="form-buttons"><input type="submit" value="Add Line"></div>
-</form>
-
-<form method="POST" action="{{ url_for('receive') }}" style="margin-top:16px;">
-    <input type="hidden" name="action" value="close">
-    <input type="hidden" name="delivery_id" value="{{ delivery._id|string }}">
-    <button type="submit" class="delete-btn"
-            onclick="return confirm('Close {{ delivery.reference }}? No further lines can be added.');">
-        Close This Delivery</button>
-</form>
-{% endif %}
-
-<h3>Lines Captured ({{ delivery_lines|length }})</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Medication</th><th>Units</th><th>Pack Size</th><th>Packs</th>
-               <th>Price/Pack</th><th>Unit Price</th><th>Line Value</th>
-               <th>Batch</th><th>Expiry</th><th>Captured</th></tr></thead>
-    <tbody>
-    {% for l in delivery_lines %}
-        <tr>
-            <td>{{ l.med_name }}</td><td>{{ l.quantity }}</td>
-            <td>{{ l.get('pack_size') or 1 }}</td>
-            <td>{{ '%g'|format(l.quantity / (l.get('pack_size') or 1)) }}</td>
-            {# a missing key yields Undefined, which is NOT none - so test with
-               .get(), or rows written before pack pricing existed blow up here #}
-            <td>{% if l.get('pack_price') is not none %}R{{ "%.2f"|format(l.get('pack_price')) }}{% else %}&ndash;{% endif %}</td>
-            <td>R{{ "%.4f"|format(l.price) }}</td>
-            <td>R{{ "%.2f"|format(l.get('line_value') if l.get('line_value') is not none else l.quantity * l.price) }}</td>
-            <td>{{ l.batch }}</td><td>{{ l.expiry_date }}</td>
-            <td>{{ l.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="10">No lines captured yet.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-
-{% else %}
-<h2>Start a Delivery</h2>
-<p>Capture the paperwork once, then add each medication as a line. Several
-deliveries can be open at the same time.</p>
-<form method="POST" action="{{ url_for('receive') }}" class="receive-form">
-    <input type="hidden" name="action" value="open">
-    <div class="common-section">
-        <div><label>Supplier:</label><input name="supplier" required></div>
-        <div><label>Order Number:</label><input name="order_number" required></div>
-        <div><label>Order Total (R):</label>
-            <input name="order_total" type="number" step="0.01" min="0" required></div>
-        <div><label>Invoice Number:</label><input name="invoice_number" required></div>
-        <div><label>Invoice Total (R):</label>
-            <input name="invoice_total" type="number" step="0.01" min="0" required></div>
-        <div><label>Received By:</label><input name="stock_receiver" value="{{ current_user }}" required></div>
-        <div><label>Note (optional):</label><input name="note" type="text"></div>
-    </div>
-    <div class="form-buttons"><input type="submit" value="Open Delivery"></div>
-</form>
-
-<h2>Deliveries ({{ deliveries|length }})</h2>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Reference</th><th>Supplier</th><th>Order</th><th>Order Total</th>
-            <th>Invoice</th><th>Invoice Total</th><th>Goods Received</th>
-            <th>Difference</th><th>Lines</th><th>Status</th><th>Opened</th><th>Actions</th></tr>
-    </thead>
-    <tbody>
-    {% for d in deliveries %}
-        <tr class="{{ d.row_class }}">
-            <td>{{ d.reference }}</td><td>{{ d.supplier }}</td>
-            <td>{{ d.order_number }}</td><td>R{{ "%.2f"|format(d.order_total) }}</td>
-            <td>{{ d.invoice_number }}</td><td>R{{ "%.2f"|format(d.invoice_total) }}</td>
-            <td>R{{ "%.2f"|format(d.goods_value) }}</td>
-            <td>{{ d.diff_label }}</td>
-            <td>{{ d.line_count }}</td><td>{{ d.status|upper }}</td>
-            <td>{{ d.opened_at.strftime('%Y-%m-%d') }}</td>
-            <td class="action-buttons">
-                <a href="{{ url_for('receive', delivery_id=d._id|string) }}">
-                    <button class="edit-btn">{% if d.status == 'open' %}Continue{% else %}View{% endif %}</button></a>
-            </td>
-        </tr>
-    {% else %}
-        <tr><td colspan="12">No deliveries yet.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% endif %}
-
-<hr>
-
-<h2>Receive Transactions</h2>
-
-{% if window_defaulted %}
-<p class="message" style="font-size:13px;">Showing <strong>this month</strong> by
-default. Set a date range to look further back, or use the search box &mdash; a
-search looks across all records, not just this month.</p>
-{% endif %}
-{% macro pagebar(pager, endpoint, start_date, end_date, search, unit) %}
-{% if pager.total %}
-<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:10px 0;">
-    <span style="font-size:13px;">Showing {{ pager.first }}&ndash;{{ pager.last }} of {{ pager.total }} {{ unit }}</span>
-    {% if pager.pages > 1 %}
-    {% if pager.has_prev %}
-        <a href="{{ url_for(endpoint, page=1, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">&laquo; First</button></a>
-        <a href="{{ url_for(endpoint, page=pager.page-1, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">&lsaquo; Previous</button></a>
-    {% endif %}
-    <span style="font-size:13px;">Page {{ pager.page }} of {{ pager.pages }}</span>
-    {% if pager.has_next %}
-        <a href="{{ url_for(endpoint, page=pager.page+1, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">Next &rsaquo;</button></a>
-        <a href="{{ url_for(endpoint, page=pager.pages, start_date=start_date, end_date=end_date, search=search) }}"><button type="button">Last &raquo;</button></a>
-    {% endif %}
-    {% endif %}
-</div>
-{% endif %}
-{% endmacro %}
-
-
-<form method="GET" action="{{ url_for('receive') }}" class="filter-form">
-    <div class="filter-section">
-        <div>
-            <label>Start Date:</label>
-            {# BUG: this showed the month the APP had chosen when no range was
-               asked for. The route drops that default as soon as there is a
-               search — so a search really does look at everything — but the
-               form submitted the dates sitting in these boxes along with it,
-               which put the month straight back on. The promise under the
-               heading was true on the first load and a lie from the second.
-               So when the window was defaulted, these start empty. #}
-            <input name="start_date" type="date"
-                   value="{% if not window_defaulted %}{{ start_date or '' }}{% endif %}">
-        </div>
-        <div>
-            <label>End Date:</label>
-            <input name="end_date" type="date"
-                   value="{% if not window_defaulted %}{{ end_date or '' }}{% endif %}">
-        </div>
-        <div>
-            <label>Search:</label>
-            <input name="search" type="text" value="{{ search or '' }}"
-                   placeholder="Search medication, batch, supplier...">
-        </div>
-        <div class="button-div">
-            <input type="submit" value="Filter">
-            <a href="{{ url_for('receive') }}">Clear</a>
-        </div>
-    </div>
-</form>
-
-{{ pagebar(pager, 'receive', '' if window_defaulted else start_date, '' if window_defaulted else end_date, search, unit) }}
-<div class="table-scroll"><table>
-    <thead>
-        <tr>
-            <th>Medication</th><th>Quantity</th><th>Batch</th><th>Price</th>
-            <th>Expiry Date</th><th>Stock Receiver</th><th>Order Number</th>
-            <th>Supplier</th><th>Invoice Number</th><th>User</th>
-            <th>Timestamp</th><th>Actions</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for t in tx_list %}
-        <tr>
-            <td>{{ t.med_name }}</td>
-            <td>{{ t.quantity }}</td>
-            <td>{{ t.batch }}</td>
-            <td>R{{ "%.2f"|format(t.price) }}</td>
-            <td>{{ t.expiry_date }}</td>
-            <td>{{ t.stock_receiver }}</td>
-            <td>{{ t.order_number }}</td>
-            <td>{{ t.supplier }}</td>
-            <td>{{ t.invoice_number }}</td>
-            <td>{{ t.user }}</td>
-            <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-            <td class="action-buttons">
-                {% if session['user']['role'] != 'viewer' %}
-                    <a href="{{ url_for('edit_receive',
-                                        receive_id=t._id,
-                                        start_date=start_date,
-                                        end_date=end_date,
-                                        search=search) }}">
-                        <button type="button" class="edit-btn">Edit</button>
-                    </a>
-                {% endif %}
-                {% if session['user']['role'] == 'admin' %}
-                <form class="delete-btn" method="POST" action="{{ url_for('delete_receive') }}"
-                        style="display:inline;"
-                        onsubmit="return confirm('Permanently delete this receive entry?\\nStock will be reduced.');">
-                    <input type="hidden" name="receive_id" value="{{ t._id }}">
-                    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
-                    <input type="hidden" name="end_date"   value="{{ end_date   or '' }}">
-                    <input type="hidden" name="search"     value="{{ search     or '' }}">
-                    <button type="submit" class="delete-btn">Delete</button>
-                </form>
-                {% endif %}
-                {% if session['user']['role'] == 'viewer' %}
-                    <span>—</span>
-                {% endif %}
-            </td>
-        </tr>
-        {% else %}
-        <tr><td colspan="12">No receive transactions.</td></tr>
-        {% endfor %}
-    </tbody>
-</table></div>
-{{ pagebar(pager, 'receive', '' if window_defaulted else start_date, '' if window_defaulted else end_date, search, unit) }}
-
-<script>
-document.addEventListener('DOMContentLoaded', async () => {
-    const input    = document.getElementById('med_name');
-    const datalist = document.getElementById('med_suggestions');
-    if (!input) return;
-
-    // FIX (Performance): options come from /api/medications, not an inline array
-    const options = await getMedicationOptions();
-    options.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m;
-        datalist.appendChild(opt);
-    });
-
-    input.addEventListener('input', () => {
-        const q = input.value.toLowerCase();
-        Array.from(datalist.options).forEach(opt => {
-            opt.style.display = opt.value.toLowerCase().includes(q) ? '' : 'none';
-        });
-    });
-
-    // Pack size and schedule describe the product, not the purchase, so the
-    // app already knows them from the last time this item was received.
-    // Retyping the pack size was also a live hazard: the field resets to 1,
-    // and a pack size of 1 values a pack-priced item at the pack price per
-    // unit. Price is deliberately NOT filled — that belongs to this invoice.
-    let medDefaults = null;
-    async function fillFromMedication(nameInput) {
-        if (medDefaults === null) {
-            try {
-                const res = await fetch('/api/medication-defaults');
-                medDefaults = res.ok ? await res.json() : {};
-            } catch (e) { medDefaults = {}; }
-        }
-        const d = medDefaults[nameInput.value.trim()];
-        if (!d) return;
-        const form = nameInput.closest('form') || document;
-        const ps = form.querySelector('[name="pack_size"]');
-        const sc = form.querySelector('[name="schedule"]');
-        // Only fill what the user has not already set away from its default.
-        if (ps && d.pack_size && (ps.value === '' || ps.value === '1')) {
-            ps.value = d.pack_size;
-        }
-        if (sc && d.schedule && !sc.dataset.touched) {
-            sc.value = d.schedule;
-        }
-        if (sc && !sc.dataset.bound) {
-            sc.dataset.bound = '1';
-            sc.addEventListener('change', () => { sc.dataset.touched = '1'; });
-        }
-    }
-    document.querySelectorAll('[name="med_name"]').forEach(el => {
-        el.addEventListener('change', () => fillFromMedication(el));
-        el.addEventListener('blur', () => fillFromMedication(el));
-    });
-
-    // A delivery line is six fields read off a box, and a twenty-line
-    // delivery is a long sitting. Losing one to a timeout or a stray click
-    // means fetching the box again. The part-typed line is kept in the
-    // browser, per tab, and cleared the moment the line is accepted.
-    var LINE_KEY = 'delivery-line-draft';
-    var LINE_POSTED = {{ (request.args.get('line_added') == '1')|tojson }};
-    var LINE_FIELDS = ['med_name', 'quantity', 'pack_size', 'pack_price',
-                       'batch', 'expiry_date'];
-
-    function lineForm() {
-        var el = document.querySelector('[name="med_name"]');
-        return el ? el.closest('form') : null;
-    }
-    function lineDraftClear() {
-        try { sessionStorage.removeItem(LINE_KEY); } catch (e) {}
-        var n = document.getElementById('line-draft-note');
-        if (n) n.className = 'draft-note';
-    }
-    function lineDraftSave() {
-        var form = lineForm();
-        if (!form) return;
-        var data = {};
-        var any = false;
-        LINE_FIELDS.forEach(function (f) {
-            var el = form.querySelector('[name="' + f + '"]');
-            if (!el) return;
-            data[f] = el.value;
-            // pack_size arrives pre-filled, so it alone is not a draft.
-            if (el.value && f !== 'pack_size') any = true;
-        });
-        try {
-            if (any) sessionStorage.setItem(LINE_KEY, JSON.stringify(data));
-            else sessionStorage.removeItem(LINE_KEY);
-        } catch (e) {}
-    }
-    function lineDraftRestore() {
-        var form = lineForm();
-        if (!form) return;
-        var d;
-        try {
-            var raw = sessionStorage.getItem(LINE_KEY);
-            d = raw ? JSON.parse(raw) : null;
-        } catch (e) { d = null; }
-        if (!d) return;
-        LINE_FIELDS.forEach(function (f) {
-            var el = form.querySelector('[name="' + f + '"]');
-            if (el && d[f]) el.value = d[f];
-        });
-        var n = document.getElementById('line-draft-note');
-        if (n) {
-            n.textContent = 'This is the line you had started. Nothing was lost.';
-            n.className = 'draft-note shown';
-        }
-    }
-
-    // BUG (mine): this used to look for the words "units received onto" in the
-    // page text to decide whether a line had posted. document.body.textContent
-    // includes the text of <script> elements, so the sentence in THIS comment's
-    // own code matched itself on every load — the draft was wiped the instant
-    // the page came back, which is the one moment it exists for. The server
-    // knows the answer, so it says so in the redirect instead of the page being
-    // asked to guess from its own prose.
-    if (LINE_POSTED) {
-        lineDraftClear();
-    } else if (lineForm()) {
-        lineDraftRestore();
-    }
-    if (lineForm()) {
-        ['input', 'change'].forEach(function (evt) {
-            lineForm().addEventListener(evt, lineDraftSave, true);
-        });
-    }
-});
-</script>
-"""
-
-ADD_MED_TEMPLATE = CSS_STYLE + MEDICATION_OPTIONS_JS + """
-<h1>Add New Medication</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-{{ nav_links|safe }}
-{% if message %}
-    <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
-{% endif %}
-<h2>Add Medication</h2>
-<p>Defines an item so it can be received and dispensed. Supplier, order and invoice
-details are no longer captured here &mdash; they belong to a delivery, on the
-Receiving page.</p>
-<form method="POST" action="/add-medication" class="add-medication-form">
-    <div class="common-section">
-        <div>
-            <label>Medication Name:</label>
-            <input name="med_name" id="med_name" list="med_suggestions" required>
-            {# The suggestions here are what is already on file, so a name
-               appearing as you type means the item exists and needs
-               Receiving, not adding. It is also how a near-duplicate shows
-               itself: "Pyridoxine, 025 mg" appearing while you type
-               "Pyridoxine, 25 mg" is the warning that one of them is a
-               second version of the same thing. #}
-            <p style="font-size:12px; color:#555; margin:4px 0 0;">
-            A name suggested here is <strong>already on file</strong> &mdash;
-            use Receiving to add stock to it. If something close to what you
-            are typing appears, check it is not the same item under another
-            spelling.</p>
-        </div>
-        <div>
-            <label>Category:</label>
-            <select name="category" required>
-                {% for opt in categories %}
-                <option value="{{ opt }}" {% if opt == 'Pharmaceutical' %}selected{% endif %}>{{ opt }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Pack Size (units per pack):</label>
-            <input name="pack_size" type="number" min="1" value="1" required>
-        </div>
-        <div>
-            <label>Price per Pack (R):</label>
-            <input name="pack_price" type="number" step="0.01" min="0" required>
-        </div>
-        <div>
-            <label>Schedule:</label>
-            <select name="schedule" required>
-                <option value="">-- Select Schedule --</option>
-                <option value="controlled">Controlled</option>
-                <option value="not controlled">Not Controlled</option>
-            </select>
-        </div>
-    </div>
-
-    <h3>Opening Stock (optional)</h3>
-    <p style="font-size:13px;">Only for stock already on the shelf when this item is
-    first set up &mdash; typically at go-live, where there is no invoice to receive
-    it against. Leave the balance at 0 for a new item whose stock will arrive on a
-    delivery. An opening load is recorded as exactly that, so it is never mistaken
-    for a supplier delivery or a stock-take correction.</p>
-    <div class="common-section">
-        <div>
-            <label>Opening Balance (single units):</label>
-            <input name="initial_balance" type="number" min="0" value="0" required>
-        </div>
-        <div>
-            <label>Batch:</label>
-            <input name="batch">
-        </div>
-        <div>
-            <label>Expiry Date (YYYY-MM-DD):</label>
-            <input name="expiry_date" type="date">
-        </div>
-        <div>
-            <label>Counted By:</label>
-            <input name="stock_receiver" value="{{ current_user }}">
-        </div>
-    </div>
-    <datalist id="med_suggestions"></datalist>
-    <div class="form-buttons">
-        <input type="submit" value="Add Medication">
-        <button type="button" onclick="document.querySelector('form').reset(); document.getElementById('med_suggestions').innerHTML='';">Clear Form</button>
-    </div>
-</form>
-<script>
-document.addEventListener('DOMContentLoaded', async function() {
-    const medInput = document.getElementById('med_name');
-    const datalist = document.getElementById('med_suggestions');
-    // FIX (Performance): fetch from /api/medications
-    const options = await getMedicationOptions();
-    options.forEach(m => {
-        const o = document.createElement('option');
-        o.value = m;
-        datalist.appendChild(o);
-    });
-    medInput.addEventListener('input', function() {
-        const q = this.value.toLowerCase();
-        Array.from(datalist.options).forEach(o => {
-            o.style.display = o.value.toLowerCase().includes(q) ? '' : 'none';
-        });
-    });
-});
-</script>
-"""
-
-EDIT_MED_TEMPLATE = CSS_STYLE + """
-<h1>Edit Medication</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-{{ nav_links|safe }}
-{% if message %}
-    <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
-{% endif %}
-<h2>Edit {{ med_data.name if med_data else '' }}</h2>
-<p style="font-size:13px;">Changes the item's details: pack size, price, batch,
-expiry and schedule. It does <strong>not</strong> change the quantity on hand
-&mdash; stock moves only through receiving, dispensing, a stock-take count or an
-expiry write-off, so that every change has a record behind it. To correct a
-balance, run a stock take and enter the physical count.</p>
-<form method="POST" action="{{ url_for('edit_medication') }}" class="edit-medication-form">
-    <div class="common-section">
-        <div>
-            <label>Medication Name:</label>
-            <input name="med_name" value="{{ med_data.name if med_data else '' }}" readonly>
-        </div>
-        {# FIX (Data integrity): the Balance field used to live here, and writing to
-   it changed stock with NO transaction behind it — the one remaining way to
-   move stock without a trace, which is exactly what the stock take, the
-   expiry write-off and the delivery ledger were built to prevent. A balance
-   edited here would break every back-calculated beginning balance silently.
-   Stock now moves only through: receiving, dispensing, a stock-take count,
-   or an expiry write-off. #}
-        <div>
-            <label>Batch:</label>
-            <input name="batch" value="{{ med_data.batch if med_data else '' }}" required>
-        </div>
-        <div>
-            <label>Category:</label>
-            <select name="category" required>
-                {% for opt in categories %}
-                <option value="{{ opt }}" {% if med_data and med_data.get('category', 'Pharmaceutical') == opt %}selected{% endif %}>{{ opt }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Pack Size (units per pack):</label>
-            <input name="pack_size" type="number" min="1"
-                   value="{{ med_data.get('pack_size', 1) if med_data else 1 }}" required>
-        </div>
-        <div>
-            <label>Price per Pack (R):</label>
-            <input name="pack_price" type="number" step="0.01" min="0"
-                   value="{{ med_data.get('pack_price', med_data.price) if med_data else '' }}" required>
-        </div>
-        <div>
-            <label>Expiry Date (YYYY-MM-DD):</label>
-            <input name="expiry_date" type="date" value="{{ med_data.expiry_date if med_data else '' }}" required>
-        </div>
-        <div>
-            <label>Schedule:</label>
-            <select name="schedule" required>
-                <option value="">-- Select Schedule --</option>
-                <option value="controlled" {% if med_data and med_data.schedule == 'controlled' %}selected{% endif %}>Controlled</option>
-                <option value="not controlled" {% if med_data and med_data.schedule == 'not controlled' %}selected{% endif %}>Not Controlled</option>
-            </select>
-        </div>
-    </div>
-    <div class="form-buttons">
-        <input type="submit" value="Update Medication">
-        <a href="{{ url_for('reports', report_type='stock_on_hand') }}"><button type="button">Cancel</button></a>
-    </div>
-</form>
-"""
-
-REPORTS_TEMPLATE = CSS_STYLE + """
-<style>
-  .bulk-expiry-bar { background: #fff3cd; border: 1px solid #ffc107;
-                     border-radius: 6px; padding: 12px; margin: 10px 0;
-                     font-size: 14px; }
-  .bulk-expiry-bar input, .bulk-expiry-bar button { margin-left: 8px; }
-  @media print { .bulk-expiry-bar { display: none; } }
-</style>
-<h1>Inventory Reports</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-{{ nav_links|safe }}
-{% if message %}
-    <p class="message {% if message_class %}{{ message_class }}{% elif 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
-{% endif %}
-<h2>Generate Report</h2>
-<form method="POST" action="{{ url_for('reports') }}">
-    <label>Report Type:</label>
-    <select name="report_type" required>
-        <option value="stock_on_hand">Stock on Hand</option>
-        <option value="expired_list">Expired Stock on Shelf (to action)</option>
-        <option value="expiry_writeoffs">Losses (expiry &amp; damage)</option>
-        <option value="internal_issues">Internal Issues (to departments)</option>
-        <option value="unmet_demand">Unmet Demand (stockouts)</option>
-        <option value="sick_leave">Sick Leave Register</option>
-        <option value="near_expired_list">Near Expired Drug List</option>
-        <option value="out_of_stock_list">Out of Stock List</option>
-        <option value="inventory">Inventory Report</option>
-        <option value="receive_list">Receive List</option>
-        <option value="controlled_drug_register">Controlled Drug Register</option>
-        <option value="order_request">Order Request (Requisition)</option>
-        <option value="monthly_report">Period Report (day / week / month / quarter / year)</option>
-        <option value="duplicate_visits">Possible Double-Dispensing (to check)</option>
-    </select><br>
-    <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" type="date" value="{{ start_date or default_start }}"><br>
-    <label>End Date (YYYY-MM-DD, if applicable):</label><input name="end_date" type="date" value="{{ end_date or default_end }}"><br>
-    <label>Category:</label>
-    <select name="category">
-        <option value="pharmaceutical" {% if category == 'pharmaceutical' %}selected{% endif %}>Pharmaceuticals</option>
-        <option value="supply" {% if category == 'supply' %}selected{% endif %}>Medical Supplies</option>
-        <option value="donor" {% if category == 'donor' %}selected{% endif %}>Donor Funded</option>
-        <option value="both" {% if category == 'both' %}selected{% endif %}>All categories</option>
-    </select><br>
-    <label>Search (optional):</label><input name="search" type="text" placeholder="Filter results by relevant fields"><br>
-    <label>Period (Period Report only):</label>
-    <select name="period">
-        {% for v, lbl in [('day','Day'), ('week','Week'), ('month','Month'),
-                          ('quarter','Quarter'), ('year','Year')] %}
-        <option value="{{ v }}" {% if v == 'month' %}selected{% endif %}>{{ lbl }}</option>
-        {% endfor %}
-    </select>
-    <span style="font-size:13px;">&nbsp;the start date picks the period; the whole period is covered.</span><br>
-    <label>Months of Cover (Order Request only):</label>
-    <select name="cover_months">
-        {% for m in [2, 3, 4, 6] %}
-        <option value="{{ m }}" {% if m == 3 %}selected{% endif %}>{{ m }} months</option>
-        {% endfor %}
-    </select><br>
-    <input type="submit" value="Generate Report">
-    {# Submits the same form with the same period, so the file is the report
-       you are looking at rather than a second, possibly different, query. #}
-    <button type="submit" name="export" value="csv"
-            formnovalidate>Download CSV</button>
-</form>
-{% if is_admin %}
-{# Every other download here answers one question. This one is the whole
-   register, for keeping rather than reading. #}
-<div style="border:1px solid #dee2e6; background:#fff; border-radius:6px;
-            padding:12px 14px; margin:14px 0;">
-    <h3 style="margin:0 0 6px;">Back up everything</h3>
-    <p style="font-size:13px; margin:0 0 10px;">
-    One file holding every record the pharmacy system has &mdash; dispensing,
-    the controlled drug register, deliveries, stock takes, temperatures, the
-    key register, loans and the audit log. Keep a copy somewhere that would
-    survive losing this computer. It contains patient names and diagnoses, so
-    treat it like the paper register.</p>
-    <a href="{{ url_for('backup_download') }}">
-        <button type="button">Download Full Backup</button></a>
-</div>
-{% endif %}
-{% if report_type in ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list'] and stock_data %}
-<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
-    <input type="hidden" name="report_type" value="{{ report_type }}">
-    <div class="filter-section">
-        <div>
-            <label>Search Medication:</label>
-            <input name="search" type="text" value="{{ search or '' }}" placeholder="Filter by medication name">
-        </div>
-        <div class="button-div">
-            <input type="submit" value="Filter">
-            <a href="{{ url_for('reports') }}">Back to Menu</a>
-        </div>
-    </div>
-</form>
-<h2>{{ report_title }}</h2>
-<p><strong>{{ category_label }}</strong></p>
-{% if report_type == 'expired_list' %}
-<p style="font-size:13px;">This is a <strong>work list</strong>: expired stock still
-on the shelf. Items leave it as you remove them. For the record of what was
-actually written off, run <em>Expiry Write-Offs</em>.</p>
-{% endif %}
-{% if is_admin and report_type in ['expired_list', 'near_expired_list'] %}
-<p style="font-size:13px;"><strong>Remove Expired</strong> writes the units off the
-shelf &mdash; enter how many actually expired, which may be less than the whole
-balance if only one batch is affected. <strong>Correct Date</strong> is for when the
-expiry was recorded wrongly; it changes the date and moves no stock. Both are
-recorded in the audit log.</p>
-{% endif %}
-{% if is_admin and report_type == 'expired_list' and stock_data %}
-{# One pass instead of two interactions per item. The form lives OUTSIDE the
-   table because the per-row forms below cannot be nested inside it; the row
-   inputs join this one through their form="" attribute. #}
-<form id="bulk-expiry" method="POST" action="{{ url_for('remove_expired_bulk') }}"
-      onsubmit="return confirm('Write off every ticked item? Stock will be reduced.');">
-    <input type="hidden" name="report_type" value="{{ report_type }}">
-</form>
-<div class="bulk-expiry-bar">
-    <strong>Clear the whole list:</strong>
-    every row is ticked with its full balance. Untick anything that should stay,
-    or change a quantity where only part of the stock expired.
-    <input name="bulk_reason" type="text" form="bulk-expiry"
-           placeholder="Reason for the whole pass (optional)" style="width:18em;">
-    <button type="submit" form="bulk-expiry" class="delete-btn">Remove All Ticked</button>
-</div>
-{% endif %}
-<div class="table-scroll"><table>
-    <thead>
-        <tr>
-            {% if is_admin and report_type == 'expired_list' %}<th>Write off</th>{% endif %}
-            <th>Medication</th><th>Balance</th><th>Expiry Date</th><th>Batch</th><th>Price</th><th>Actions</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for med in stock_data %}
-        <tr class="{{ med.status }}">
-            {% if is_admin and report_type == 'expired_list' %}
-            <td>
-                <input type="checkbox" name="sel" value="{{ med.name }}"
-                       form="bulk-expiry" checked>
-                <input name="qty__{{ med.name }}" type="number" min="1"
-                       max="{{ med.balance }}" value="{{ med.balance }}"
-                       form="bulk-expiry" style="width:5em;"
-                       title="Units to write off in the bulk pass">
-            </td>
-            {% endif %}
-            <td>{{ med.name }}</td>
-            <td>{{ med.balance }}</td>
-            <td>{{ med.expiry_date }}</td>
-            <td>{{ med.batch }}</td>
-            <td>R{{ "%.2f"|format(med.price) }}</td>
-            <td class="action-buttons">
-                {% if is_admin and report_type in ['expired_list', 'near_expired_list'] %}
-                {# NEW (Expiry handling): two DIFFERENT problems live on this list.
-                   Either some units really have expired and must leave the shelf —
-                   often only part of what is on hand, since batches expire at
-                   different times — or the date was simply typed wrong and nothing
-                   should move at all. A single "remove from shelf" button would
-                   force the first answer onto both, so they are separate actions
-                   and the removal takes a quantity. #}
-                <form method="POST" action="{{ url_for('remove_expired') }}" style="display:inline;">
-                    <input type="hidden" name="med_name" value="{{ med.name }}">
-                    <input type="hidden" name="report_type" value="{{ report_type }}">
-                    <input name="quantity" type="number" min="1" max="{{ med.balance }}"
-                           value="{{ med.balance }}" style="width:5em;" required
-                           title="Units to remove — defaults to the whole balance, change it if only part of the stock has expired">
-                    <input name="reason" type="text" placeholder="Reason / batch" style="width:9em;">
-                    <button type="submit" class="delete-btn"
-                            onclick="return confirm('Remove these units of {{ med.name }} from the shelf? Stock will be reduced.');">Remove Expired</button>
-                </form>
-                <form method="POST" action="{{ url_for('correct_expiry') }}" style="display:inline;">
-                    <input type="hidden" name="med_name" value="{{ med.name }}">
-                    <input type="hidden" name="report_type" value="{{ report_type }}">
-                    <input name="expiry_date" type="date" value="{{ med.expiry_date }}" required>
-                    <button type="submit" class="edit-btn">Correct Date</button>
-                </form>
-                {% endif %}
-                {% if is_admin %}
-                <a href="{{ url_for('edit_medication', med_name=med.name) }}"><button class="edit-btn">Edit</button></a>
-                <form class="delete-btn" method="POST" action="{{ url_for('delete_medication') }}" style="display: inline;">
-                    <input type="hidden" name="med_name" value="{{ med.name }}">
-                    <button type="submit" class="delete-btn" onclick="return confirm('Are you sure you want to delete {{ med.name }}?');">Delete</button>
-                </form>
-                {% else %}
-                <span>-</span>
-                {% endif %}
-            </td>
-        </tr>
-    {% else %}
-        <tr><td colspan="6">No medications matching the criteria.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% elif report_type == 'inventory' and report_data %}
-<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
-    <input type="hidden" name="report_type" value="inventory">
-    <div class="filter-section">
-        <div><label>Start Date:</label><input name="start_date" type="date" value="{{ start_date or '' }}"></div>
-        <div><label>End Date:</label><input name="end_date" type="date" value="{{ end_date or '' }}"></div>
-        <div><label>Search Medication:</label><input name="search" type="text" value="{{ search or '' }}" placeholder="Filter by medication name"></div>
-        <div class="button-div"><input type="submit" value="Refine"><a href="{{ url_for('reports') }}">Back to Menu</a></div>
-    </div>
-</form>
-<h2>Inventory Report for {{ start_date }} to {{ end_date }}</h2>
-<p><strong>{{ category_label }}</strong></p>
-{% if is_admin %}
-<p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed
-&minus; To Departments + Adjustment + Expired + Damaged = Current</strong>.
-<strong>To Departments</strong> is stock sent to a department rather than a
-patient &mdash; it is consumption and counts toward AMC, because it has to be
-replaced. <strong>Damaged</strong> is stock lost, and does not.
-Adjustment is the net of any physical-count corrections made during the period —
-see Audit &rarr; Stock Take Discrepancies for the detail behind it. Expired is
-stock written off the shelf. Both are shown signed.
-AMC is average monthly consumption over the selected period — dispensing plus
-internal issues. Write-offs, damage and count corrections are excluded from it.
-<strong>Unmet</strong> is demand that could not be filled because stock had run
-out; <strong>Adjusted AMC</strong> adds it back, so it reflects what was actually
-asked for rather than what happened to be on the shelf. Where the two differ, the
-plain AMC is understating demand — which is exactly what happens to an item that
-keeps running out. <strong>Fill rate</strong> is the share of demand that was
-met.</p>
-{% else %}
-<p>Each row reconciles: <strong>Beginning + Received &minus; Issued
-&minus; To Departments = Current</strong>.</p>
-<p style="font-size:13px;"><strong>Issued</strong> is everything that left the
-shelf to patients or was written off it &mdash; the general outward column, which
-is why it is not headed "Dispensed". <strong>To Departments</strong> is stock sent
-to a department rather than a patient. AMC is average monthly consumption
-&mdash; dispensing plus issues to departments, since both have to be replaced.</p>
-{% endif %}
-<div class="table-scroll"><table>
-    <thead>
-        {# NEW: the Adjustment column is admin-only. Non-admins see a row that
-           still adds up, because dispensed_effective has the adjustment folded
-           into it — see the comment in the reports() route for why that is the
-           honest place to put it. #}
-        {# NEW: an admin sees Dispensed as pure patient dispensing, because the
-           adjustment, expiry and damage columns sit beside it. A non-admin does
-           not see those columns — they are folded into this one — so calling it
-           "Dispensed" would be a mislabel: the figure includes stock that was
-           written off, not handed to anyone. "Issued" is the honest general
-           heading for the same number. #}
-        <tr><th>Item</th>{% if category == 'both' %}<th>Category</th>{% endif %}
-            <th>Beginning Balance</th><th>Received</th>
-            <th>{% if is_admin %}Dispensed{% else %}Issued{% endif %}</th>
-            {% if is_admin %}<th>Adjustment</th><th>Expired</th>{% endif %}
-            <th>To Departments</th>
-            {% if is_admin %}<th>Damaged</th>{% endif %}
-            <th>Current Balance</th><th>AMC</th><th>Unmet</th><th>Adjusted AMC</th>
-            <th>Fill Rate</th><th>Amount to Order</th></tr>
-    </thead>
-    <tbody>
-    {% for row in report_data %}
-        <tr>
-            <td>{{ row.med_name }}</td>
-            {% if category == 'both' %}<td>{{ row.category }}</td>{% endif %}
-            <td>{{ row.beginning_balance }}</td>
-            <td>{{ row.received }}</td>
-            {% if is_admin %}
-            <td>{{ row.dispensed }}</td>
-            <td>{% if row.adjustment %}{{ '%+d'|format(row.adjustment) }}{% else %}0{% endif %}</td>
-            <td>{% if row.expired %}{{ '%+d'|format(row.expired) }}{% else %}0{% endif %}</td>
-            {% else %}
-            <td>{{ row.dispensed_effective }}</td>
-            {% endif %}
-            <td>{{ row.issued }}</td>
-            {% if is_admin %}<td>{% if row.damaged %}{{ '%+d'|format(row.damaged) }}{% else %}0{% endif %}</td>{% endif %}
-            <td>{{ row.current_balance }}</td><td>{{ row.amc }}</td>
-            <td>{% if row.unmet %}<strong>{{ row.unmet }}</strong>{% else %}0{% endif %}</td>
-            <td>{{ row.adjusted_amc }}</td>
-            <td>{% if row.fill_rate is not none %}{{ row.fill_rate }}%{% else %}&ndash;{% endif %}</td>
-            <td>{{ row.amount_to_order }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="{{ (14 if is_admin else 11) + (1 if category == 'both' else 0) }}">No data for this period.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% elif report_type == 'duplicate_visits' %}
-<h2>Possible Double-Dispensing</h2>
-<p style="font-size:13px;">Until 20 October a <strong>partial</strong> dispense
-left the whole visit sitting in the form, because only the word "successfully"
-cleared it. The medicines that <em>had</em> dispensed were already recorded and
-their stock already deducted &mdash; so pressing Dispense again, which is the
-natural thing to do when a form looks unsubmitted, dispensed them a second
-time. The form no longer does that. These are the records it may already have
-made.</p>
-<p style="font-size:13px;">Listed below: the same patient, the same medication,
-the same quantity, recorded twice within
-{{ duplicate_window }} minutes, over the last six months. That does not happen
-by accident in a pharmacy, but <strong>it is not a verdict</strong> &mdash;
-check each one against what you remember before correcting anything. A real
-second visit can be left alone.</p>
-{% if duplicates %}
-<p class="message partial">{{ duplicates|length }} to check.
-{% set u = namespace(v=0) %}{% set c = namespace(v=0.0) %}
-{% for d in duplicates %}{% set u.v = u.v + (d.units or 0) %}{% set c.v = c.v + (d.value or 0) %}{% endfor %}
-If every one is a duplicate, {{ u.v }} units worth R{{ '%.2f'|format(c.v) }}
-were counted out of stock without leaving the shelf.</p>
-{% endif %}
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Patient</th><th>Medication</th><th>Quantity</th>
-            <th>First recorded</th><th>Recorded again</th><th>Apart</th>
-            <th>Units</th><th>Value</th><th>Dispenser</th></tr>
-    </thead>
-    <tbody>
-    {% for d in duplicates %}
-        <tr>
-            <td>{{ d.patient }}</td>
-            <td>{{ d.med_name }}</td>
-            <td>{{ d.quantity }}</td>
-            <td>{{ d.first.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td>{{ d.second.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td>{{ d.minutes }} min</td>
-            <td>{{ d.units }}</td>
-            <td>R{{ '%.2f'|format(d.value or 0) }}</td>
-            <td>{{ d.dispenser }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="9">Nothing looks like a visit recorded twice.
-        That is the answer you want.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-<p style="font-size:13px;">To correct one, open Dispensing, find the later
-visit and delete it &mdash; the stock goes back and the deletion is audited.</p>
-
-{% elif report_type == 'sick_leave' %}
-<h2>Sick Leave Register for {{ start_date }} to {{ end_date }}</h2>
-<p style="font-size:13px;">Every visit whose outcome was sick leave, with the days
-given. One line per visit, not per medication &mdash; a patient who received three
-items on one visit was given one period of leave, not three.</p>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Date</th><th>Patient</th><th>Company</th><th>Days</th>
-            <th>Diagnoses</th><th>Prescriber</th><th>Dispenser</th></tr>
-    </thead>
-    <tbody>
-    {% for l in sick_leave %}
-        <tr>
-            <td>{{ l.date }}</td>
-            <td>{{ l.patient }}</td>
-            <td>{{ l.company or '-' }}</td>
-            <td><strong>{{ l.days }}</strong></td>
-            <td>{{ l.diagnoses or '-' }}</td>
-            <td>{{ l.prescriber or '-' }}</td>
-            <td>{{ l.dispenser or '-' }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="7">No sick leave was recorded in this period.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% if sick_leave %}
-<h3>Summary</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Certificates</th><th>Patients</th><th>Total Days</th>
-               <th>Average Days</th><th>Longest</th></tr></thead>
-    <tbody>
-        <tr><td>{{ sick_leave|length }}</td>
-            <td>{{ sick_leave_totals.patients }}</td>
-            <td>{{ sick_leave_totals.days }}</td>
-            <td>{{ sick_leave_totals.average }}</td>
-            <td>{{ sick_leave_totals.longest }}</td></tr>
-    </tbody>
-</table></div>
-{% if sick_leave_totals.repeat %}
-<h3>More Than One Certificate in the Period</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Patient</th><th>Certificates</th><th>Total Days</th></tr></thead>
-    <tbody>
-    {% for r in sick_leave_totals.repeat %}
-        <tr><td>{{ r.patient }}</td><td>{{ r.count }}</td><td>{{ r.days }}</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% endif %}
-<div class="form-buttons">
-    <button type="button" onclick="window.print();">Print This Register</button>
-</div>
-{% endif %}
-
-{% elif report_type == 'internal_issues' %}
-<h2>Internal Issues for {{ start_date }} to {{ end_date }}</h2>
-<p style="font-size:13px;">Stock issued out of the store to a department rather
-than dispensed to a patient. This is <strong>consumption</strong>: it counts
-toward each item's AMC and the order request replaces it, because the stock was
-used and has to be bought again. Damage and expiry are losses and appear under
-<em>Losses</em> instead.</p>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Date</th><th>Department</th><th>Medication</th><th>Quantity</th>
-            <th>Value</th><th>Received By</th><th>Note</th><th>Issued By</th></tr>
-    </thead>
-    <tbody>
-    {% for i in issues %}
-        <tr>
-            <td>{{ i.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td>{{ i.get('department') or 'Unspecified' }}</td>
-            <td>{{ i.med_name }}</td><td>{{ i.quantity }}</td>
-            <td>R{{ "%.2f"|format(i.line_value if i.get('line_value') is not none else i.quantity * (i.get('price') or 0)) }}</td>
-            <td>{{ i.get('issued_to') or '-' }}</td>
-            <td>{{ i.get('note') or '-' }}</td><td>{{ i.user }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="8">No internal issues in this period.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% if issues %}
-<h3>By Department</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Department</th><th>Lines</th><th>Units</th><th>Value</th><th>Share</th></tr></thead>
-    <tbody>
-    {% for d in issue_totals.by_dept %}
-        <tr><td>{{ d.name }}</td><td>{{ d.lines }}</td><td>{{ d.units }}</td>
-            <td>R{{ "%.2f"|format(d.value) }}</td>
-            <td>{% if issue_totals.value %}{{ "%.1f"|format(d.value / issue_totals.value * 100) }}%{% else %}&ndash;{% endif %}</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-<h3>By Medication</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Medication</th><th>Lines</th><th>Units</th><th>Value</th></tr></thead>
-    <tbody>
-    {% for m in issue_totals.by_med %}
-        <tr><td>{{ m.name }}</td><td>{{ m.lines }}</td><td>{{ m.units }}</td>
-            <td>R{{ "%.2f"|format(m.value) }}</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-<h3>Summary</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Issues</th><th>Departments</th><th>Units</th><th>Total Value</th></tr></thead>
-    <tbody>
-        <tr><td>{{ issue_totals.lines }}</td><td>{{ issue_totals.dept_count }}</td>
-            <td>{{ issue_totals.units }}</td>
-            <td>R{{ "%.2f"|format(issue_totals.value) }}</td></tr>
-    </tbody>
-</table></div>
-<div class="form-buttons">
-    <button type="button" onclick="window.print();">Print This Report</button>
-</div>
-{% endif %}
-
-{% elif report_type == 'unmet_demand' %}
-<h2>Unmet Demand for {{ start_date }} to {{ end_date }}</h2>
-<p style="font-size:13px;">Every occasion a medication was asked for and could not
-be supplied in full. This is the demand that never reaches the dispensing figures,
-and the reason AMC alone understates what an item is really needed for &mdash; the
-more often something runs out, the less it appears to be used.</p>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Date</th><th>Medication</th><th>Requested</th><th>Given</th>
-            <th>Short</th><th>Value Short</th><th>Patient</th><th>Prescriber</th><th>User</th></tr>
-    </thead>
-    <tbody>
-    {% for u in unmet_list %}
-        <tr class="expired">
-            <td>{{ u.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td>{{ u.med_name }}</td><td>{{ u.requested }}</td><td>{{ u.given }}</td>
-            <td><strong>{{ u.shortfall }}</strong></td>
-            <td>R{{ "%.2f"|format(u.shortfall_value) }}</td>
-            <td>{{ u.patient }}</td><td>{{ u.prescriber or '-' }}</td><td>{{ u.user }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="9">Every request in this period was filled in full.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% if unmet_list %}
-<h3>By Medication</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Medication</th><th>Occasions</th><th>Units Short</th>
-               <th>Units Dispensed</th><th>Fill Rate</th><th>Value Short</th></tr></thead>
-    <tbody>
-    {% for m in unmet_totals.by_med %}
-        <tr class="{% if m.fill_rate is not none and m.fill_rate < 90 %}expired{% elif m.fill_rate is not none and m.fill_rate < 98 %}close-to-expire{% else %}normal{% endif %}">
-            <td>{{ m.med_name }}</td><td>{{ m.count }}</td><td>{{ m.shortfall }}</td>
-            <td>{{ m.dispensed }}</td>
-            <td>{% if m.fill_rate is not none %}{{ m.fill_rate }}%{% else %}&ndash;{% endif %}</td>
-            <td>R{{ "%.2f"|format(m.value) }}</td>
-        </tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-<h3>Summary</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Occasions</th><th>Items Affected</th><th>Units Short</th>
-               <th>Overall Fill Rate</th><th>Value Short</th></tr></thead>
-    <tbody>
-        <tr><td>{{ unmet_list|length }}</td><td>{{ unmet_totals.item_count }}</td>
-            <td>{{ unmet_totals.shortfall }}</td>
-            <td>{% if unmet_totals.fill_rate is not none %}{{ unmet_totals.fill_rate }}%{% else %}&ndash;{% endif %}</td>
-            <td>R{{ "%.2f"|format(unmet_totals.value) }}</td></tr>
-    </tbody>
-</table></div>
-<p style="font-size:13px;">Fill rate is units supplied as a share of units
-requested. The Order Request already adds these shortfalls back when working out
-what to buy.</p>
-<div class="form-buttons">
-    <button type="button" onclick="window.print();">Print This Report</button>
-</div>
-{% endif %}
-
-{% elif report_type == 'expiry_writeoffs' %}
-<h2>Stock Losses for {{ start_date }} to {{ end_date }}</h2>
-<p style="font-size:13px;">Stock that was actually removed from the shelf as
-expired, or written off as damaged or lost, listed item by item.
-Total cost is the quantity times the unit cost recorded for that write-off.{% if is_admin %}
-Quantity, unit cost and remarks on any line can be corrected here; changing a
-quantity moves stock on hand by the difference, so a figure entered in error puts
-the stock back.{% endif %}
-This is the record of loss &mdash; distinct from
-<em>Expired Stock on Shelf</em>, which is a work list of what still needs
-removing and empties as you deal with it. Values are at the unit price recorded
-when the stock was written off.</p>
-<div class="table-scroll"><table>
-    <thead>
-        {# Column order and headings are fixed by the register form this report
-           has to match: DATE, Item Description, QTY, EXPIRY DATE, Batch/Lot,
-           Total COST, Remarks. Kind, unit cost and the user who recorded it are
-           still held on every record and still drive the summaries below. #}
-        <tr><th>DATE</th><th>Item Description</th><th>QTY</th><th>EXPIRY DATE</th>
-            <th>Batch/Lot</th><th>Total COST</th><th>Remarks</th>
-            {% if is_admin %}<th>Correct</th>{% endif %}</tr>
-    </thead>
-    <tbody>
-    {% for w in writeoffs %}
-        <tr class="expired">
-            <td>{{ w.timestamp.strftime('%Y-%m-%d') }}</td>
-            <td>{{ w.med_name }}</td>
-            <td>{{ w.units }}</td>
-            <td>{{ w.expiry_date or '-' }}</td>
-            <td>{{ w.batch or '-' }}</td>
-            <td>R{{ "%.2f"|format(w.value) }}</td>
-            <td>{{ w.remarks or '-' }}</td>
-            {% if is_admin %}
-            {# Correcting a quantity here moves stock by the DIFFERENCE — see
-               the note in edit_loss(). The form is per row so one correction
-               cannot accidentally rewrite another. #}
-            <td class="action-buttons">
-                <form method="POST" action="{{ url_for('edit_loss') }}" style="display:inline;">
-                    <input type="hidden" name="loss_id" value="{{ w.id }}">
-                    <input type="hidden" name="start_date" value="{{ start_date }}">
-                    <input type="hidden" name="end_date" value="{{ end_date }}">
-                    <input name="quantity" type="number" min="1" value="{{ w.units }}"
-                           style="width:5.5em;" required title="Units written off">
-                    <input name="price" type="number" step="0.0001" min="0"
-                           value="{{ "%.4f"|format(w.price) }}" style="width:7em;" required
-                           title="Unit cost used to value this loss">
-                    <input name="remarks" type="text" value="{{ w.remarks }}"
-                           style="width:12em;" placeholder="Remarks"
-                           title="Free text shown in the Remarks column">
-                    <button type="submit" class="edit-btn"
-                            onclick="return confirm('Correct this loss for {{ w.med_name }}? Changing the quantity will adjust stock on hand by the difference.');">Save</button>
-                </form>
-            </td>
-            {% endif %}
-        </tr>
-    {% else %}
-        <tr><td colspan="{{ 8 if is_admin else 7 }}">No stock was written off in this period.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% if writeoffs %}
-<h3>Summary</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Write-Offs</th><th>Items Affected</th><th>Units Lost</th><th>Value Lost</th></tr></thead>
-    <tbody>
-        <tr><td>{{ writeoffs|length }}</td><td>{{ writeoff_totals.item_count }}</td>
-            <td>{{ writeoff_totals.units }}</td>
-            <td>R{{ "%.2f"|format(writeoff_totals.value) }}</td></tr>
-    </tbody>
-</table></div>
-<h3>By Medication</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Medication</th><th>Times Written Off</th><th>Units Lost</th><th>Value Lost</th></tr></thead>
-    <tbody>
-    {% for m in writeoff_totals.by_med %}
-        <tr><td>{{ m.med_name }}</td><td>{{ m.count }}</td>
-            <td>{{ m.units }}</td><td>R{{ "%.2f"|format(m.value) }}</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-<p style="font-size:13px;">An item appearing here repeatedly is usually an
-over-ordering signal rather than a storage one &mdash; compare its AMC against
-how much is being brought in.</p>
-<div class="form-buttons">
-    <button type="button" onclick="window.print();">Print This Report</button>
-</div>
-{% endif %}
-
-{% elif report_type == 'monthly_report' and monthly %}
-<h2>{{ monthly.period_kind|capitalize }} Report &mdash; {{ monthly.label }}</h2>
-<p style="font-size:13px;">Covering {{ monthly.starts }} to {{ monthly.ends }}
-inclusive.</p>
-<p style="font-size:13px;">All figures at <strong>cost</strong>, valued from the
-price recorded on each transaction when it happened &mdash; not from today's
-price &mdash; so a report run again next year still says the same thing.
-{% if monthly.estimated_lines %}<br><strong>Note:</strong> {{ monthly.estimated_lines }}
-dispensing line(s) in this period predate cost capture and are valued at the
-item's current price. Those figures are indicative.{% endif %}</p>
-
-<h3>Stock Value Movement</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Movement</th><th>Value</th><th>Note</th></tr></thead>
-    <tbody>
-        <tr><td>Opening stock value</td><td>R{{ "%.2f"|format(monthly.opening_value) }}</td>
-            <td>at the start of the period</td></tr>
-        <tr><td>Received from suppliers</td><td>R{{ "%.2f"|format(monthly.received_value) }}</td>
-            <td>{{ monthly.receipt_lines }} line(s) across {{ monthly.delivery_count }} delivery(ies)</td></tr>
-        <tr><td>Opening loads</td><td>R{{ "%.2f"|format(monthly.opening_load_value) }}</td>
-            <td>stock brought onto the system</td></tr>
-        <tr><td>Dispensed</td><td>&minus;R{{ "%.2f"|format(monthly.dispensed_value) }}</td>
-            <td>{{ monthly.items_dispensed }} item(s) over {{ monthly.visits }} visit(s)</td></tr>
-        <tr><td>Issued to departments</td>
-            <td>&minus;R{{ "%.2f"|format(monthly.issued_value) }}</td>
-            <td>{{ monthly.issued_lines }} line(s) &mdash; counts as consumption</td></tr>
-        <tr class="{% if monthly.damaged_value %}expired{% else %}normal{% endif %}">
-            <td>Damaged or lost</td>
-            <td>R{{ "%+.2f"|format(monthly.damaged_value) }}</td>
-            <td>{{ monthly.damaged_lines }} write-off(s) &mdash; not consumption</td></tr>
-        <tr class="{% if monthly.expired_value %}expired{% else %}normal{% endif %}">
-            <td>Expired stock written off</td>
-            <td>R{{ "%+.2f"|format(monthly.expired_value) }}</td>
-            <td>{{ monthly.expired_lines }} write-off(s)</td></tr>
-        {% if is_admin %}
-        <tr class="{% if monthly.adjustment_value %}expired{% else %}normal{% endif %}">
-            <td>Stock take adjustments</td>
-            <td>R{{ "%+.2f"|format(monthly.adjustment_value) }}</td>
-            <td>{{ monthly.adjustment_lines }} item(s) corrected</td></tr>
-        {% endif %}
-        <tr style="font-weight:bold;"><td>Closing stock value</td>
-            <td>R{{ "%.2f"|format(monthly.closing_value) }}</td>
-            <td>at today's unit prices</td></tr>
-    </tbody>
-</table></div>
-<p style="font-size:13px;">Opening and closing values are the stock on hand at each
-point, priced at each item's current unit price. Movements are priced as they
-happened, so the two bases differ and the column will not add up exactly when
-supplier prices have changed during the period &mdash; that difference is a price
-effect, not a stock discrepancy.</p>
-
-<h3>Dispensing</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Measure</th><th>Value</th></tr></thead>
-    <tbody>
-        <tr><td>Visits</td><td>{{ monthly.visits }}</td></tr>
-        <tr><td>Items dispensed</td><td>{{ monthly.items_dispensed }}</td></tr>
-        <tr><td>Items per visit</td><td>{{ monthly.items_per_visit }}</td></tr>
-        <tr><td>Patients seen</td><td>{{ monthly.patients }}</td></tr>
-        <tr><td>Total cost dispensed</td><td>R{{ "%.2f"|format(monthly.dispensed_value) }}</td></tr>
-        <tr><td>Visits per patient</td><td>{{ monthly.visits_per_patient }}</td></tr>
-        <tr><td>Average cost per visit</td><td>R{{ "%.2f"|format(monthly.cost_per_visit) }}</td></tr>
-        <tr><td><strong>Average cost per patient</strong></td>
-            <td><strong>R{{ "%.2f"|format(monthly.cost_per_patient) }}</strong></td></tr>
-        <tr><td>Average cost per item</td><td>R{{ "%.2f"|format(monthly.cost_per_item) }}</td></tr>
-    </tbody>
-</table></div>
-
-<h3>Procurement</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Measure</th><th>Value</th></tr></thead>
-    <tbody>
-        <tr><td>Orders raised</td><td>{{ monthly.order_count }}</td></tr>
-        <tr><td>Total ordered</td><td>R{{ "%.2f"|format(monthly.order_total) }}</td></tr>
-        <tr><td>Invoices received</td><td>{{ monthly.invoice_count }}</td></tr>
-        <tr><td>Total invoiced</td><td>R{{ "%.2f"|format(monthly.invoice_total) }}</td></tr>
-        <tr><td>Goods actually received</td><td>R{{ "%.2f"|format(monthly.received_value) }}</td></tr>
-        <tr class="{% if monthly.invoice_gap|abs >= 0.01 %}close-to-expire{% else %}normal{% endif %}">
-            <td>Invoiced less goods received</td>
-            <td>R{{ "%+.2f"|format(monthly.invoice_gap) }}</td></tr>
-    </tbody>
-</table></div>
-<p style="font-size:13px;">An order counts in the period its first invoice was
-recorded, since there is no separate order record. Where one order is invoiced
-across two periods it is counted once, in the earlier one.</p>
-
-{% if monthly.by_dept %}
-<h3>Internal Issues by Department</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Department</th><th>Lines</th><th>Value</th><th>Share of Issues</th></tr></thead>
-    <tbody>
-    {% for d in monthly.by_dept %}
-        <tr><td>{{ d.name }}</td><td>{{ d.lines }}</td>
-            <td>R{{ "%.2f"|format(d.value) }}</td>
-            <td>{% if monthly.issued_value %}{{ "%.1f"|format(d.value / monthly.issued_value * 100) }}%{% else %}&ndash;{% endif %}</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% endif %}
-
-<h3>Highest Cost Items ({{ monthly.top_items|length }})</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Medication</th><th>Units Dispensed</th><th>Cost</th><th>Share of Total</th></tr></thead>
-    <tbody>
-    {% for t in monthly.top_items %}
-        <tr><td>{{ t.med_name }}</td><td>{{ t.units }}</td>
-            <td>R{{ "%.2f"|format(t.value) }}</td><td>{{ t.share }}%</td></tr>
-    {% else %}
-        <tr><td colspan="4">Nothing dispensed in this period.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-<div class="form-buttons">
-    <button type="button" onclick="window.print();">Print This Report</button>
-</div>
-
-{% elif report_type == 'order_request' %}
-<h2>Order Request</h2>
-<p><strong>Reference:</strong> {{ order_request.reference }} &nbsp;|&nbsp;
-   <strong>Raised:</strong> {{ order_request.raised_on }} &nbsp;|&nbsp;
-   <strong>By:</strong> {{ order_request.raised_by }} &nbsp;|&nbsp;
-   <strong>Cover:</strong> {{ order_request.cover_months }} months</p>
-<p style="font-size:13px;">Every item whose stock will not last
-{{ order_request.cover_months }} months at its current AMC. The quantity is
-rounded <strong>up to whole packs</strong>, since that is how the supplier
-sells &mdash; the units column shows what you actually receive, which is
-usually a little more than the shortfall.
-Items with no recorded demand are not included: without an AMC there is
-no basis for a quantity, and guessing one is worse than leaving it to your
-judgement.<br>
-Quantities are worked out from <strong>demand</strong>, not consumption: where an
-item ran out, the units that were asked for and could not be supplied are added
-back. Ordering to consumption alone is how a stockout becomes permanent &mdash;
-you dispense less because you have less, so you order less.
-{% if order_request.demand_adjusted %}<strong>{{ order_request.demand_adjusted }}
-item(s) below were adjusted upward this way.</strong>{% endif %}</p>
-
-{% for group in order_request.groups %}
-<h3>{{ group.supplier }} &mdash; {{ group.lines|length }} item(s), R{{ "%.2f"|format(group.total) }}</h3>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Medication</th><th>AMC (consumption)</th><th>Unmet</th>
-            <th>AMC used</th><th>On Hand</th><th>Months Left</th>
-            <th>Shortfall</th><th>Pack Size</th><th>Packs</th><th>Units</th>
-            <th>Price/Pack</th><th>Line Cost</th></tr>
-    </thead>
-    <tbody>
-    {% for l in group.lines %}
-        <tr class="{{ l.status }}">
-            <td>{{ l.med_name }}</td><td>{{ l.plain_amc }}</td>
-            <td>{% if l.unmet %}<strong>{{ l.unmet }}</strong>{% else %}0{% endif %}</td>
-            <td>{{ l.amc }}</td><td>{{ l.balance }}</td>
-            <td>{{ l.mos_label }}</td><td>{{ l.shortfall }}</td>
-            <td>{% if l.pack_known %}{{ l.pack_size }}{% else %}<strong>not recorded</strong>{% endif %}</td>
-            <td>{{ l.packs }}</td><td>{{ l.units }}</td>
-            <td>{% if l.pack_price %}R{{ "%.2f"|format(l.pack_price) }}{% else %}&ndash;{% endif %}</td>
-            <td>{% if l.pack_price %}R{{ "%.2f"|format(l.line_cost) }}{% else %}&ndash;{% endif %}</td>
-        </tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% else %}
-<p class="message success">Nothing needs ordering &mdash; every item with recorded
-consumption has more than {{ order_request.cover_months }} months of stock.</p>
-{% endfor %}
-
-{% if order_request.groups %}
-<h3>Summary</h3>
-<div class="table-scroll"><table>
-    <thead><tr><th>Suppliers</th><th>Items</th><th>Packs</th><th>Estimated Total</th>
-               <th>No price on file</th><th>No pack size on file</th></tr></thead>
-    <tbody>
-        <tr>
-            <td>{{ order_request.groups|length }}</td>
-            <td>{{ order_request.line_count }}</td>
-            <td>{{ order_request.total_packs }}</td>
-            <td>R{{ "%.2f"|format(order_request.grand_total) }}</td>
-            <td>{{ order_request.unpriced }}</td>
-            <td>{{ order_request.unsized }}</td>
-        </tr>
-    </tbody>
-</table></div>
-{% if order_request.unpriced %}
-<p class="message error" style="font-size:13px;">{{ order_request.unpriced }} item(s)
-have no pack price on file, so their cost is not included in the total. They are
-still listed &mdash; the quantity is what matters for the request.</p>
-{% endif %}
-{% if order_request.unsized %}
-<p class="message error" style="font-size:13px;">{{ order_request.unsized }} item(s)
-have no pack size on file, so their quantity is expressed in single units. Check
-these against the supplier's pack before sending &mdash; the pack size is recorded
-automatically the first time an item is received on a delivery, or you can set it
-now under Edit Medication.</p>
-{% endif %}
-<p style="font-size:13px;">Estimated at the last pack price recorded for each item,
-so treat the total as indicative rather than a quotation.</p>
-<div class="form-buttons">
-    <button type="button" onclick="window.print();">Print This Request</button>
-</div>
-{% endif %}
-{% elif report_type == 'receive_list' and receive_list %}
-<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
-    <input type="hidden" name="report_type" value="receive_list">
-    <div class="filter-section">
-        <div><label>Start Date:</label><input name="start_date" type="date" value="{{ start_date or '' }}"></div>
-        <div><label>End Date:</label><input name="end_date" type="date" value="{{ end_date or '' }}"></div>
-        <div><label>Search:</label><input name="search" type="text" value="{{ search or '' }}" placeholder="Search medication, batch, supplier..."></div>
-        <div class="button-div"><input type="submit" value="Refine"><a href="{{ url_for('reports') }}">Back to Menu</a></div>
-    </div>
-</form>
-<h2>Receive List for {{ start_date }} to {{ end_date }}</h2>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Medication</th><th>Quantity</th><th>Batch</th><th>Price</th><th>Expiry Date</th><th>Stock Receiver</th><th>Order Number</th><th>Supplier</th><th>Invoice Number</th><th>User</th><th>Timestamp</th></tr>
-    </thead>
-    <tbody>
-    {% for t in receive_list %}
-        <tr>
-            <td>{{ t.med_name }}</td><td>{{ t.quantity }}</td><td>{{ t.batch }}</td>
-            <td>R{{ "%.2f"|format(t.price) }}</td><td>{{ t.expiry_date }}</td>
-            <td>{{ t.stock_receiver }}</td><td>{{ t.order_number }}</td><td>{{ t.supplier }}</td>
-            <td>{{ t.invoice_number }}</td><td>{{ t.user }}</td>
-            <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="11">No receive transactions in this period.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% elif report_type == 'controlled_drug_register' and controlled_register %}
-<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
-    <input type="hidden" name="report_type" value="controlled_drug_register">
-    <div class="filter-section">
-        <div><label>Start Date:</label><input name="start_date" type="date" value="{{ start_date or '' }}"></div>
-        <div><label>End Date:</label><input name="end_date" type="date" value="{{ end_date or '' }}"></div>
-        <div><label>Search:</label><input name="search" type="text" value="{{ search or '' }}" placeholder="Search transactions..."></div>
-        <div class="button-div"><input type="submit" value="Refine"><a href="{{ url_for('reports') }}">Back to Menu</a></div>
-    </div>
-</form>
-<h2>Controlled Drug Register for {{ start_date }} to {{ end_date }}</h2>
-{% for reg in controlled_register %}
-    <h3>{{ reg.med_name }}</h3>
-    <p style="font-size:13px;">Opening balance <strong>{{ reg.beginning_balance }}</strong>
-    &nbsp;|&nbsp; received in <strong>{{ reg.received }}</strong>
-    &nbsp;|&nbsp; went out <strong>{{ reg.dispensed }}</strong>
-    &nbsp;|&nbsp; closing balance <strong>{{ reg.ending_balance }}</strong>
-    {% if not reg.reconciles %}
-    <br><span class="temp-breach" style="padding:2px 6px;">More left the
-    cupboard in this period than could have been in it: the opening balance
-    works out below zero. Something was recorded outside these dates, or a
-    balance has been edited directly &mdash; this needs explaining before the
-    register is signed.</span>
-    {% endif %}</p>
-    {% if reg.transactions %}
-    {# In and Out, rather than one Quantity column carrying a minus sign on
-       some rows and not others. An expiry removal is stored negative and a
-       dispense positive, so a single column showed "-10" for one and "20"
-       for the other when both left the cupboard. #}
-    <div class="table-scroll"><table>
-        <thead>
-            <tr><th>Date</th><th>Movement</th><th>In</th><th>Out</th>
-                <th>Balance After</th><th>Prescriber</th><th>Issuer/Receiver</th>
-                <th>User</th><th>Reference/Patient</th></tr>
-        </thead>
-        <tbody>
-        {% for tx in reg.transactions %}
-            <tr>
-                <td>{{ tx.get('date', tx.timestamp.strftime('%Y-%m-%d')) }}</td>
-                <td>{{ tx.movement }}</td>
-                <td>{% if tx.in_qty %}{{ tx.in_qty }}{% else %}&ndash;{% endif %}</td>
-                <td>{% if tx.out_qty %}{{ tx.out_qty }}{% else %}&ndash;{% endif %}</td>
-                <td>{{ tx.balance_after }}</td>
-                <td>{{ tx.get('prescriber', '') }}</td>
-                <td>{{ tx.get('dispenser', tx.get('stock_receiver', tx.get('issued_to', ''))) }}</td>
-                <td>{{ tx.get('user', '') }}</td>
-                <td>{{ tx.get('patient', tx.get('department', tx.get('order_number', tx.get('supplier', tx.get('reason', ''))))) }}</td>
-            </tr>
-        {% endfor %}
-        </tbody>
-    </table></div>
-    {% else %}
-    <p>No transactions in this period.</p>
-    {% endif %}
-{% endfor %}
-{% elif report_type %}
-{# This used to be the catch-all for the whole report chain, so the controlled
-   drug message was what greeted you on the reports page before you had chosen
-   anything at all. It now only answers for the report you actually asked
-   for. #}
-    {% if report_type == 'controlled_drug_register' %}
-    <p>No controlled drugs have moved in this period. Nothing was dispensed,
-    received, issued or written off.</p>
-    {% else %}
-    <p>That report has nothing in it for this period.</p>
-    {% endif %}
-{% endif %}
-"""
-
-# NEW (Dashboard): consumption trend and stock-health overview.
+# ============================================================
+# Templates
+# ============================================================
 #
-# Tiles and panels use inline styles rather than new CSS classes so the shared
-# CSS_STYLE block stays untouched — only the row status classes (.expired,
-# .close-to-expire, .normal) are reused, so colour meaning stays consistent
-# with the rest of the app: red = act now, amber = watch, plain = fine.
-DASHBOARD_TEMPLATE = CSS_STYLE + """
-<h1>Dashboard</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-{{ nav_links|safe }}
-{% if message %}
-    <p class="message error">{{ message }}</p>
-{% endif %}
-
-<form method="GET" action="{{ url_for('dashboard') }}" class="filter-form">
-    <div class="filter-section">
-        <div>
-            <label>Period:</label>
-            <select name="months">
-                {% for c in month_choices %}
-                <option value="{{ c }}" {% if c == months_back %}selected{% endif %}>Last {{ c }} months</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Sort by:</label>
-            <select name="sort">
-                <option value="urgency" {% if sort_by == 'urgency' %}selected{% endif %}>Most urgent first</option>
-                <option value="amc" {% if sort_by == 'amc' %}selected{% endif %}>Highest AMC</option>
-                <option value="trend" {% if sort_by == 'trend' %}selected{% endif %}>Biggest change vs AMC</option>
-                <option value="name" {% if sort_by == 'name' %}selected{% endif %}>Medication name</option>
-            </select>
-        </div>
-        <div>
-            <label>Show:</label>
-            <select name="limit">
-                <option value="25" {% if limit == 25 %}selected{% endif %}>Top 25</option>
-                <option value="50" {% if limit == 50 %}selected{% endif %}>Top 50</option>
-                <option value="100" {% if limit == 100 %}selected{% endif %}>Top 100</option>
-                <option value="0" {% if limit == 0 %}selected{% endif %}>All items</option>
-            </select>
-        </div>
-        <div>
-            <label>Category:</label>
-            <select name="category">
-                <option value="pharmaceutical" {% if category == 'pharmaceutical' %}selected{% endif %}>Pharmaceuticals</option>
-                <option value="supply" {% if category == 'supply' %}selected{% endif %}>Medical Supplies</option>
-                <option value="donor" {% if category == 'donor' %}selected{% endif %}>Donor Funded</option>
-                <option value="both" {% if category == 'both' %}selected{% endif %}>All categories</option>
-            </select>
-        </div>
-        <div>
-            <label>Search Item:</label>
-            <input name="search" type="text" value="{{ search or '' }}" placeholder="Filter by name">
-        </div>
-        <div class="button-div">
-            <input type="submit" value="Apply">
-            <a href="{{ url_for('dashboard') }}">Reset</a>
-        </div>
-    </div>
-</form>
-
-<h2>Stock Health &mdash; {{ category_label }}</h2>
-<div style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:20px;">
-{% for t in tiles %}
-    <div style="flex:1 1 150px; min-width:150px; border:1px solid #ccc; border-radius:6px; padding:12px;
-                background-color:{{ t.bg }}; color:{{ t.fg }};">
-        <div style="font-size:26px; font-weight:bold; line-height:1.1;">{{ t.value }}</div>
-        <div style="font-size:13px; margin-top:4px;">{{ t.label }}</div>
-        {% if t.sub %}<div style="font-size:11px; opacity:0.8; margin-top:2px;">{{ t.sub }}</div>{% endif %}
-    </div>
-{% endfor %}
-</div>
-
-<h2>Activity by Month</h2>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Measure</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}</tr>
-    </thead>
-    <tbody>
-        <tr><td><strong>Dispensing visits</strong></td>{% for v in act.visits %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Items dispensed</strong></td>{% for v in act.lines %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Items per visit</strong></td>{% for v in act.per_visit %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Patients seen</strong></td>{% for v in act.patients %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Value dispensed</strong></td>{% for v in totals.val_dispensed %}<td>R{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Stock receipts</strong></td>{% for v in act.receipts %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Deliveries</strong></td>{% for v in act.deliveries %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Value received</strong></td>{% for v in totals.val_received %}<td>R{{ v }}</td>{% endfor %}</tr>
-        {% if is_admin %}
-        <tr><td><strong>Items adjusted at stock take</strong></td>
-            {% for v in act.adjusted_lines %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Value of adjustments</strong></td>
-            {% for v in totals.val_adjusted %}<td>R{{ v }}</td>{% endfor %}</tr>
-        {% endif %}
-    </tbody>
-</table></div>
-<p style="font-size:13px;">
-A dispensing visit is one patient encounter; an item is one medication line
-within it, so a visit with three medicines counts as one visit and three items.
-<strong>Patients seen</strong> counts distinct patient names in the month, so a
-patient returning twice is counted once.
-Quantities are deliberately not totalled across medications here — adding
-tablets to vials to millilitres gives a number that means nothing. Value is
-used instead, since money is comparable across dosage forms. Per-medication
-quantities are in the table below, where they do mean something.
-Value is calculated at each item's current unit price, so it is indicative
-rather than an accounting figure.
-The final column is the current month to date, so it is always a part-month and
-will read low. AMC is calculated from the completed months only.
-</p>
-
-<h2>Visit Outcomes by Month</h2>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Outcome</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
-            <th>Total</th><th>Days</th></tr>
-    </thead>
-    <tbody>
-    {% for o in clinical.outcomes %}
-        <tr><td><strong>{{ o.name }}</strong></td>
-            {% for v in o.counts %}<td>{{ v }}</td>{% endfor %}
-            <td>{{ o.total }}</td>
-            <td>{% if o.days %}{{ o.days }}{% else %}&ndash;{% endif %}</td></tr>
-    {% else %}
-        <tr><td colspan="{{ month_labels|length + 3 }}">No outcomes recorded yet.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-<p style="font-size:13px;">Counted per <strong>visit</strong>, not per medication
-&mdash; a visit that produced three items is one referral, not three. Outcome is
-optional, so a visit with none recorded appears in no row here. Days apply to sick
-leave and admission.</p>
-
-<h2>Disease Trends</h2>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Diagnosis</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
-            <th>Total</th><th>Trend</th></tr>
-    </thead>
-    <tbody>
-    {% for d in clinical.diagnoses %}
-        <tr><td>{{ d.name }}</td>
-            {% for v in d.counts %}<td>{{ v }}</td>{% endfor %}
-            <td>{{ d.total }}</td><td>{{ d.trend }}</td></tr>
-    {% else %}
-        <tr><td colspan="{{ month_labels|length + 2 }}">No diagnoses recorded yet.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-<p style="font-size:13px;">The twelve most frequent diagnoses across
-{{ clinical.episodes }} visit(s), by episode. <strong>Trend</strong> compares the
-last completed month against the average of the months before it, so a genuine
-rise stands out from ordinary variation. A visit recording several diagnoses
-counts once under each.</p>
-
-<h2>Consumption by Month &amp; AMC ({{ rows|length }} of {{ total_items }} items)</h2>
-<p style="font-size:13px;">
-<strong>AMC</strong> is the average of the completed months shown.
-<strong>MOS</strong> is months of stock — current balance divided by AMC, i.e. how
-long today's stock lasts at the recent rate.
-<strong>Trend</strong> compares the last completed month against AMC.
-<strong>Unmet</strong> is demand that could not be filled because stock had run out,
-and <strong>fill rate</strong> is the share of demand that was met — an item with a
-low fill rate has an AMC that understates what people actually wanted.
-<strong>Pattern</strong> flags how steady demand has been: an erratic item needs more
-buffer than its AMC alone suggests.
-The peak month in each row is shown in bold.
-</p>
-<div class="table-scroll"><table>
-    <thead>
-        <tr>
-            <th>Medication</th>
-            {% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
-            <th>AMC</th><th>Unmet</th><th>Fill Rate</th><th>Trend</th><th>Pattern</th>
-            <th>Balance</th><th>MOS</th><th>Suggested Order</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for r in rows %}
-        <tr class="{{ r.status }}">
-            <td>{{ r.med_name }}</td>
-            {% for v in r.monthly %}
-            <td>{% if r.peak is not none and loop.index0 == r.peak and v %}<strong>{{ v }}</strong>{% else %}{{ v }}{% endif %}</td>
-            {% endfor %}
-            <td>{{ r.amc }}</td>
-            <td>{% if r.unmet %}<strong>{{ r.unmet }}</strong>{% else %}0{% endif %}</td>
-            <td>{% if r.fill_rate is not none %}{{ r.fill_rate }}%{% else %}&ndash;{% endif %}</td>
-            <td>{{ r.trend_label }}</td>
-            <td>{{ r.pattern }}</td>
-            <td>{{ r.balance }}</td>
-            <td>{{ r.mos_label }}</td>
-            <td>{{ r.suggested_order }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="{{ month_labels|length + 9 }}">No medications matching the criteria.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-
-<h2>Expiring Within 90 Days ({{ expiring|length }})</h2>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Medication</th><th>Expiry Date</th><th>Days Left</th><th>Balance</th>
-            <th>Value</th><th>AMC</th><th>Likely Unused</th></tr>
-    </thead>
-    <tbody>
-    {% for e in expiring %}
-        <tr class="{{ e.status }}">
-            <td>{{ e.med_name }}</td>
-            <td>{{ e.expiry_date }}</td>
-            <td>{{ e.days_left }}</td>
-            <td>{{ e.balance }}</td>
-            <td>R{{ "%.2f"|format(e.value) }}</td>
-            <td>{{ e.amc }}</td>
-            <td>{{ e.likely_unused }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="7">Nothing expiring in the next 90 days.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-<p style="font-size:13px;">"Likely unused" projects how much will still be on the
-shelf at expiry if the item keeps moving at its AMC — that is the quantity at
-risk of being written off.</p>
-
-{% if is_admin %}
-<h2>Stock Take Discrepancies by Month</h2>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Measure</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}</tr>
-    </thead>
-    <tbody>
-        <tr><td><strong>Items counted</strong></td>{% for v in st_totals.counted %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Agreed</strong></td>{% for v in st_totals.agreed %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr class="expired"><td><strong>Issued, not recorded</strong> (units)</td>
-            {% for v in st_totals.short_units %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr class="close-to-expire"><td><strong>Recorded, not issued</strong> (units)</td>
-            {% for v in st_totals.over_units %}<td>{{ v }}</td>{% endfor %}</tr>
-        <tr><td><strong>Accuracy</strong></td>{% for v in st_totals.accuracy %}<td>{{ v }}</td>{% endfor %}</tr>
-    </tbody>
-</table></div>
-<p style="font-size:13px;">Accuracy is the share of counted lines that agreed with
-the system. A falling accuracy rate is worth investigating before the next count.
-<a href="{{ url_for('audit_log', view='stocktake', only='discrepancies') }}">See every discrepancy &rarr;</a></p>
-
-<h3>Largest Discrepancies in the Period ({{ top_discrepancies|length }})</h3>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Medication</th><th>Net Variance</th><th>Counts</th><th>Type</th><th>Last Counted</th></tr>
-    </thead>
-    <tbody>
-    {% for d in top_discrepancies %}
-        <tr class="{% if d.net < 0 %}expired{% else %}close-to-expire{% endif %}">
-            <td>{{ d.med_name }}</td>
-            <td>{{ '%+d'|format(d.net) }}</td>
-            <td>{{ d.count }}</td>
-            <td>{{ d.label }}</td>
-            <td>{{ d.last_counted }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="5">No discrepancies recorded in this period.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-
-<h3>Never Counted ({{ never_counted|length }})</h3>
-<p style="font-size:13px;">Items with stock on hand that have not appeared in any
-stock take. These are the shelves where a discrepancy would still be invisible.</p>
-<div class="table-scroll"><table>
-    <thead><tr><th>Medication</th><th>Balance</th><th>Value</th></tr></thead>
-    <tbody>
-    {% for n in never_counted %}
-        <tr><td>{{ n.med_name }}</td><td>{{ n.balance }}</td><td>R{{ "%.2f"|format(n.value) }}</td></tr>
-    {% else %}
-        <tr><td colspan="3">Every item with stock has been counted at least once.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% endif %}
-"""
-
-
-# NEW (Stock Take): admin-only physical count. Two views share one template —
-# the session list (no active session selected) and the counting sheet.
+# The pages live in templates/ as real .html files, and every one of them
+# extends base.html — which holds the document head, the stylesheet, the
+# viewport line and the inactivity guard that all of them share.
 #
-# Counting is BLIND: the entry form deliberately never shows the system
-# balance for the item being counted. The system figure and the variance are
-# revealed only AFTER the count has been committed, in the counted-lines table
-# below the form. This is why the form and the table are separate — an admin
-# cannot see what they are "supposed" to find before they write down what they
-# actually found.
-STOCK_TAKE_TEMPLATE = CSS_STYLE + """
-<h1>Stock Take</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-{{ nav_links|safe }}
-{% if message %}
-    <p class="message {% if 'success' in message|lower or 'recorded' in message|lower or 'closed' in message|lower or 'opened' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
-{% endif %}
-
-{% if not active %}
-<h2>Start a Stock Take</h2>
-<p>A stock take stays open until you close it. Count as many or as few items as
-you like in one sitting, come back later, and carry on where you left off.
-Each item's balance is corrected the moment you record its count.</p>
-<form method="POST" action="{{ url_for('stock_take') }}">
-    <input type="hidden" name="action" value="open">
-    <label>Description (optional):</label>
-    <input name="note" type="text" placeholder="e.g. Quarterly count, August 2026">
-    <input type="submit" value="Open New Stock Take">
-</form>
-
-<h2>Stock Takes ({{ sessions|length }})</h2>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Reference</th><th>Description</th><th>Status</th><th>Opened</th><th>Opened By</th>
-            <th>Items Counted</th><th>Discrepancies</th><th>Closed</th><th>Actions</th></tr>
-    </thead>
-    <tbody>
-    {% for s in sessions %}
-        <tr class="{% if s.status == 'open' %}close-to-expire{% else %}normal{% endif %}">
-            <td>{{ s.reference }}</td>
-            <td>{{ s.note or '-' }}</td>
-            <td>{{ s.status|upper }}</td>
-            <td>{{ s.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td>{{ s.started_by }}</td>
-            <td>{{ s.counted_lines }}</td>
-            <td>{{ s.discrepancy_lines }}</td>
-            <td>{% if s.closed_at %}{{ s.closed_at.strftime('%Y-%m-%d %H:%M') }}{% else %}-{% endif %}</td>
-            <td class="action-buttons">
-                <a href="{{ url_for('stock_take', stock_take_id=s._id|string) }}"><button class="edit-btn">{% if s.status == 'open' %}Continue{% else %}View{% endif %}</button></a>
-            </td>
-        </tr>
-    {% else %}
-        <tr><td colspan="9">No stock takes yet.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-
-{% else %}
-<h2>{{ active.reference }}{% if active.note %} — {{ active.note }}{% endif %}</h2>
-<p><strong>Status:</strong> {{ active.status|upper }} &nbsp;|&nbsp;
-   <strong>Opened:</strong> {{ active.started_at.strftime('%Y-%m-%d %H:%M') }} by {{ active.started_by }}
-   {% if active.closed_at %}&nbsp;|&nbsp; <strong>Closed:</strong> {{ active.closed_at.strftime('%Y-%m-%d %H:%M') }} by {{ active.closed_by }}{% endif %}
-</p>
-<p><a href="{{ url_for('stock_take') }}">&larr; All stock takes</a></p>
-
-{% if active.status == 'open' %}
-<h3>Count Sheet ({{ uncounted|length }} still to count)</h3>
-{# NEW: every item is listed up front, the way a paper count sheet works — walk
-   the shelves, fill in what you find, post whatever you have done. Blank rows
-   are ignored, so a sheet can be posted as many times as you like and the
-   remaining items simply stay on it. The system balance is still absent: the
-   count has to be blind. #}
-<p>Fill in the counts you have done and press <strong>Post Counts</strong>.
-Rows left blank are ignored, so you can post part of the sheet now and the rest
-later &mdash; counted items drop off this list. The system figure is not shown
-until after you post.</p>
-<form method="POST" action="{{ url_for('stock_take') }}">
-    <input type="hidden" name="action" value="count_sheet">
-    <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
-    <p>
-        <input type="text" id="st_filter" placeholder="Filter this list..."
-               onkeyup="stFilter()" style="width:16em;">
-        <span style="font-size:13px;">&nbsp;typing here only hides rows; it does not clear anything you have entered.</span>
-    </p>
-    <div class="table-scroll"><table id="st_sheet">
-        <thead>
-            <tr><th>Medication</th><th>Physical Count</th><th>Note (optional)</th></tr>
-        </thead>
-        <tbody>
-        {% for m in uncounted %}
-            <tr>
-                <td>{{ m }}<input type="hidden" name="med_name" value="{{ m }}"></td>
-                <td><input name="counted__{{ loop.index0 }}" type="number" min="0"
-                           style="width:7em;" autocomplete="off"></td>
-                <td><input name="note__{{ loop.index0 }}" type="text"
-                           style="width:14em;" placeholder="Shelf, batch, remarks"></td>
-            </tr>
-        {% else %}
-            <tr><td colspan="3">Every medication has been counted in this stock take.</td></tr>
-        {% endfor %}
-        </tbody>
-    </table></div>
-    {% if uncounted %}
-    <div class="form-buttons">
-        <input type="submit" value="Post Counts">
-    </div>
-    {% endif %}
-</form>
-<script>
-function stFilter() {
-    var q = document.getElementById('st_filter').value.toLowerCase();
-    var rows = document.querySelectorAll('#st_sheet tbody tr');
-    for (var i = 0; i < rows.length; i++) {
-        var cell = rows[i].cells[0];
-        if (!cell) { continue; }
-        rows[i].style.display = cell.textContent.toLowerCase().indexOf(q) > -1 ? '' : 'none';
-    }
-}
-</script>
-
-<form method="POST" action="{{ url_for('stock_take') }}" style="margin-top:20px;">
-    <input type="hidden" name="action" value="close">
-    <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
-    <button type="submit" class="delete-btn" onclick="return confirm('Close {{ active.reference }}? No further counts can be added to it.');">Close This Stock Take</button>
-</form>
-{% endif %}
-
-<h3>Counted Items ({{ counts|length }})</h3>
-{% if counts %}
-<form method="GET" action="{{ url_for('stock_take') }}" style="display:inline">
-    <button type="submit" name="export" value="csv">Download CSV</button>
-    <span style="font-size:13px;">&nbsp;the count sheet as posted so far,
-    with the variance against the system.</span>
-</form>
-{% endif %}
-<p>Counted: {{ counts|length }} &nbsp;|&nbsp; Agreed: {{ agreed_count }} &nbsp;|&nbsp;
-   Issued not recorded: {{ issued_not_recorded }} &nbsp;|&nbsp;
-   Recorded not issued: {{ recorded_not_issued }}</p>
-<div class="table-scroll"><table>
-    <thead>
-        <tr><th>Counted At</th><th>Medication</th><th>System Balance</th><th>Physical Count</th>
-            <th>Variance</th><th>Discrepancy Type</th><th>Counted By</th><th>Note</th></tr>
-    </thead>
-    <tbody>
-    {% for c in counts %}
-        <tr class="{% if c.variance == 0 %}normal{% elif c.variance < 0 %}expired{% else %}close-to-expire{% endif %}">
-            <td>{{ c.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td>{{ c.med_name }}</td>
-            <td>{{ c.system_balance }}</td>
-            <td>{{ c.counted }}</td>
-            <td>{{ '%+d'|format(c.variance) }}</td>
-            <td>{{ c.discrepancy_label }}</td>
-            <td>{{ c.counted_by }}</td>
-            <td>{{ c.note or '-' }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="8">Nothing counted yet in this stock take.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% endif %}
-"""
-
-
-# NEW: admin-only audit trail viewer. Surfaces every CREATE/UPDATE/DELETE
-# recorded by audit_logger.py (audit_log collection) and every unhandled
-# exception recorded by error_logger.py (error_logs collection) in one place.
-AUDIT_TEMPLATE = CSS_STYLE + """
-<h1>Audit &amp; Error Log</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-{{ nav_links|safe }}
-{% if message %}
-    <p class="message {% if 'deleted' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
-{% endif %}
-
-<form method="GET" action="{{ url_for('audit_log') }}" class="filter-form">
-    <div class="filter-section">
-        <div>
-            <label>View:</label>
-            <select name="view">
-                <option value="changes" {% if view == 'changes' %}selected{% endif %}>Edits &amp; Deletes</option>
-                <option value="stocktake" {% if view == 'stocktake' %}selected{% endif %}>Stock Take Discrepancies</option>
-                <option value="warnings" {% if view == 'warnings' %}selected{% endif %}>Business Warnings (Not Found / Insufficient Stock)</option>
-                <option value="errors" {% if view == 'errors' %}selected{% endif %}>Application Errors</option>
-            </select>
-        </div>
-        <div>
-            <label>Start Date:</label>
-            <input name="start_date" type="date" value="{{ start_date or '' }}">
-        </div>
-        <div>
-            <label>End Date:</label>
-            <input name="end_date" type="date" value="{{ end_date or '' }}">
-        </div>
-        <div>
-            <label>Search:</label>
-            <input name="search" type="text" value="{{ search or '' }}" placeholder="User, action, target, medication...">
-        </div>
-        <div class="button-div">
-            <input type="submit" value="Filter">
-            <button type="submit" name="export" value="csv" formnovalidate>Download CSV</button>
-            <a href="{{ url_for('audit_log') }}">Clear</a>
-        </div>
-    </div>
-</form>
-
-{% if view == 'changes' %}
-<h2>Edits &amp; Deletes ({{ entries|length }})</h2>
-<div class="table-scroll"><table>
-    <thead>
-        <tr>
-            <th>Timestamp</th>
-            <th>Action</th>
-            <th>Record Type</th>
-            <th>Target</th>
-            <th>User</th>
-            <th>IP</th>
-            <th>Details</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for e in entries %}
-        <tr class="{% if e.action == 'DELETE' %}expired{% elif e.action == 'UPDATE' %}close-to-expire{% else %}normal{% endif %}">
-            <td>{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-            <td>{{ e.action }}</td>
-            <td>{{ e.target_type }}</td>
-            <td>{{ e.target_id }}</td>
-            <td>{{ e.user }}</td>
-            <td>{{ e.ip }}</td>
-            <td><pre style="white-space: pre-wrap; margin: 0; font-size: 12px;">{{ e.changes }}</pre></td>
-        </tr>
-    {% else %}
-        <tr><td colspan="7">No edit or delete records found.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% elif view == 'stocktake' %}
-<h2>Stock Take Discrepancies ({{ entries|length }})</h2>
-<p>Every physical count recorded against a stock take, and the correction it
-produced. A discrepancy is always one of two things: stock that left without
-being recorded, or an issue that was recorded but never actually left the
-shelf. Each non-zero variance was posted to the transaction ledger as a signed
-<em>adjustment</em>, so the inventory report reconciles:
-Beginning + Received &minus; Dispensed &plusmn; Adjustment = Current.</p>
-<p>
-    <a href="{{ url_for('audit_log', view='stocktake', start_date=start_date, end_date=end_date, search=search) }}">All counts</a> |
-    <a href="{{ url_for('audit_log', view='stocktake', start_date=start_date, end_date=end_date, search=search, only='discrepancies') }}">Discrepancies only</a>
-</p>
-<div class="table-scroll"><table>
-    <thead>
-        <tr>
-            <th>Timestamp</th>
-            <th>Stock Take</th>
-            <th>Medication</th>
-            <th>System</th>
-            <th>Counted</th>
-            <th>Variance</th>
-            <th>Discrepancy Type</th>
-            <th>Counted By</th>
-            <th>Note</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for e in entries %}
-        <tr class="{% if e.variance == 0 %}normal{% elif e.variance < 0 %}expired{% else %}close-to-expire{% endif %}">
-            <td>{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-            <td>{{ e.reference }}</td>
-            <td>{{ e.med_name }}</td>
-            <td>{{ e.system_balance }}</td>
-            <td>{{ e.counted }}</td>
-            <td>{{ '%+d'|format(e.variance) }}</td>
-            <td>{{ e.discrepancy_label }}</td>
-            <td>{{ e.counted_by }}</td>
-            <td>{{ e.note or '-' }}</td>
-        </tr>
-    {% else %}
-        <tr><td colspan="9">No stock take counts found.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% elif view == 'warnings' %}
-<h2>Business Warnings ({{ entries|length }})</h2>
-<p>Handled conditions that are not bugs — a medication wasn't found, stock was insufficient, or a transaction no longer exists. These don't crash the app, but are worth reviewing.</p>
-<div class="table-scroll"><table>
-    <thead>
-        <tr>
-            <th>Timestamp</th>
-            <th>Type</th>
-            <th>Message</th>
-            <th>User</th>
-            <th>Path</th>
-            <th>Details</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for e in entries %}
-        <tr class="close-to-expire">
-            <td>{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-            <td>{{ e.warning_type }}</td>
-            <td>{{ e.message }}</td>
-            <td>{{ e.user }}</td>
-            <td>{{ e.path }}</td>
-            <td><pre style="white-space: pre-wrap; margin: 0; font-size: 12px;">{{ e.context }}</pre></td>
-        </tr>
-    {% else %}
-        <tr><td colspan="6">No business warnings found.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% else %}
-<h2>Application Errors ({{ entries|length }})</h2>
-<div class="table-scroll"><table>
-    <thead>
-        <tr>
-            <th>Timestamp</th>
-            <th>Method</th>
-            <th>Path</th>
-            <th>Endpoint</th>
-            <th>Remote Addr</th>
-            <th>Traceback (last line)</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for e in entries %}
-        <tr class="expired">
-            <td>{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-            <td>{{ e.method }}</td>
-            <td>{{ e.path }}</td>
-            <td>{{ e.endpoint }}</td>
-            <td>{{ e.remote_addr }}</td>
-            <td><pre style="white-space: pre-wrap; margin: 0; font-size: 12px;">{{ e.traceback[-1] if e.traceback else '' }}</pre></td>
-        </tr>
-    {% else %}
-        <tr><td colspan="6">No application errors found.</td></tr>
-    {% endfor %}
-    </tbody>
-</table></div>
-{% endif %}
-"""
-
-LOGIN_TEMPLATE = CSS_STYLE + """
-<h1>Pharmacy App Login</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-<div class="login-form">
-    <h2>Login</h2>
-    {% if error %}<p class="message error">{{ error }}</p>{% endif %}
-    <form method="POST">
-        <label>Username:</label><input type="text" name="username" required><br>
-        <label>Password:</label><input type="password" name="password" required><br>
-        <input type="submit" value="Login">
-    </form>
-    <p><a href="/register">Don't have an account? Register here.</a></p>
-</div>
-"""
-
-# NEW: forced password-change page, shown when a user's password is older
-# than PASSWORD_MAX_AGE_DAYS (or has no recorded set-date at all). The user
-# is already authenticated at this point (they just entered the correct
-# current password to get here) but is blocked from everything else in the
-# app until they set a new one — enforced via before_request below.
-CHANGE_EXPIRED_PASSWORD_TEMPLATE = CSS_STYLE + """
-<h1>Password Expired</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-<div class="login-form">
-    <h2>Set a New Password</h2>
-    <p>Your password is over a year old and must be changed before you can continue.</p>
-    {% if error %}<p class="message error">{{ error }}</p>{% endif %}
-    <form method="POST">
-        <label>Current Password:</label><input type="password" name="current_password" required><br>
-        <label>New Password:</label><input type="password" name="new_password" required><br>
-        <label>Confirm New Password:</label><input type="password" name="confirm_password" required><br>
-        <input type="submit" value="Change Password">
-    </form>
-    <p><a href="/logout">Log out instead</a></p>
-</div>
-"""
-
-REGISTER_PASSWORD_TEMPLATE = CSS_STYLE + """
-<h1>Pharmacy App Registration</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-<div class="register-form">
-    <h2>Admin Access Required</h2>
-    {% if error %}<p class="message error">{{ error }}</p>{% endif %}
-    <form method="POST">
-        <label>Admin Password:</label><input type="password" name="admin_pass" required><br>
-        <input type="submit" value="Access Registration">
-    </form>
-    <p><a href="/login">Back to Login</a></p>
-</div>
-"""
-
-REGISTER_TEMPLATE = CSS_STYLE + """
-<h1>Pharmacy App Registration</h1>
-<p>LD-HSE/NMC/HRD/6.1.3.3</p>
-<div class="register-form">
-    <h2>Register</h2>
-    {% if error %}<p class="message error">{{ error }}</p>{% endif %}
-    {% if message %}<p class="message success">{{ message }}</p>{% endif %}
-    <form method="POST">
-        <label>Username:</label><input type="text" name="username" required><br>
-        <label>Password:</label><input type="password" name="password" required><br>
-        <label>Full Name:</label><input type="text" name="name" required><br>
-        <label>Role:</label>
-        <select name="role" required>
-            <option value="employee">Employee</option>
-            <option value="viewer">Viewer (no patient names)</option>
-            <option value="admin">Admin</option>
-        </select><br>
-        <input type="submit" value="Register">
-    </form>
-    <p><a href="/login">Already have an account? Login here.</a></p>
-</div>
-"""
+# They used to be Python strings in this file: a page was CSS_STYLE + the
+# body, so the 18kB head was pasted into all seventeen of them and anything
+# that had to change in the shared part had to be found in one string and
+# could not be checked anywhere. That was 4,883 lines of HTML in the middle
+# of the application code, and about 289,000 characters of it were the same
+# 18kB repeated.
+#
+# render_template() looks them up by name; the folder is pinned to this
+# file's own directory below, because a serverless handler does not
+# necessarily run with its working directory anywhere near the code.
 
 # ============================================================
 # Routes
@@ -5966,12 +1145,12 @@ REGISTER_TEMPLATE = CSS_STYLE + """
 
 @app.route('/', methods=['GET'])
 @login_required
-def home():
+def home() -> ResponseReturnValue:
     return redirect('/reports')
 
 
 @app.route('/login', methods=['GET', 'POST'])
-def login():
+def login() -> ResponseReturnValue:
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
@@ -6063,12 +1242,12 @@ def login():
         return redirect('/login')
 
     error = session.pop('error', None)
-    return render_template_string(LOGIN_TEMPLATE, error=error)
+    return render_template('login.html', error=error)
 
 
 @app.route('/change-expired-password', methods=['GET', 'POST'])
 @login_required
-def change_expired_password():
+def change_expired_password() -> ResponseReturnValue:
     # If a user reaches this page without actually having an expired
     # password (e.g. they bookmarked it, or navigated back after already
     # changing it), just send them on to the app rather than show a
@@ -6115,11 +1294,11 @@ def change_expired_password():
             except ServerSelectionTimeoutError:
                 error = 'Database connection failed. Please try again later.'
 
-    return render_template_string(CHANGE_EXPIRED_PASSWORD_TEMPLATE, error=error)
+    return render_template('change_expired_password.html', error=error)
 
 
 @app.route('/register', methods=['GET', 'POST'])
-def register():
+def register() -> ResponseReturnValue:
     if request.method == 'POST':
         if 'admin_pass' in request.form:
             if not ADMIN_PASSWORD:
@@ -6223,13 +1402,13 @@ def register():
     error = session.pop('error', None)
     message = session.pop('message', None)
     if 'admin_access' not in session:
-        return render_template_string(REGISTER_PASSWORD_TEMPLATE, error=error)
+        return render_template('register_password.html', error=error)
     else:
-        return render_template_string(REGISTER_TEMPLATE, error=error, message=message)
+        return render_template('register.html', error=error, message=message)
 
 
 @app.route('/logout', methods=['GET'])
-def logout():
+def logout() -> ResponseReturnValue:
     # The pharmacist logging out IS the key handover: whoever logs in next is
     # holding it. Arming here means nobody has to record anything.
     user = session.get('user') or {}
@@ -6245,7 +1424,7 @@ def logout():
 
 @app.route('/dispense', methods=['GET', 'POST'])
 @login_required
-def dispense():
+def dispense() -> ResponseReturnValue:
     try:
         client = get_mongo_client()
         db = client['pharmacy_db']
@@ -6267,8 +1446,8 @@ def dispense():
         start_date, end_date, window_defaulted = _default_window(start_date, end_date, search)
         page = _requested_page()
 
-        base_query = {'type': 'dispense'}
-        date_query = {}
+        base_query: Query = {'type': 'dispense'}
+        date_query: Query = {}
         if start_date:
             date_query['$gte'] = datetime.strptime(start_date, '%Y-%m-%d')
         if end_date:
@@ -6353,7 +1532,7 @@ def dispense():
         # history, nothing. One malformed old record must not be able to do
         # that, so the field is read defensively and such rows are grouped
         # under None, which no visit id matches, so they simply do not list.
-        grouped = {}
+        grouped: dict[Any, Docs] = {}
         for t in raw_tx:
             grouped.setdefault(t.get('transaction_id'), []).append(t)
         tx_groups = [(tid, grouped[tid]) for tid in visit_ids if tid in grouped]
@@ -6589,8 +1768,8 @@ def dispense():
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
 
-        return render_template_string(
-            DISPENSE_TEMPLATE,
+        return render_template(
+            'dispense.html',
             tx_list=tx_list,
             tx_groups=tx_groups,
             nav_links=get_nav_links(),
@@ -6611,8 +1790,8 @@ def dispense():
             pager=pager, window_defaulted=window_defaulted, unit='visits'
         )
     except ServerSelectionTimeoutError:
-        return render_template_string(
-            DISPENSE_TEMPLATE,
+        return render_template(
+            'dispense.html',
             tx_list=[], tx_groups=[],
             nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
@@ -6631,7 +1810,7 @@ def dispense():
         ), 500
 
 
-def _load_delivery(deliveries, raw_id):
+def _load_delivery(deliveries: Collection, raw_id: str | None) -> Doc | None:
     if not raw_id:
         return None
     try:
@@ -6640,7 +1819,7 @@ def _load_delivery(deliveries, raw_id):
         return None
 
 
-def _line_value(line):
+def _line_value(line: Doc) -> float:
     """Value of one receive line.
 
     NEW (Pack pricing): suppliers price by the pack but stock is counted in
@@ -6659,19 +1838,19 @@ def _line_value(line):
     return (line.get('quantity', 0) or 0) * (line.get('price', 0) or 0)
 
 
-def _unit_price(pack_price, pack_size):
+def _unit_price(pack_price: float, pack_size: float | None) -> float:
     """Price of a single countable unit, from the pack price and pack size."""
     pack_size = pack_size or 1
     return pack_price / pack_size if pack_size else pack_price
 
 
-def _delivery_goods_value(transactions, delivery_id):
+def _delivery_goods_value(transactions: Collection, delivery_id: Any) -> float:
     return sum(_line_value(l) for l in
                transactions.find({'type': 'receive', 'delivery_id': delivery_id},
                                  {'_id': 0, 'quantity': 1, 'price': 1, 'line_value': 1}))
 
 
-def _order_rollup(deliveries, transactions, order_number):
+def _order_rollup(deliveries: Collection, transactions: Collection, order_number: str | None) -> Doc | None:
     """NEW (Multiple invoices per order): one purchase order is normally
     fulfilled across several part-deliveries, each with its own invoice. The
     order-level position is therefore the SUM of the invoices raised against
@@ -6705,7 +1884,7 @@ def _order_rollup(deliveries, transactions, order_number):
     }
 
 
-def _delivery_values(transactions, delivery_ids):
+def _delivery_values(transactions: Collection, delivery_ids: Sequence[Any]) -> dict[Any, tuple[float, int]]:
     """delivery_id -> (goods value, line count), in one aggregation."""
     if not delivery_ids:
         return {}
@@ -6721,7 +1900,7 @@ def _delivery_values(transactions, delivery_ids):
                 transactions.aggregate(pipeline)}
     except Exception as e:
         app.logger.warning(f"Delivery value aggregation unavailable: {e}")
-        out = {}
+        out: dict[Any, tuple[float, int]] = {}
         for l in transactions.find({'type': 'receive', 'delivery_id': {'$in': delivery_ids}},
                                    {'_id': 0, 'delivery_id': 1, 'quantity': 1,
                                     'price': 1, 'line_value': 1}):
@@ -6730,7 +1909,7 @@ def _delivery_values(transactions, delivery_ids):
         return out
 
 
-def _reconcile_delivery(delivery, goods_value):
+def _reconcile_delivery(delivery: Doc, goods_value: float) -> Doc:
     """Three-way match: order vs invoice vs goods actually received.
 
     Differences are reported, never enforced. Stock physically standing on the
@@ -6760,7 +1939,7 @@ def _reconcile_delivery(delivery, goods_value):
 
 @app.route('/receive', methods=['GET', 'POST'])
 @login_required
-def receive():
+def receive() -> ResponseReturnValue:
     try:
         client = get_mongo_client()
         db = client['pharmacy_db']
@@ -6781,8 +1960,8 @@ def receive():
         start_date, end_date, window_defaulted = _default_window(start_date, end_date, search)
         page = _requested_page()
 
-        base_query = {'type': 'receive'}
-        date_query = {}
+        base_query: Query = {'type': 'receive'}
+        date_query: Query = {}
         if start_date:
             date_query['$gte'] = datetime.strptime(start_date, '%Y-%m-%d')
         if end_date:
@@ -6979,16 +2158,16 @@ def receive():
             delivery_rows = list(deliveries.find().sort([('status', 1), ('opened_at', -1)]).limit(200))
             values = _delivery_values(transactions, [str(d['_id']) for d in delivery_rows])
             for d in delivery_rows:
-                goods = values.get(str(d['_id']), (0.0, 0))
-                d['goods_value'], d['line_count'] = goods[0], goods[1]
+                goods_value, line_count = values.get(str(d['_id']), (0.0, 0))
+                d['goods_value'], d['line_count'] = goods_value, line_count
                 diff = d['goods_value'] - d.get('invoice_total', 0)
                 matched = abs(diff) < 0.01
                 d['diff_label'] = 'matched' if matched else f'R{diff:+.2f}'
                 d['row_class'] = ('close-to-expire' if d['status'] == 'open'
                                   else ('normal' if matched else 'expired'))
 
-        return render_template_string(
-            RECEIVE_TEMPLATE,
+        return render_template(
+            'receive.html',
             tx_list=tx_list, nav_links=get_nav_links(),
             message=message, start_date=start_date, end_date=end_date,
             search=search, rx_data=rx_data,
@@ -6998,8 +2177,8 @@ def receive():
             pager=pager, window_defaulted=window_defaulted, unit='receipts'
         )
     except ServerSelectionTimeoutError:
-        return render_template_string(
-            RECEIVE_TEMPLATE, tx_list=[], nav_links=get_nav_links(),
+        return render_template(
+            'receive.html', tx_list=[], nav_links=get_nav_links(),
             delivery=None, delivery_lines=[], recon={}, deliveries=[], order_summary=None,
             message="Database connection failed.", start_date='', end_date='', search='', rx_data=None,
             current_user=session.get('user', {}).get('name', ''),
@@ -7009,7 +2188,7 @@ def receive():
 
 @app.route('/add-medication', methods=['GET', 'POST'])
 @login_required
-def add_medication():
+def add_medication() -> ResponseReturnValue:
     if session['user'].get('role') != 'admin':
         flash('Access denied. Only admins can add new medications.')
         return redirect('/reports')
@@ -7047,7 +2226,7 @@ def add_medication():
 
                 if medications.find_one({'name': med_name}):
                     message = f'Medication "{med_name}" already exists. Use Receiving to add stock.'
-                    return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message,
+                    return render_template('add_medication.html', nav_links=get_nav_links(), message=message,
                      current_user=session.get('user', {}).get('name', ''),
                                                   categories=CATEGORIES)
 
@@ -7085,28 +2264,28 @@ def add_medication():
                                f'{initial_balance} units (unit price R{price:.4f}).')
                 else:
                     message = 'Medication added successfully! Receive stock against a delivery.'
-                return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message,
+                return render_template('add_medication.html', nav_links=get_nav_links(), message=message,
                      current_user=session.get('user', {}).get('name', ''),
                                                   categories=CATEGORIES)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-                return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message,
+                return render_template('add_medication.html', nav_links=get_nav_links(), message=message,
                      current_user=session.get('user', {}).get('name', ''),
                                                   categories=CATEGORIES)
 
-        return render_template_string(ADD_MED_TEMPLATE, nav_links=get_nav_links(), message=message,
+        return render_template('add_medication.html', nav_links=get_nav_links(), message=message,
                      current_user=session.get('user', {}).get('name', ''),
                                                   categories=CATEGORIES)
     except ServerSelectionTimeoutError:
-        return render_template_string(
-            ADD_MED_TEMPLATE, nav_links=get_nav_links(),
+        return render_template(
+            'add_medication.html', nav_links=get_nav_links(),
             message="Database connection failed. Please try again later."
         ), 500
 
 
 @app.route('/edit-medication', methods=['GET', 'POST'])
 @login_required
-def edit_medication():
+def edit_medication() -> ResponseReturnValue:
     if session['user'].get('role') != 'admin':
         flash('Access denied. Only admins can edit medications.')
         return redirect('/reports')
@@ -7136,7 +2315,7 @@ def edit_medication():
 
         if not med_name:
             message = 'No medication specified.'
-            return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+            return render_template('edit_medication.html', nav_links=get_nav_links(),
                                           categories=CATEGORIES,
                                           message=message, med_data=None, med_name=None)
 
@@ -7148,7 +2327,7 @@ def edit_medication():
                 f'Medication "{med_name}" not found when attempting to edit.',
                 {'med_name': med_name}
             )
-            return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+            return render_template('edit_medication.html', nav_links=get_nav_links(),
                                           categories=CATEGORIES,
                                           message=message, med_data=None, med_name=med_name)
 
@@ -7181,16 +2360,16 @@ def edit_medication():
                 )
                 message = 'Medication updated successfully!'
                 med_data = medications.find_one({'name': med_name})
-                return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                return render_template('edit_medication.html', nav_links=get_nav_links(),
                                           categories=CATEGORIES,
                                               message=message, med_data=med_data, med_name=med_name)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
-                return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+                return render_template('edit_medication.html', nav_links=get_nav_links(),
                                           categories=CATEGORIES,
                                               message=message, med_data=med_data, med_name=med_name)
 
-        return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+        return render_template('edit_medication.html', nav_links=get_nav_links(),
                                           categories=CATEGORIES,
                                       message=message, med_data=med_data, med_name=med_name)
     except ServerSelectionTimeoutError:
@@ -7199,14 +2378,14 @@ def edit_medication():
         # rather than risk an UnboundLocalError masking the real DB error.
         fallback_med_name = (request.form.get('med_name') if request.method == 'POST'
                              else request.args.get('med_name'))
-        return render_template_string(EDIT_MED_TEMPLATE, nav_links=get_nav_links(),
+        return render_template('edit_medication.html', nav_links=get_nav_links(),
                                           categories=CATEGORIES,
                                       message="Database connection failed.", med_data=None, med_name=fallback_med_name), 500
 
 
 @app.route('/delete-medication', methods=['POST'])
 @login_required
-def delete_medication():
+def delete_medication() -> ResponseReturnValue:
     if session['user'].get('role') != 'admin':
         flash('Access denied. Only admins can delete medications.')
         return redirect('/reports')
@@ -7237,7 +2416,8 @@ def delete_medication():
     return redirect('/reports')
 
 
-def _demand_by_med(transactions, time_filter, med_names=None):
+def _demand_by_med(transactions: Collection, time_filter: Query,
+                   med_names: list[str] | None = None) -> dict[str, Doc]:
     """med_name -> {'shortfall', 'events'} — demand that could not be met.
 
     Kept apart from _movement_by_med on purpose: unmet demand moves no stock,
@@ -7258,7 +2438,7 @@ def _demand_by_med(transactions, time_filter, med_names=None):
                                 'events': {'$sum': 1}}}])}
     except Exception as e:
         app.logger.warning(f"Demand aggregation unavailable, falling back: {e}")
-        out = {}
+        out: dict[str, Doc] = {}
         for t in transactions.find(match, {'_id': 0, 'med_name': 1, 'shortfall': 1}):
             b = out.setdefault(t.get('med_name'), {'shortfall': 0, 'events': 0})
             b['shortfall'] += t.get('shortfall', 0) or 0
@@ -7285,7 +2465,7 @@ CATEGORY_LABELS = {'pharmaceutical': 'Pharmaceuticals',
                    'both': 'All Categories'}
 
 
-def _category_filter(choice):
+def _category_filter(choice: str | None) -> Query:
     """Query fragment for the chosen category view.
 
     Items recorded before categories existed have no field at all, so
@@ -7305,16 +2485,16 @@ def _category_filter(choice):
     return {'category': {'$nin': [CATEGORY_SUPPLY, CATEGORY_DONOR]}}
 
 
-def _category_choice():
+def _category_choice() -> str:
     c = (request.values.get('category') or 'pharmaceutical').strip()
     return c if c in ('pharmaceutical', 'supply', 'donor', 'both') else 'pharmaceutical'
 
 
-def _cat_of(med):
+def _cat_of(med: Doc) -> str:
     return med.get('category') or CATEGORY_PHARM
 
 
-def _active(base=None):
+def _active(base: Query | None = None) -> Query:
     """Add the not-archived condition to a medications query.
 
     Archived items keep every transaction they ever had, so historical reports
@@ -7325,7 +2505,7 @@ def _active(base=None):
     return q
 
 
-def _name_key(name):
+def _name_key(name: str | None) -> str:
     """Sort key for medication names.
 
     FIX (Bug): lists were sorted with MongoDB's default ordering, which
@@ -7337,7 +2517,7 @@ def _name_key(name):
     return (name or '').strip().lower()
 
 
-def _by_name(docs):
+def _by_name(docs: Iterable[Doc]) -> Docs:
     """Sort medication documents the way a human reads a list."""
     return sorted(docs, key=lambda d: _name_key(d.get('name')))
 
@@ -7345,7 +2525,7 @@ def _by_name(docs):
 
 @app.route('/edit-loss', methods=['POST'])
 @login_required
-def edit_loss():
+def edit_loss() -> ResponseReturnValue:
     """Correct the quantity or unit price on a recorded loss.
 
     A loss already moved stock, so changing its quantity has to move stock by
@@ -7450,7 +2630,7 @@ def edit_loss():
 
 @app.route('/remove-expired', methods=['POST'])
 @login_required
-def remove_expired():
+def remove_expired() -> ResponseReturnValue:
     """Write a stated number of expired units off the shelf.
 
     A quantity rather than an all-or-nothing button, because batches expire at
@@ -7510,7 +2690,7 @@ def remove_expired():
 
 @app.route('/remove-expired-bulk', methods=['POST'])
 @login_required
-def remove_expired_bulk():
+def remove_expired_bulk() -> ResponseReturnValue:
     """Write off several expired items in one pass.
 
     The app already knows exactly what has expired, so clearing a month's
@@ -7597,7 +2777,7 @@ def remove_expired_bulk():
 
 @app.route('/correct-expiry', methods=['POST'])
 @login_required
-def correct_expiry():
+def correct_expiry() -> ResponseReturnValue:
     """Fix a wrongly recorded expiry date. Moves no stock, by design."""
     if session['user'].get('role') != 'admin':
         flash('Access denied. Only admins can correct expiry dates.')
@@ -7633,7 +2813,7 @@ def correct_expiry():
 
 @app.route('/reports', methods=['GET', 'POST'])
 @login_required
-def reports():
+def reports() -> ResponseReturnValue:
     is_admin = session['user'].get('role') == 'admin'
     try:
         client = get_mongo_client()
@@ -7647,18 +2827,19 @@ def reports():
 
         report_data = []
         receive_list = []
-        stock_data = []
+        stock_data: Docs = []
         controlled_register = []
         order_request = None
         monthly = None
-        writeoffs = []
+        writeoffs: Docs = []
         writeoff_totals = {'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []}
         unmet_list = []
         duplicates = []
-        unmet_totals = {'item_count': 0, 'shortfall': 0, 'value': 0.0, 'fill_rate': None, 'by_med': []}
+        unmet_totals: Doc = {'item_count': 0, 'shortfall': 0, 'value': 0.0,
+                            'fill_rate': None, 'by_med': []}
         issues = []
         issue_totals = {'lines': 0, 'units': 0, 'value': 0.0, 'dept_count': 0, 'by_dept': [], 'by_med': []}
-        sick_leave = []
+        sick_leave: Docs = []
         sick_leave_totals = {'patients': 0, 'days': 0, 'average': '-', 'longest': 0, 'repeat': []}
         report_type = None
         start_date = None
@@ -7725,7 +2906,7 @@ def reports():
                         now_dt          = datetime.now(timezone.utc)
                         med_filter      = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
                         all_meds        = _by_name(medications.find(_active({**med_filter, **cat_q}), {'_id': 0}))
-                        stock_data      = []
+                        stock_data = []
                         # FIX (Performance): one aggregation for every medication
                         # instead of one per medication. Scoped by name only when a
                         # search has narrowed the set, so the $in list stays small.
@@ -7786,7 +2967,7 @@ def reports():
                             report_title = f'Out of Stock List as of {end_date}'
 
                     elif report_type == 'inventory':
-                        if not start_date or not end_date:
+                        if not start_dt or not end_dt:
                             raise ValueError('Start and end dates are required for this report type.')
                         med_filter   = {'name': {'$regex': search or '', '$options': 'i'}} if search else {}
                         # FIX (Bug): the .limit(300) that used to be here silently
@@ -7881,7 +3062,7 @@ def reports():
                             })
 
                     elif report_type == 'receive_list':
-                        base_query = {'type': 'receive'}
+                        base_query: Query = {'type': 'receive'}
                         if start_date and end_date:
                             base_query['timestamp'] = {'$gte': start_dt, '$lte': end_dt}
                         if search:
@@ -7897,10 +3078,10 @@ def reports():
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
 
                     elif report_type == 'sick_leave':
-                        if not start_date or not end_date:
+                        if not start_dt or not end_dt:
                             raise ValueError('Start and end dates are required for this report type.')
-                        q = {'type': 'dispense', 'outcome': 'Sick leave',
-                             'timestamp': {'$gte': start_dt, '$lte': end_dt}}
+                        q: Query = {'type': 'dispense', 'outcome': 'Sick leave',
+                                    'timestamp': {'$gte': start_dt, '$lte': end_dt}}
                         if search:
                             q['$or'] = [
                                 {'patient':    {'$regex': search, '$options': 'i'}},
@@ -7913,7 +3094,7 @@ def reports():
                         # medication, so listing rows would print the same
                         # certificate once for every item on the prescription.
                         seen, sick_leave = set(), []
-                        per_patient = {}
+                        per_patient: dict[str, Doc] = {}
                         for t in raw:
                             tid = t.get('transaction_id')
                             if tid in seen:
@@ -7930,10 +3111,10 @@ def reports():
                                 'prescriber': t.get('prescriber'),
                                 'dispenser': t.get('dispenser'),
                             })
-                            e = per_patient.setdefault(t.get('patient', ''),
+                            entry = per_patient.setdefault(t.get('patient', ''),
                                                        {'count': 0, 'days': 0})
-                            e['count'] += 1
-                            e['days'] += days
+                            entry['count'] += 1
+                            entry['days'] += days
                         total_days = sum(l['days'] for l in sick_leave)
                         sick_leave_totals = {
                             'patients': len(per_patient),
@@ -7949,7 +3130,7 @@ def reports():
                         report_title = 'Sick Leave Register'
 
                     elif report_type == 'internal_issues':
-                        if not start_date or not end_date:
+                        if not start_dt or not end_dt:
                             raise ValueError('Start and end dates are required for this report type.')
                         q = {'type': 'internal_issue',
                              'timestamp': {'$gte': start_dt, '$lte': end_dt}}
@@ -7961,16 +3142,17 @@ def reports():
                                 {'user':       {'$regex': search, '$options': 'i'}},
                             ]
                         issues = list(transactions.find(q).sort('timestamp', -1).limit(2000))
-                        by_dept, by_med = {}, {}
+                        by_dept: dict[str, Doc] = {}
+                        by_med: dict[str, Doc] = {}
                         for i_ in issues:
                             v = i_.get('line_value')
                             if v is None:
                                 v = (i_.get('quantity', 0) or 0) * (i_.get('price', 0) or 0)
-                            d = by_dept.setdefault(i_.get('department') or 'Unspecified',
+                            dept = by_dept.setdefault(i_.get('department') or 'Unspecified',
                                                    {'lines': 0, 'units': 0, 'value': 0.0})
-                            d['lines'] += 1
-                            d['units'] += i_.get('quantity', 0) or 0
-                            d['value'] += v
+                            dept['lines'] += 1
+                            dept['units'] += i_.get('quantity', 0) or 0
+                            dept['value'] += v
                             m_ = by_med.setdefault(i_.get('med_name', ''),
                                                    {'lines': 0, 'units': 0, 'value': 0.0})
                             m_['lines'] += 1
@@ -8001,7 +3183,7 @@ def reports():
                         report_title = 'Possible double-dispensing'
 
                     elif report_type == 'unmet_demand':
-                        if not start_date or not end_date:
+                        if not start_dt or not end_dt:
                             raise ValueError('Start and end dates are required for this report type.')
                         q = {'type': 'unmet_demand',
                              'timestamp': {'$gte': start_dt, '$lte': end_dt}}
@@ -8016,11 +3198,11 @@ def reports():
                         disp = _movement_by_med(transactions, {'$gte': start_dt, '$lte': end_dt})
                         by_med = {}
                         for u in unmet_list:
-                            e = by_med.setdefault(u.get('med_name', ''),
+                            entry = by_med.setdefault(u.get('med_name', ''),
                                                   {'count': 0, 'shortfall': 0, 'value': 0.0})
-                            e['count'] += 1
-                            e['shortfall'] += u.get('shortfall', 0) or 0
-                            e['value'] += u.get('shortfall_value', 0) or 0
+                            entry['count'] += 1
+                            entry['shortfall'] += u.get('shortfall', 0) or 0
+                            entry['value'] += u.get('shortfall_value', 0) or 0
                         rows_by_med = []
                         for k, v in sorted(by_med.items(), key=lambda kv: -kv[1]['shortfall']):
                             d = disp.get(k, _ZERO_MOVEMENT)['dispensed']
@@ -8045,7 +3227,7 @@ def reports():
                         # still needs removing. Once stock is written off it
                         # leaves that list entirely, so without this report the
                         # loss would only survive as an audit-log line.
-                        if not start_date or not end_date:
+                        if not start_dt or not end_dt:
                             raise ValueError('Start and end dates are required for this report type.')
                         q = {'type': {'$in': ['expiry_removal', 'damage']},
                              'timestamp': {'$gte': start_dt, '$lte': end_dt}}
@@ -8082,11 +3264,11 @@ def reports():
                                 'kind': 'Damage' if w.get('type') == 'damage' else 'Expiry',
                                 'user': w.get('user'),
                             })
-                            e = by_med.setdefault(w.get('med_name', ''),
+                            entry = by_med.setdefault(w.get('med_name', ''),
                                                   {'count': 0, 'units': 0, 'value': 0.0})
-                            e['count'] += 1
-                            e['units'] += units
-                            e['value'] += value
+                            entry['count'] += 1
+                            entry['units'] += units
+                            entry['value'] += value
                         writeoff_totals = {
                             # NOT 'items': Jinja resolves attribute access before
                             # subscript, so writeoff_totals.items would render the
@@ -8105,7 +3287,7 @@ def reports():
                         # report is reproducible — re-running it after a price
                         # change gives the same answer, which a lookup against
                         # today's price would not.
-                        if not start_date:
+                        if not start_dt:
                             raise ValueError('A start date is required; the report covers the period containing it.')
                         # NEW: the same report over any period. The start date
                         # picks a point and the whole surrounding period is
@@ -8114,29 +3296,29 @@ def reports():
                         period_kind = request.values.get('period', 'month')
                         if period_kind not in ('day', 'week', 'month', 'quarter', 'year'):
                             period_kind = 'month'
-                        d = start_dt
+                        anchor = start_dt
                         if period_kind == 'day':
-                            m_start = datetime(d.year, d.month, d.day)
+                            m_start = datetime(anchor.year, anchor.month, anchor.day)
                             m_end = m_start + timedelta(days=1) - timedelta(seconds=1)
                             label = m_start.strftime('%A, %d %B %Y')
                         elif period_kind == 'week':
-                            wd = datetime(d.year, d.month, d.day)
+                            wd = datetime(anchor.year, anchor.month, anchor.day)
                             m_start = wd - timedelta(days=wd.weekday())      # Monday
                             m_end = m_start + timedelta(days=7) - timedelta(seconds=1)
                             label = (f"Week of {m_start.strftime('%d %b')} to "
                                      f"{(m_end).strftime('%d %b %Y')}")
                         elif period_kind == 'quarter':
-                            q = (d.month - 1) // 3
-                            m_start = datetime(d.year, q * 3 + 1, 1)
-                            m_end = (datetime(d.year + (q == 3), 1 if q == 3 else q * 3 + 4, 1)
+                            quarter = (anchor.month - 1) // 3
+                            m_start = datetime(anchor.year, quarter * 3 + 1, 1)
+                            m_end = (datetime(anchor.year + (quarter == 3), 1 if quarter == 3 else quarter * 3 + 4, 1)
                                      - timedelta(seconds=1))
-                            label = f'Q{q + 1} {d.year}'
+                            label = f'Q{quarter + 1} {anchor.year}'
                         elif period_kind == 'year':
-                            m_start = datetime(d.year, 1, 1)
-                            m_end = datetime(d.year + 1, 1, 1) - timedelta(seconds=1)
-                            label = str(d.year)
+                            m_start = datetime(anchor.year, 1, 1)
+                            m_end = datetime(anchor.year + 1, 1, 1) - timedelta(seconds=1)
+                            label = str(anchor.year)
                         else:
-                            m_start = datetime(d.year, d.month, 1)
+                            m_start = datetime(anchor.year, anchor.month, 1)
                             m_end = (datetime(m_start.year + (m_start.month == 12),
                                               1 if m_start.month == 12 else m_start.month + 1, 1)
                                      - timedelta(seconds=1))
@@ -8168,7 +3350,7 @@ def reports():
                         expired_lines = 0
                         estimated_lines = 0
                         visits, patients = set(), set()
-                        per_item = {}
+                        per_item: dict[str, Doc] = {}
                         for l in lines:
                             v, exact = valued(l)
                             t = l.get('type')
@@ -8181,9 +3363,9 @@ def reports():
                                     visits.add(l['transaction_id'])
                                 if l.get('patient'):
                                     patients.add(l['patient'])
-                                e = per_item.setdefault(l.get('med_name', ''), {'units': 0, 'value': 0.0})
-                                e['units'] += l.get('quantity', 0) or 0
-                                e['value'] += v
+                                entry = per_item.setdefault(l.get('med_name', ''), {'units': 0, 'value': 0.0})
+                                entry['units'] += l.get('quantity', 0) or 0
+                                entry['value'] += v
                             elif t == 'receive':
                                 received_value += v
                                 receipt_lines += 1
@@ -8195,10 +3377,10 @@ def reports():
                             elif t == 'internal_issue':
                                 issued_value += v
                                 issued_lines += 1
-                                d = by_dept.setdefault(l.get('department', 'Unspecified'),
+                                dept = by_dept.setdefault(l.get('department', 'Unspecified'),
                                                        {'lines': 0, 'value': 0.0})
-                                d['lines'] += 1
-                                d['value'] += v
+                                dept['lines'] += 1
+                                dept['value'] += v
                             elif t == 'damage':
                                 damaged_value += v
                                 damaged_lines += 1
@@ -8209,7 +3391,7 @@ def reports():
                         # Deliveries and orders, counted by the month the invoice landed.
                         month_dels = list(db['deliveries'].find({'opened_at': period}))
                         invoice_total = sum(d.get('invoice_total', 0) or 0 for d in month_dels)
-                        orders = {}
+                        orders: dict[Any, float] = {}
                         for d in month_dels:
                             orders.setdefault(d.get('order_number'), d.get('order_total', 0) or 0)
 
@@ -8316,7 +3498,8 @@ def reports():
                             transactions, {'$gte': window_start, '$lte': window_end},
                             [m['name'] for m in req_meds] if search else None)
 
-                        by_supplier, unpriced, unsized = {}, 0, 0
+                        by_supplier: dict[str, Docs] = {}
+                        unpriced, unsized = 0, 0
                         for med in req_meds:
                             name    = med.get('name', '')
                             mvd      = movement.get(name, _ZERO_MOVEMENT)
@@ -8388,7 +3571,7 @@ def reports():
                         report_title = 'Order Request'
 
                     elif report_type == 'controlled_drug_register':
-                        if not start_date or not end_date:
+                        if not start_dt or not end_dt:
                             raise ValueError('Start and end dates are required for this report type.')
                         # FIX (Performance): fetch the controlled medications once
                         # and index them by name, instead of a find_one per drug
@@ -8414,9 +3597,10 @@ def reports():
                                 tx_by_med[tx['med_name']].append(tx)
 
                             for med_name in sorted(controlled_meds, key=_name_key):
-                                med = controlled_docs.get(med_name)
-                                if not med:
+                                found = controlled_docs.get(med_name)
+                                if not found:
                                     continue
+                                med = found
                                 try:
                                     current_balance    = med.get('balance', 0)
                                     med_txs            = tx_by_med[med_name]
@@ -8505,8 +3689,8 @@ def reports():
                 return resp
             flash('That report has no table to download.')
 
-        return render_template_string(
-            REPORTS_TEMPLATE,
+        return render_template(
+            'reports.html',
             report_type=report_type, report_data=report_data,
             receive_list=receive_list, stock_data=stock_data,
             controlled_register=controlled_register, order_request=order_request,
@@ -8526,8 +3710,8 @@ def reports():
             search=search, report_title=report_title, is_admin=is_admin
         )
     except ServerSelectionTimeoutError:
-        return render_template_string(
-            REPORTS_TEMPLATE, nav_links=get_nav_links(),
+        return render_template(
+            'reports.html', nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
             report_type=None, report_data=[], receive_list=[], stock_data=[],
             message_class='error',
@@ -8566,7 +3750,7 @@ MONTH_ABBR = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
               'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 
-def _month_sequence(n):
+def _month_sequence(n: int) -> list[tuple[int, int]]:
     """The last n calendar months as (year, month), oldest first."""
     now = datetime.utcnow()
     y, m = now.year, now.month
@@ -8580,9 +3764,9 @@ def _month_sequence(n):
     return seq
 
 
-def _monthly_movement(transactions, window_start):
+def _monthly_movement(transactions: Collection, window_start: datetime) -> dict[str, dict[tuple[int, int], Doc]]:
     """med_name -> (year, month) -> {'dispensed','received','adjusted'}."""
-    movement = defaultdict(dict)
+    movement: defaultdict[str, dict[tuple[int, int], Doc]] = defaultdict(dict)
     pipeline = [
         {'$match': {'timestamp': {'$gte': window_start},
                     'type': {'$in': ['dispense', 'receive', 'adjustment', 'opening_balance', 'expiry_removal',
@@ -8667,7 +3851,8 @@ _ZERO_MOVEMENT = {'dispensed': 0, 'received': 0, 'adjusted': 0, 'expired': 0,
                   'issued': 0, 'damaged': 0}
 
 
-def _movement_by_med(transactions, time_filter, med_names=None):
+def _movement_by_med(transactions: Collection, time_filter: Query,
+                     med_names: list[str] | None = None) -> dict[str, Doc]:
     """med_name -> {'dispensed', 'received', 'adjusted'} over a time window.
 
     'adjusted' is the signed net of stock-take corrections; callers must
@@ -8683,7 +3868,7 @@ def _movement_by_med(transactions, time_filter, med_names=None):
                        'internal_issue', 'damage']}}
     if med_names is not None:
         match['med_name'] = {'$in': med_names}
-    pipeline = [
+    pipeline: list[Doc] = [
         {'$match': match},
         {'$group': {
             '_id': '$med_name',
@@ -8706,7 +3891,7 @@ def _movement_by_med(transactions, time_filter, med_names=None):
                 for r in transactions.aggregate(pipeline)}
     except Exception as e:
         app.logger.warning(f"Movement aggregation unavailable, falling back: {e}")
-        out = {}
+        out: dict[str, Doc] = {}
         for tx in transactions.find(match, {'_id': 0, 'med_name': 1, 'type': 1, 'quantity': 1}):
             b = out.setdefault(tx.get('med_name'), dict(_ZERO_MOVEMENT))
             qty = tx.get('quantity', 0) or 0
@@ -8726,7 +3911,7 @@ def _movement_by_med(transactions, time_filter, med_names=None):
         return out
 
 
-def _activity_by_month(transactions, window_start):
+def _activity_by_month(transactions: Collection, window_start: datetime) -> dict[tuple[int, int], Doc]:
     """(year, month) -> counts of dispensing/receiving ACTIVITY, not units.
 
     Summing `quantity` across different medications adds tablets to vials to
@@ -8738,7 +3923,8 @@ def _activity_by_month(transactions, window_start):
     transaction_id for the visit, so lines and visits are different numbers
     and both are worth knowing.
     """
-    buckets = defaultdict(lambda: {'visits': set(), 'lines': 0, 'patients': set(),
+    buckets: defaultdict[tuple[int, int], Doc] = defaultdict(
+        lambda: {'visits': set(), 'lines': 0, 'patients': set(),
                                    'receipts': 0, 'deliveries': set(), 'adjusted_lines': 0})
     pipeline = [
         {'$match': {'timestamp': {'$gte': window_start},
@@ -8812,14 +3998,14 @@ DISPENSE_PAGE_SIZE = 25    # visits per page (a visit may hold several lines)
 RECEIVE_PAGE_SIZE  = 50    # receipt lines per page
 
 
-def _requested_page():
+def _requested_page() -> int:
     try:
         return max(1, int(request.values.get('page', 1)))
     except (TypeError, ValueError):
         return 1
 
 
-def _default_window(start_date, end_date, search):
+def _default_window(start_date: str | None, end_date: str | None, search: str | None) -> tuple[str | None, str | None, bool]:
     """Fall back to the current month when nothing else narrows the list.
 
     Returns (start_date, end_date, defaulted). A search is deliberately NOT
@@ -8832,7 +4018,7 @@ def _default_window(start_date, end_date, search):
     return today.replace(day=1).strftime('%Y-%m-%d'), today.strftime('%Y-%m-%d'), True
 
 
-def _pager(page, page_size, total):
+def _pager(page: int, page_size: int, total: int) -> Doc:
     pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, pages)
     return {'page': page, 'pages': pages, 'total': total, 'page_size': page_size,
@@ -8930,7 +4116,7 @@ ORDER_REQUEST_COLUMNS = [
 ]
 
 
-def _csv_value(v):
+def _csv_value(v: Any) -> str:
     """Flatten anything a report row might hold into one cell."""
     if v is None:
         return ''
@@ -8941,7 +4127,7 @@ def _csv_value(v):
     return str(v)
 
 
-def _report_csv(report_type, ctx, is_admin=False):
+def _report_csv(report_type: str | None, ctx: Doc, is_admin: bool = False) -> tuple[str, str] | None:
     """(filename, csv text) for the report on screen, or None if it has none."""
     if report_type == 'controlled_drug_register':
         # The register is grouped by medication, each group holding its own
@@ -8974,7 +4160,7 @@ def _report_csv(report_type, ctx, is_admin=False):
         columns = ORDER_REQUEST_COLUMNS
         title = 'Order Request'
     else:
-        spec = CSV_REPORTS.get(report_type)
+        spec = CSV_REPORTS.get(report_type or '')
         if not spec:
             return None
         title, key, columns = spec
@@ -9013,7 +4199,7 @@ DISPENSE_CSV_COLUMNS = [
 DISPENSE_CSV_MAX_LINES = 20000
 
 
-def _dispense_csv(transactions, base_query):
+def _dispense_csv(transactions: Collection, base_query: Query) -> tuple[str, str] | None:
     """(filename, csv text) for the dispensing record the filter matches.
 
     Returns None if the match is too large to hand over in one file.
@@ -9031,7 +4217,7 @@ def _dispense_csv(transactions, base_query):
     if len(lines) > DISPENSE_CSV_MAX_LINES:
         return None
 
-    grouped = {}
+    grouped: dict[Any, Docs] = {}
     for ln in lines:
         grouped.setdefault(ln.get('transaction_id'), []).append(ln)
 
@@ -9056,7 +4242,7 @@ def _dispense_csv(transactions, base_query):
     return f'dispensing-record-{stamp}.csv', out.getvalue()
 
 
-def _past_receivers(db, limit=40):
+def _past_receivers(db: Database, limit: int = 40) -> list[str]:
     """People who have taken stock for a department before.
 
     Offered as suggestions rather than filled in: the right answer changes
@@ -9072,7 +4258,7 @@ def _past_receivers(db, limit=40):
         return []
 
 
-def _new_visit_defaults(current_user):
+def _new_visit_defaults(current_user: Doc) -> Doc:
     """What a fresh dispensing form starts with.
 
     Rendered into the form AND handed to the script that restores it after a
@@ -9086,13 +4272,14 @@ def _new_visit_defaults(current_user):
     }
 
 
-def _birth_decades():
+def _birth_decades() -> list[int]:
     """Decade options, most recent first — most patients are recent births."""
     this = (datetime.utcnow().year // 10) * 10
     return list(range(this, 1919, -10))
 
 
-def _clinical_by_month(transactions, window_start, months):
+def _clinical_by_month(transactions: Collection, window_start: datetime,
+                       months: list[tuple[int, int]]) -> Doc:
     """Outcomes and diagnoses per month, plus a period total per diagnosis.
 
     Counted per VISIT, not per dispensed line: a visit that produced three
@@ -9102,8 +4289,10 @@ def _clinical_by_month(transactions, window_start, months):
     """
     idx = {ym: i for i, ym in enumerate(months)}
     n = len(months)
-    outcomes = {}
-    dx_month, dx_total, seen, patients = {}, {}, set(), set()
+    outcomes: dict[str, Doc] = {}
+    dx_month: dict[str, list[int]] = {}
+    dx_total: dict[str, int] = {}
+    seen, patients = set(), set()
     cursor = transactions.find(
         {'type': 'dispense', 'timestamp': {'$gte': window_start}},
         {'_id': 0, 'timestamp': 1, 'transaction_id': 1, 'outcome': 1,
@@ -9148,7 +4337,7 @@ def _clinical_by_month(transactions, window_start, months):
     }
 
 
-def _dx_trend(counts):
+def _dx_trend(counts: Sequence[int]) -> str:
     """Compare the last completed month against the mean of the ones before."""
     if len(counts) < 3:
         return '-'
@@ -9162,7 +4351,7 @@ def _dx_trend(counts):
     return f"{'up' if pct > 0 else 'down'} {abs(pct):.0f}%"
 
 
-def _parse_expiry(raw):
+def _parse_expiry(raw: Any) -> date | None:
     if not raw:
         return None
     try:
@@ -9171,7 +4360,7 @@ def _parse_expiry(raw):
         return None
 
 
-def _stdev(values):
+def _stdev(values: Sequence[float]) -> float:
     if len(values) < 2:
         return 0.0
     mean = sum(values) / len(values)
@@ -9188,7 +4377,7 @@ DAMAGE_REASONS = ['Broken / spilled', 'Contaminated', 'Cold chain failure',
 
 @app.route('/internal-issue', methods=['GET', 'POST'])
 @login_required
-def internal_issue():
+def internal_issue() -> ResponseReturnValue:
     """Stock leaving the store other than to a patient.
 
     Two actions, deliberately distinct:
@@ -9313,14 +4502,14 @@ def internal_issue():
         recent = list(transactions.find(
             {'type': {'$in': ['internal_issue', 'damage']}}
         ).sort('timestamp', -1).limit(100))
-        return render_template_string(
-            INTERNAL_ISSUE_TEMPLATE, nav_links=get_nav_links(), message=message,
+        return render_template(
+            'internal_issue.html', nav_links=get_nav_links(), message=message,
             current_user=session['user']['name'],
             past_receivers=_past_receivers(db),
             departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=recent)
     except ServerSelectionTimeoutError:
-        return render_template_string(
-            INTERNAL_ISSUE_TEMPLATE, nav_links=get_nav_links(),
+        return render_template(
+            'internal_issue.html', nav_links=get_nav_links(),
             message='Database connection failed. Please try again later.',
             current_user=session.get('user', {}).get('name', ''),
             past_receivers=[],
@@ -9404,17 +4593,17 @@ TEMP_PEN_MEANING = {'min': '= morning check',
                     'actual': '= average'}
 
 
-def _month_bounds(year, month):
+def _month_bounds(year: int, month: int) -> tuple[datetime, datetime, int]:
     start = datetime(year, month, 1)
     end = datetime(year + (month == 12), 1 if month == 12 else month + 1, 1)
     return start, end, (end - start).days
 
 
-def _temp_scale(location):
+def _temp_scale(location: str) -> dict[str, Any]:
     return TEMP_SCALES['fridge' if location == 'Fridge' else 'room']
 
 
-def _temp_row(value, anchors):
+def _temp_row(value: float, anchors: Sequence[tuple[int, float]]) -> float:
     """Row position (fractional, 0 at the top) for a temperature.
 
     Interpolates between the printed labels, so a value lands where a person
@@ -9434,7 +4623,7 @@ def _temp_row(value, anchors):
     return float(anchors[-1][0])
 
 
-def _temp_marker(shape, x, y, colour):
+def _temp_marker(shape: str, x: float, y: float, colour: str) -> str:
     if shape == 'circle':
         return (f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.2" fill="{colour}" '
                 f'stroke="#ffffff" stroke-width="1"/>')
@@ -9446,7 +4635,7 @@ def _temp_marker(shape, x, y, colour):
             f'stroke="#ffffff" stroke-width="1"/>')
 
 
-def _reading_temp(r):
+def _reading_temp(r: Doc | None) -> float | None:
     """The single temperature on a reading, or None.
 
     One figure is recorded per check. Readings saved under the earlier
@@ -9466,7 +4655,8 @@ def _reading_temp(r):
         return None
 
 
-def _temperature_chart(readings, year, month, location, thermometer=''):
+def _temperature_chart(readings: Iterable[Doc], year: int, month: int, location: str,
+                       thermometer: str = '') -> str:
     """SR-TC-001 reproduced as SVG, already filled in from the recorded data.
 
     Server-rendered with no JavaScript, so the printed sheet is exactly what
@@ -9637,17 +4827,17 @@ def _temperature_chart(readings, year, month, location, thermometer=''):
 
     # ---- initials and time of check, as the form provides for -----------
     for i in range(days_in_month * 2):
-        r = by_slot.get(i)
-        if not r:
+        slot = by_slot.get(i)
+        if not slot:
             continue
-        if r.get('initials'):
-            txt(cx(i), init_y + 14, str(r['initials'])[:4], 7.5, 'middle')
-        if r.get('check_time'):
+        if slot.get('initials'):
+            txt(cx(i), init_y + 14, str(slot['initials'])[:4], 7.5, 'middle')
+        if slot.get('check_time'):
             # Rotated: at 62 columns two horizontal times per day overlap.
             tx_, ty_ = cx(i), time_y + 17
             o.append(f'<text x="{tx_:.1f}" y="{ty_:.1f}" font-size="7" '
                      f'text-anchor="start" transform="rotate(-90 {tx_:.1f} {ty_:.1f})" '
-                     f'fill="#000000">{escape(str(r["check_time"])[:5])}</text>')
+                     f'fill="#000000">{escape(str(slot["check_time"])[:5])}</text>')
 
     # ---- footer: signing block and the form's two legend boxes ----------
     fy = table_bot + 6
@@ -9687,7 +4877,7 @@ def _temperature_chart(readings, year, month, location, thermometer=''):
 
 @app.route('/temperature', methods=['GET', 'POST'])
 @login_required
-def temperature():
+def temperature() -> ResponseReturnValue:
     current_user = session['user']['name']
     message_class, message = _flashed_banner()
     is_admin = session['user'].get('role') == 'admin'
@@ -9801,7 +4991,8 @@ def temperature():
                 sess = local_session()
                 day = datetime(now.year, now.month, now.day)
                 stamp = now.strftime('%H:%M')
-                inits = ''.join(w[0] for w in current_user.split() if w)[:4].upper()
+                recorder_initials = ''.join(
+                    w[0] for w in current_user.split() if w)[:4].upper()
 
                 saved, corrected, breaches, rejected = [], [], [], []
                 for idx, loc_name in enumerate(TEMP_LOCATIONS):
@@ -9823,7 +5014,7 @@ def temperature():
                     doc = {
                         'location': loc_name, 'date': day, 'session': sess,
                         'temp': temp,
-                        'initials': inits,
+                        'initials': recorder_initials,
                         'check_time': stamp,
                         'thermometer': TEMP_THERMOMETERS.get(loc_name, ''),
                         'note': '',
@@ -9889,7 +5080,7 @@ def temperature():
                         .sort([('date', 1), ('session', 1)]))
         lo_lim, hi_lim = TEMP_LIMITS.get(location, (15.0, 25.0))
 
-        per_day = {}
+        per_day: dict[int, Doc] = {}
         breach_count = 0
         for r in readings:
             slot = per_day.setdefault(r['date'].day, {})
@@ -9966,8 +5157,8 @@ def temperature():
             # looking at, a row per reading is what a spreadsheet can count.
             return _register_csv_response('temperature', readings)
 
-        return render_template_string(
-            TEMPERATURE_TEMPLATE, nav_links=get_nav_links(), message=message,
+        return render_template(
+            'temperature.html', nav_links=get_nav_links(), message=message,
             message_class=message_class, is_admin=is_admin,
             locations=TEMP_LOCATIONS, sessions=TEMP_SESSIONS,
             location=location, today=today.strftime('%Y-%m-%d'),
@@ -9984,8 +5175,8 @@ def temperature():
             chart=_temperature_chart(readings, year, month, location, thermometer))
 
     except ServerSelectionTimeoutError:
-        return render_template_string(
-            TEMPERATURE_TEMPLATE, nav_links=get_nav_links(),
+        return render_template(
+            'temperature.html', nav_links=get_nav_links(),
             message='Database connection failed. Please try again later.',
             message_class='error', is_admin=is_admin,
             locations=TEMP_LOCATIONS, sessions=TEMP_SESSIONS,
@@ -10034,7 +5225,7 @@ LOAN_DEFAULT_DAYS = 14          # typical fracture follow-up interval
 LOAN_MAX_DAYS = 365
 
 
-def _loan_next_code(items, item_type):
+def _loan_next_code(items: Collection, item_type: str) -> str:
     """Next free code for a type, e.g. CR-004.
 
     Scans existing codes rather than keeping a counter, so a deleted or
@@ -10053,13 +5244,13 @@ def _loan_next_code(items, item_type):
     return f'{prefix}-{n:03d}'
 
 
-def _open_loans_by_code(loans):
+def _open_loans_by_code(loans: Collection) -> dict[str, Doc]:
     """{item_code: open loan} — the single source of truth for 'is it out'."""
     return {doc['item_code']: doc
             for doc in loans.find({'status': LOAN_STATUS_OUT})}
 
 
-def _loan_rows(items, loans, today):
+def _loan_rows(items: Collection, loans: Collection, today: date) -> Docs:
     """The asset register with availability folded in.
 
     One pass over each collection, so the page cost does not grow with the
@@ -10094,14 +5285,14 @@ def _loan_rows(items, loans, today):
     return rows
 
 
-def _loan_available(items, loans):
+def _loan_available(items: Collection, loans: Collection) -> Docs:
     """Items that can be lent right now: on the shelf AND not already out."""
     out = set(_open_loans_by_code(loans))
     return [it for it in items.find({'status': 'Available'}).sort('item_code', 1)
             if it.get('item_code') not in out]
 
 
-def _loan_activity(loans, months=6):
+def _loan_activity(loans: Collection, months: int = 6) -> Docs:
     """Loans issued / returned / still out, by month, in one aggregation."""
     today = datetime.utcnow().date()
     first = today.replace(day=1)
@@ -10115,7 +5306,9 @@ def _loan_activity(loans, months=6):
     span.reverse()
     start = datetime(span[0][0], span[0][1], 1)
 
-    issued, returned, days_out = {}, {}, {}
+    issued: dict[tuple[int, int], int] = {}
+    returned: dict[tuple[int, int], int] = {}
+    days_out: dict[tuple[int, int], list[int]] = {}
     for doc in loans.find({'issued_date': {'$gte': start}}):
         d = doc.get('issued_date')
         if not d:
@@ -10146,7 +5339,7 @@ def _loan_activity(loans, months=6):
 
 @app.route('/loan-items', methods=['GET', 'POST'])
 @login_required
-def loan_items():
+def loan_items() -> ResponseReturnValue:
     if session['user'].get('role') != 'admin':
         flash('Access denied. Only admins can change the equipment register.')
         return redirect(url_for('loans'))
@@ -10223,8 +5416,8 @@ def loan_items():
             flash('Unknown action.')
             return redirect(url_for('loan_items'))
 
-        return render_template_string(
-            LOAN_ITEMS_TEMPLATE,
+        return render_template(
+            'loan_items.html',
             nav_links=get_nav_links(),
             message=message, message_class=message_class,
             rows=_loan_rows(items, loans_col, today),
@@ -10240,7 +5433,7 @@ def loan_items():
 
 @app.route('/loans', methods=['GET', 'POST'])
 @login_required
-def loans():
+def loans() -> ResponseReturnValue:
     current_user = session['user']['name']
     message_class, message = _flashed_banner()
     is_admin = session['user'].get('role') == 'admin'
@@ -10415,7 +5608,7 @@ def loans():
                 'overdue': overdue,
             })
 
-        query = {}
+        query: Query = {}
         if status_filter in (LOAN_STATUS_OUT, LOAN_STATUS_RETURNED, LOAN_STATUS_LOST):
             query['status'] = status_filter
         if q:
@@ -10455,8 +5648,8 @@ def loans():
             # screen, so adding both listed the open loans twice.
             return _register_csv_response('loans', history)
 
-        return render_template_string(
-            LOANS_TEMPLATE,
+        return render_template(
+            'loans.html',
             nav_links=get_nav_links(),
             message=message, message_class=message_class,
             is_admin=is_admin,
@@ -10531,9 +5724,9 @@ CONTROLLED_MOVEMENT_LABEL = {
 }
 
 
-def _controlled_delta(tx):
+def _controlled_delta(tx: Doc) -> float:
     """What this movement does to the balance: negative means it left."""
-    direction = CONTROLLED_DIRECTION.get(tx.get('type'), 0)
+    direction = CONTROLLED_DIRECTION.get(tx.get('type') or '', 0)
     qty = tx.get('quantity', 0) or 0
     if direction == 0:
         return qty              # an adjustment carries its own sign
@@ -10572,7 +5765,7 @@ STAFF_SEED = [
 KEY_OFFICER_SEED = [(n, r, c) for n, r, c, _p, _d in STAFF_SEED]
 
 
-def _seed_key_officers(officers):
+def _seed_key_officers(officers: Collection) -> None:
     """Put the roster in place, and fill in anything it has not got yet.
 
     This runs on a pharmacy that has been using the app for months, so it
@@ -10611,13 +5804,15 @@ def _seed_key_officers(officers):
         app.logger.warning(f'staff roster could not be completed: {e}')
 
 
-def _staff_named_for(db, job):
+def _staff_named_for(db: Database | None, job: str) -> list[str]:
     """Everyone on the roster who may do this job, in name order.
 
     Asked of the roster rather than written into the page, so adding a nurse
     is one entry in one place and she appears everywhere she should.
     """
     try:
+        if db is None:
+            raise ServerSelectionTimeoutError('no database on this path')
         officers = db['key_officers']
         _seed_key_officers(officers)
         return sorted(
@@ -10633,14 +5828,14 @@ def _staff_named_for(db, job):
                        if (p if job == 'prescriber' else d)), key=str.lower)
 
 
-def _officer_names(officers, in_charge_only=True):
+def _officer_names(officers: Collection, in_charge_only: bool = True) -> list[str]:
     q = {'active': True}
     if in_charge_only:
         q['in_charge'] = True
     return [d['name'] for d in officers.find(q).sort('name', 1)]
 
 
-def _is_in_charge(officers, name):
+def _is_in_charge(officers: Collection, name: str | None) -> bool:
     """Is this person an officer in charge? Unknown names are not."""
     if not name:
         return False
@@ -10648,7 +5843,7 @@ def _is_in_charge(officers, name):
     return bool(doc and doc.get('in_charge'))
 
 
-def _user_in_charge(officers, name, is_admin):
+def _user_in_charge(officers: Collection, name: str | None, is_admin: bool) -> bool:
     """Whether the logged-in user may be named as the officer in charge.
 
     The roster decides for anybody on it — that is the point of the flag, and
@@ -10663,13 +5858,50 @@ def _user_in_charge(officers, name, is_admin):
     return bool(is_admin)
 
 
+# Taking the key and taking it back are not the same job, and for a while the
+# app asked the same question for both.
+#
+# "In charge" means the nursing officer who holds the store key while the
+# pharmacist is away. The pharmacist is deliberately not one of those — he is
+# the one handing it over — so he is on the roster with the flag off, which is
+# right. But the return form used that same flag to decide who could be named
+# as RECEIVING the key back, and receiving it back is precisely the
+# pharmacist's job. The result was that the pharmacist could not find his own
+# name anywhere on the return, and the one-click button was hidden from him:
+# locked out of his own register by a correct entry on the roster.
+#
+# So receiving is its own question. Anyone who may hold the key may also take
+# it back — an officer in charge can receive it from another over a long
+# weekend — and so may a pharmacist. Nobody who could name themselves before
+# has lost anything; the pharmacist has been added.
+def _is_pharmacist(doc: Doc | None) -> bool:
+    return bool(doc) and 'pharmacist' in str((doc or {}).get('role', '')).lower()
+
+
+def _key_receiver_names(officers: Collection) -> list[str]:
+    """Who may be named as receiving the key back, or as the pharmacist on it."""
+    return sorted(
+        {d['name'] for d in officers.find({'active': True})
+         if d.get('name') and (d.get('in_charge') or _is_pharmacist(d))},
+        key=str.lower)
+
+
+def _user_may_receive(officers: Collection, name: str | None,
+                      is_admin: bool) -> bool:
+    """Whether the logged-in user may be named as receiving the key back."""
+    doc = officers.find_one({'name': name, 'active': True})
+    if doc:
+        return bool(doc.get('in_charge')) or _is_pharmacist(doc)
+    return bool(is_admin)
+
+
 KEY_AWAY_WEEKDAY = 4          # Friday (Monday = 0)
 KEY_RETURN_WEEKDAY = 0        # Monday
 KEY_AWAY_TIME = (11, 30)      # he leaves
 KEY_RETURN_TIME = (12, 0)     # he is back
 
 
-def _key_due_back(issued_at):
+def _key_due_back(issued_at: datetime) -> datetime:
     """When an issue is expected back."""
     wd = issued_at.weekday()
     if wd in (KEY_AWAY_WEEKDAY, 5, 6):           # Fri, Sat, Sun
@@ -10681,12 +5913,12 @@ def _key_due_back(issued_at):
     return issued_at.replace(hour=23, minute=59, second=59, microsecond=0)
 
 
-def _key_is_weekend_hold(issued_at):
+def _key_is_weekend_hold(issued_at: datetime) -> bool:
     """True when this issue spans the pharmacist's absence."""
     return issued_at.weekday() in (KEY_AWAY_WEEKDAY, 5, 6)
 
 
-def _held_for(since, now):
+def _held_for(since: datetime, now: datetime) -> str:
     """Plain-language gap, e.g. '4h 20m' or '2 days 3h'."""
     secs = max(0, int((now - since).total_seconds()))
     days, rem = divmod(secs, 86400)
@@ -10711,11 +5943,11 @@ def _held_for(since, now):
 # somebody logging in would be a far worse problem than a missing row, so a
 # failure in here is logged and swallowed.
 # ---------------------------------------------------------------------------
-def _key_control(db):
+def _key_control(db: Database) -> Collection:
     return db['key_control']
 
 
-def _key_arm_handover(user_name):
+def _key_arm_handover(user_name: str) -> None:
     """The pharmacist has logged out, so the key is up for handover."""
     try:
         db = get_mongo_client()['pharmacy_db']
@@ -10730,7 +5962,7 @@ def _key_arm_handover(user_name):
         app.logger.warning(f'key handover arm failed: {e}')
 
 
-def _key_in_away_window(now):
+def _key_in_away_window(now: datetime) -> bool:
     """Between the pharmacist leaving on Friday and returning on Monday.
 
     A safety net for the Friday he closes the browser instead of logging out,
@@ -10747,7 +5979,8 @@ def _key_in_away_window(now):
     return False
 
 
-def _key_open_issue(keys, officers, holder, pharmacist, now, source):
+def _key_open_issue(keys: Collection, officers: Collection, holder: str, pharmacist: str,
+                    now: datetime, source: str) -> str:
     """Start a row for `holder`, filled in from what the login already says."""
     ref = f"KEY-{now:%Y%m%d}-{uuid4().hex[:4].upper()}"
     keys.insert_one({
@@ -10775,7 +6008,7 @@ def _key_open_issue(keys, officers, holder, pharmacist, now, source):
     return ref
 
 
-def _key_on_login(user_name, is_admin):
+def _key_on_login(user_name: str, is_admin: bool) -> None:
     """Called once per successful login. Keeps the register in step."""
     try:
         db = get_mongo_client()['pharmacy_db']
@@ -10829,7 +6062,7 @@ def _key_on_login(user_name, is_admin):
         app.logger.warning(f'key register login hook failed: {e}')
 
 
-def _key_last_pharmacist(keys):
+def _key_last_pharmacist(keys: Collection) -> str:
     """Whoever last handed the key over, for filling the pharmacist column."""
     last = keys.find_one({'pharmacist': {'$nin': [None, '']}},
                          sort=[('issued_at', -1)])
@@ -10838,7 +6071,7 @@ def _key_last_pharmacist(keys):
 
 @app.route('/key-register', methods=['GET', 'POST'])
 @login_required
-def key_register():
+def key_register() -> ResponseReturnValue:
     current_user = session['user']['name']
     message_class, message = _flashed_banner()
     is_admin = session['user'].get('role') == 'admin'
@@ -10852,6 +6085,8 @@ def key_register():
         # officer in charge. Their name is kept as the person who typed it,
         # but it is never dropped into a field that asserts authority.
         user_in_charge = _user_in_charge(officers, current_user, is_admin)
+        # Receiving the key back is a different question from holding it.
+        user_may_receive = _user_may_receive(officers, current_user, is_admin)
 
         if request.method == 'POST':
             action = request.form.get('action')
@@ -11001,7 +6236,8 @@ def key_register():
 
                 fields = ['pharmacist', 'recipient_name', 'returning_officer',
                           'receiving_officer', 'return_pharmacist', 'comments']
-                updates, changes = {}, []
+                updates: Doc = {}
+                changes: list[str] = []
                 for f in fields:
                     if f not in request.form:
                         continue
@@ -11139,7 +6375,7 @@ def key_register():
             start, end = end, start
         q = (request.args.get('q') or '').strip()
 
-        query = {'issued_date': {'$gte': start, '$lt': end + timedelta(days=1)}}
+        query: Query = {'issued_date': {'$gte': start, '$lt': end + timedelta(days=1)}}
         if q:
             rx = {'$regex': re.escape(q), '$options': 'i'}
             query['$or'] = [{'recipient_name': rx}, {'pharmacist': rx},
@@ -11223,11 +6459,13 @@ def key_register():
         if request.values.get('export') == 'csv':
             return _register_csv_response('key_register', entries)
 
-        return render_template_string(
-            KEY_REGISTER_TEMPLATE, nav_links=get_nav_links(),
+        return render_template(
+            'key_register.html', nav_links=get_nav_links(),
             message=message, message_class=message_class, is_admin=is_admin,
             current_user=current_user, user_in_charge=user_in_charge,
+            user_may_receive=user_may_receive,
             officer_names=_officer_names(officers),
+            receiver_names=_key_receiver_names(officers),
             roster=list(officers.find().sort([('in_charge', -1), ('name', 1)])),
             open_entry=open_entry, last_return=last_return,
             entries=entries, still_out_count=still_out_count,
@@ -11243,7 +6481,7 @@ def key_register():
 
 @app.route('/dashboard', methods=['GET'])
 @login_required
-def dashboard():
+def dashboard() -> ResponseReturnValue:
     is_admin = session['user'].get('role') == 'admin'
     message = None
 
@@ -11286,7 +6524,7 @@ def dashboard():
                  'per_visit': ['-'] * len(months), 'patients': [0] * len(months),
                  'receipts': [0] * len(months), 'deliveries': [0] * len(months),
                  'adjusted_lines': [0] * len(months)}
-    st_empty = {'counted': [0] * len(months), 'agreed': [0] * len(months),
+    st_empty: dict[str, list[Any]] = {'counted': [0] * len(months), 'agreed': [0] * len(months),
                 'short_units': [0] * len(months), 'over_units': [0] * len(months),
                 'accuracy': ['-'] * len(months)}
 
@@ -11300,7 +6538,7 @@ def dashboard():
         # totals are kept as VALUE (money adds up across dosage forms; units
         # do not) plus the countable activity figures fetched below.
         n_m = len(months)
-        totals = {'val_dispensed': [0.0] * n_m, 'val_received': [0.0] * n_m,
+        totals: dict[str, list[Any]] = {'val_dispensed': [0.0] * n_m, 'val_received': [0.0] * n_m,
                   'val_adjusted': [0.0] * n_m}
         activity = _activity_by_month(db['transactions'], window_start)
         demand = _demand_by_med(db['transactions'], {'$gte': window_start})
@@ -11380,7 +6618,7 @@ def dashboard():
             })
 
         # --- activity rows ------------------------------------------------
-        act = {'visits': [], 'lines': [], 'per_visit': [], 'patients': [],
+        act: Doc = {'visits': [], 'lines': [], 'per_visit': [], 'patients': [],
                'receipts': [], 'deliveries': [], 'adjusted_lines': []}
         for ym in months:
             b = activity.get(ym) or {'visits': set(), 'lines': 0, 'patients': set(),
@@ -11490,7 +6728,8 @@ def dashboard():
             st_totals = {'counted': [0] * len(months), 'agreed': [0] * len(months),
                          'short_units': [0] * len(months), 'over_units': [0] * len(months),
                          'accuracy': ['-'] * len(months)}
-            net_by_med = defaultdict(lambda: {'net': 0, 'count': 0, 'last': None})
+            net_by_med: defaultdict[str, Doc] = defaultdict(
+                lambda: {'net': 0, 'count': 0, 'last': None})
             for c in counts:
                 ts = c.get('timestamp')
                 v = c.get('variance', 0) or 0
@@ -11528,8 +6767,8 @@ def dashboard():
                 key=lambda n: -n['value']
             )[:25]
 
-        return render_template_string(
-            DASHBOARD_TEMPLATE, nav_links=get_nav_links(), message=message,
+        return render_template(
+            'dashboard.html', nav_links=get_nav_links(), message=message,
             is_admin=is_admin, month_labels=month_labels, months_back=months_back,
             month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
             search=search, category=cat, category_label=CATEGORY_LABELS[cat],
@@ -11540,8 +6779,8 @@ def dashboard():
         )
 
     except ServerSelectionTimeoutError:
-        return render_template_string(
-            DASHBOARD_TEMPLATE, nav_links=get_nav_links(),
+        return render_template(
+            'dashboard.html', nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
             is_admin=is_admin, month_labels=month_labels, months_back=months_back,
             month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
@@ -11577,7 +6816,7 @@ DISCREPANCY_LABELS = {
 }
 
 
-def classify_variance(variance):
+def classify_variance(variance: float) -> str:
     """variance = physical count - system balance."""
     if variance < 0:
         return DISCREPANCY_ISSUED_NOT_RECORDED
@@ -11586,7 +6825,7 @@ def classify_variance(variance):
     return DISCREPANCY_NONE
 
 
-def _flashed_banner():
+def _flashed_banner() -> tuple[str | None, str | None]:
     """(css_class, message) for the banner, with Flask's default normalised.
 
     flash('text') with no category stores the category as the literal string
@@ -11599,11 +6838,11 @@ def _flashed_banner():
     flashed = get_flashed_messages(with_categories=True)
     if not flashed:
         return None, None
-    category, text = flashed[0]
+    category, text = cast('list[tuple[str, str]]', flashed)[0]
     return ('error' if category in (None, '', 'message') else category), text
 
 
-def write_audit_entry(action, target_type, target_id, changes):
+def write_audit_entry(action: str, target_type: str, target_id: Any, changes: Any) -> None:
     """Write straight to audit_log in the shape AUDIT_TEMPLATE renders.
 
     audit_logger.py's decorators only wrap the dispense/receive/medication
@@ -11628,7 +6867,7 @@ def write_audit_entry(action, target_type, target_id, changes):
 
 @app.route('/stock-take', methods=['GET', 'POST'])
 @login_required
-def stock_take():
+def stock_take() -> ResponseReturnValue:
     if session['user'].get('role') != 'admin':
         flash('Access denied. Only admins can perform a stock take.')
         return redirect('/reports')
@@ -11856,8 +7095,8 @@ def stock_take():
             if request.values.get('export') == 'csv':
                 return _register_csv_response('stock_take', counts)
 
-            return render_template_string(
-                STOCK_TAKE_TEMPLATE, nav_links=get_nav_links(), message=message,
+            return render_template(
+                'stock_take.html', nav_links=get_nav_links(), message=message,
                 active=active, counts=counts, med_names=med_names,
                 uncounted=uncounted, sessions=[],
                 agreed_count=sum(1 for c in counts if c['variance'] == 0),
@@ -11871,23 +7110,24 @@ def stock_take():
             s['counted_lines']     = counts_col.count_documents({'stock_take_id': sid})
             s['discrepancy_lines'] = counts_col.count_documents(
                 {'stock_take_id': sid, 'variance': {'$ne': 0}})
-        return render_template_string(
-            STOCK_TAKE_TEMPLATE, nav_links=get_nav_links(), message=message,
+        return render_template(
+            'stock_take.html', nav_links=get_nav_links(), message=message,
             active=None, sessions=sessions, counts=[], med_names=[], uncounted=[],
             agreed_count=0, issued_not_recorded=0, recorded_not_issued=0,
         )
 
     except ServerSelectionTimeoutError:
-        return render_template_string(
-            STOCK_TAKE_TEMPLATE, nav_links=get_nav_links(),
+        return render_template(
+            'stock_take.html', nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
             active=None, sessions=[], counts=[], med_names=[], uncounted=[],
             agreed_count=0, issued_not_recorded=0, recorded_not_issued=0,
         ), 500
 
 
-def _record_count(medications, transactions, counts_col, st, med_name, counted,
-                  note, user):
+def _record_count(medications: Collection, transactions: Collection,
+                  counts_col: Collection, st: Doc, med_name: str, counted: float,
+                  note: str, user: str) -> float | None:
     """Apply one physical count. Returns the variance, or None if unknown item.
 
     Shared by the single-item path and the count sheet so both correct stock,
@@ -11930,7 +7170,7 @@ def _record_count(medications, transactions, counts_col, st, med_name, counted,
     return variance
 
 
-def _load_stock_take(stock_takes, raw_id):
+def _load_stock_take(stock_takes: Collection, raw_id: str | None) -> Doc | None:
     """Resolve a stock take by its string _id, tolerating a malformed value."""
     if not raw_id:
         return None
@@ -11942,7 +7182,7 @@ def _load_stock_take(stock_takes, raw_id):
 
 @app.route('/audit', methods=['GET'])
 @login_required
-def audit_log():
+def audit_log() -> ResponseReturnValue:
     if session['user'].get('role') != 'admin':
         flash('Access denied. Only admins can view the audit log.', 'error')
         return redirect('/reports')
@@ -11963,7 +7203,7 @@ def audit_log():
         client = get_mongo_client()
         db = client['pharmacy_db']
 
-        date_query = {}
+        date_query: Query = {}
         if start_date:
             date_query['$gte'] = datetime.strptime(start_date, '%Y-%m-%d')
         if end_date:
@@ -11971,7 +7211,7 @@ def audit_log():
             date_query['$lte'] = end_dt
 
         if view == 'errors':
-            query = {}
+            query: Query = {}
             if date_query:
                 query['timestamp'] = date_query
             if search:
@@ -12037,8 +7277,8 @@ def audit_log():
         if request.values.get('export') == 'csv':
             return _register_csv_response('audit', entries)
 
-        return render_template_string(
-            AUDIT_TEMPLATE,
+        return render_template(
+            'audit.html',
             nav_links=get_nav_links(),
             message=message,
             view=view,
@@ -12048,8 +7288,8 @@ def audit_log():
             search=search
         )
     except ServerSelectionTimeoutError:
-        return render_template_string(
-            AUDIT_TEMPLATE,
+        return render_template(
+            'audit.html',
             nav_links=get_nav_links(),
             message="Database connection failed. Please try again later.",
             view=view, entries=[], start_date=start_date, end_date=end_date, search=search
@@ -12058,7 +7298,7 @@ def audit_log():
 
 @app.route('/delete-dispense', methods=['POST'])
 @login_required
-def delete_dispense():
+def delete_dispense() -> ResponseReturnValue:
     if session['user'].get('role') != 'admin':
         flash('Only admins can delete dispense transactions.', 'error')
         return redirect(url_for('dispense'))
@@ -12099,7 +7339,7 @@ def delete_dispense():
 
 @app.route('/edit-receive/<receive_id>', methods=['GET', 'POST'])
 @login_required
-def edit_receive(receive_id):
+def edit_receive(receive_id: str) -> ResponseReturnValue:
     try:
         client = get_mongo_client()
         db = client['pharmacy_db']
@@ -12111,8 +7351,8 @@ def edit_receive(receive_id):
         search     = request.values.get('search')
         current_user = session['user']['name']
 
-        base_query = {'type': 'receive'}
-        date_query = {}
+        base_query: Query = {'type': 'receive'}
+        date_query: Query = {}
         if start_date:
             date_query['$gte'] = datetime.strptime(start_date, '%Y-%m-%d')
         if end_date:
@@ -12214,8 +7454,8 @@ def edit_receive(receive_id):
             except Exception as e:
                 message = f"Update failed: {str(e)}"
 
-        return render_template_string(
-            RECEIVE_TEMPLATE,
+        return render_template(
+            'receive.html',
             tx_list=tx_list, nav_links=get_nav_links(),
             message=message, start_date=start_date, end_date=end_date,
             search=search, rx_data=rx_data,
@@ -12229,7 +7469,7 @@ def edit_receive(receive_id):
 
 @app.route('/delete-receive', methods=['POST'])
 @login_required
-def delete_receive():
+def delete_receive() -> ResponseReturnValue:
     if session['user'].get('role') != 'admin':
         flash('Only admins can delete receive transactions.', 'error')
         return redirect(url_for('receive'))
@@ -12280,7 +7520,7 @@ def delete_receive():
 DIAGNOSIS_SUGGESTION_LIMIT = 10
 
 
-def _diagnosis_matches(query, limit=DIAGNOSIS_SUGGESTION_LIMIT):
+def _diagnosis_matches(query: str, limit: int = DIAGNOSIS_SUGGESTION_LIMIT) -> list[str]:
     """The standard diagnoses worth offering for what has been typed.
 
     Ranked, because the old version returned the first ten entries in list
@@ -12360,7 +7600,7 @@ REGISTER_CSV = {
 }
 
 
-def _register_csv(kind, rows):
+def _register_csv(kind: str, rows: Iterable[Doc]) -> tuple[str, str]:
     """(filename, csv text) for one of the registers."""
     title, columns = REGISTER_CSV[kind]
     out = io.StringIO()
@@ -12373,7 +7613,7 @@ def _register_csv(kind, rows):
     return f"{title.lower().replace(' ', '-')}-{stamp}.csv", out.getvalue()
 
 
-def _register_csv_response(kind, rows):
+def _register_csv_response(kind: str, rows: Iterable[Doc]) -> Response:
     """The download itself.
 
     An empty register still hands over the file, with its column headings and
@@ -12407,7 +7647,7 @@ def _register_csv_response(kind, rows):
 DUPLICATE_WINDOW_MINUTES = 10
 
 
-def _duplicate_visits(transactions, days=180, limit=200):
+def _duplicate_visits(transactions: Collection, days: int = 180, limit: int = 200) -> Docs:
     """Visits that are probably one visit recorded twice.
 
     Returns a list of {patient, med_name, quantity, first, second, minutes,
@@ -12425,7 +7665,7 @@ def _duplicate_visits(transactions, days=180, limit=200):
         app.logger.warning(f'duplicate scan unavailable: {e}')
         return []
 
-    by_key = {}
+    by_key: dict[tuple[Any, ...], Docs] = {}
     for r in rows:
         key = ((r.get('patient') or '').strip().lower(),
                (r.get('med_name') or '').strip().lower(),
@@ -12485,7 +7725,7 @@ BACKUP_COLLECTIONS = [
 ]
 
 
-def _json_safe(value):
+def _json_safe(value: Any) -> Any:
     """Anything Mongo stores, written so it can be read back."""
     if isinstance(value, ObjectId):
         return {'$oid': str(value)}
@@ -12538,10 +7778,10 @@ PUTTING IT BACK
 """
 
 
-def _backup_archive(db, taken_by):
+def _backup_archive(db: Database, taken_by: str) -> tuple[str, bytes]:
     """(filename, bytes) — the whole database as a dated zip."""
     buf = io.BytesIO()
-    counts = {}
+    counts: dict[str, Any] = {}
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for name in BACKUP_COLLECTIONS:
             lines = []
@@ -12576,7 +7816,7 @@ def _backup_archive(db, taken_by):
 
 @app.route('/backup', methods=['GET'])
 @login_required
-def backup_download():
+def backup_download() -> ResponseReturnValue:
     """The whole register, in one file, for the pharmacy to keep."""
     if session['user'].get('role') != 'admin':
         flash('Only an administrator can download the full backup.')
@@ -12623,7 +7863,7 @@ POSITION_SEED = [
 PEOPLE_OPTION_LIMIT = 400
 
 
-def _recorded_values(transactions, field, seed):
+def _recorded_values(transactions: Collection, field: str, seed: Iterable[str]) -> list[str]:
     """What has been recorded in this field, plus the standing list.
 
     Case-folded so "Unitrans" and "UNITRANS" do not both appear: the first
@@ -12648,7 +7888,7 @@ def _recorded_values(transactions, field, seed):
 
 @app.route('/api/people-options', methods=['GET'])
 @login_required
-def people_options():
+def people_options() -> ResponseReturnValue:
     """Companies and positions to suggest, as JSON."""
     try:
         transactions = get_mongo_client()['pharmacy_db']['transactions']
@@ -12664,7 +7904,7 @@ def people_options():
 
 @app.route('/api/diagnoses', methods=['GET'])
 @login_required
-def get_diagnosis_suggestions():
+def get_diagnosis_suggestions() -> ResponseReturnValue:
     return jsonify(_diagnosis_matches(request.args.get('query', '')))
 
 
@@ -12984,7 +8224,7 @@ MEDICATION_SEED_NAMES = [
 
 @app.route('/api/session-ping', methods=['POST'])
 @login_required
-def session_ping():
+def session_ping() -> ResponseReturnValue:
     """Tell the server the user is still here.
 
     The timeout is meant to measure INACTIVITY, but the only activity it
@@ -13003,7 +8243,7 @@ def session_ping():
 
 @app.route('/api/patient-lookup', methods=['GET'])
 @login_required
-def patient_lookup():
+def patient_lookup() -> ResponseReturnValue:
     """What this patient's last visit recorded about them.
 
     Company, position, birth decade and gender are facts about a person, not
@@ -13047,7 +8287,7 @@ def patient_lookup():
 
 @app.route('/api/medication-defaults', methods=['GET'])
 @login_required
-def get_medication_defaults():
+def get_medication_defaults() -> ResponseReturnValue:
     """Pack size and schedule for each stocked item, keyed by name.
 
     These describe the PRODUCT, so they are the same on every delivery and
@@ -13075,7 +8315,7 @@ def get_medication_defaults():
         return jsonify({})
 
 
-def _medication_names():
+def _medication_names() -> list[str]:
     """Every medication on file, for the name suggestions.
 
     Asked of the medications collection rather than kept in a list here, so
@@ -13105,7 +8345,7 @@ def _medication_names():
 
 @app.route('/api/medications', methods=['GET'])
 @login_required
-def get_medication_options():
+def get_medication_options() -> ResponseReturnValue:
     """The medication names to suggest, as JSON.
 
     Templates fetch this once per page load and cache it in JS module scope,
