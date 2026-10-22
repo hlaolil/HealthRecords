@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{#- NEW (Stock Take): admin-only physical count. Two views share one template —
+    the session list (no active session selected) and the counting sheet.
+
+    Counting is BLIND: the entry form deliberately never shows the system
+    balance for the item being counted. The system figure and the variance are
+    revealed only AFTER the count has been committed, in the counted-lines table
+    below the form. This is why the form and the table are separate — an admin
+    cannot see what they are "supposed" to find before they write down what they
+    actually found. -#}
+{% block title %}Stock Take &middot; NMC Pharmacy{% endblock %}
+{% block heading %}Stock Take{% endblock %}
+{% block content %}{% if message %}
+    <p class="message {% if 'success' in message|lower or 'recorded' in message|lower or 'closed' in message|lower or 'opened' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+
+{% if not active %}
+<h2>Start a Stock Take</h2>
+<p>A stock take stays open until you close it. Count as many or as few items as
+you like in one sitting, come back later, and carry on where you left off.
+Each item's balance is corrected the moment you record its count.</p>
+<form method="POST" action="{{ url_for('stock_take') }}">
+    <input type="hidden" name="action" value="open">
+    <label>Description (optional):</label>
+    <input name="note" type="text" placeholder="e.g. Quarterly count, August 2026">
+    <input type="submit" value="Open New Stock Take">
+</form>
+
+<h2>Stock Takes ({{ sessions|length }})</h2>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Reference</th><th>Description</th><th>Status</th><th>Opened</th><th>Opened By</th>
+            <th>Items Counted</th><th>Discrepancies</th><th>Closed</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+    {% for s in sessions %}
+        <tr class="{% if s.status == 'open' %}close-to-expire{% else %}normal{% endif %}">
+            <td>{{ s.reference }}</td>
+            <td>{{ s.note or '-' }}</td>
+            <td>{{ s.status|upper }}</td>
+            <td>{{ s.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ s.started_by }}</td>
+            <td>{{ s.counted_lines }}</td>
+            <td>{{ s.discrepancy_lines }}</td>
+            <td>{% if s.closed_at %}{{ s.closed_at.strftime('%Y-%m-%d %H:%M') }}{% else %}-{% endif %}</td>
+            <td class="action-buttons">
+                <a href="{{ url_for('stock_take', stock_take_id=s._id|string) }}"><button class="edit-btn">{% if s.status == 'open' %}Continue{% else %}View{% endif %}</button></a>
+            </td>
+        </tr>
+    {% else %}
+        <tr><td colspan="9">No stock takes yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+
+{% else %}
+<h2>{{ active.reference }}{% if active.note %} — {{ active.note }}{% endif %}</h2>
+<p><strong>Status:</strong> {{ active.status|upper }} &nbsp;|&nbsp;
+   <strong>Opened:</strong> {{ active.started_at.strftime('%Y-%m-%d %H:%M') }} by {{ active.started_by }}
+   {% if active.closed_at %}&nbsp;|&nbsp; <strong>Closed:</strong> {{ active.closed_at.strftime('%Y-%m-%d %H:%M') }} by {{ active.closed_by }}{% endif %}
+</p>
+<p><a href="{{ url_for('stock_take') }}">&larr; All stock takes</a></p>
+
+{% if active.status == 'open' %}
+<h3>Count Sheet ({{ uncounted|length }} still to count)</h3>
+{# NEW: every item is listed up front, the way a paper count sheet works — walk
+   the shelves, fill in what you find, post whatever you have done. Blank rows
+   are ignored, so a sheet can be posted as many times as you like and the
+   remaining items simply stay on it. The system balance is still absent: the
+   count has to be blind. #}
+<p>Fill in the counts you have done and press <strong>Post Counts</strong>.
+Rows left blank are ignored, so you can post part of the sheet now and the rest
+later &mdash; counted items drop off this list. The system figure is not shown
+until after you post.</p>
+<form method="POST" action="{{ url_for('stock_take') }}">
+    <input type="hidden" name="action" value="count_sheet">
+    <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
+    <p>
+        <input type="text" id="st_filter" placeholder="Filter this list..."
+               onkeyup="stFilter()" style="width:16em;">
+        <span style="font-size:13px;">&nbsp;typing here only hides rows; it does not clear anything you have entered.</span>
+    </p>
+    <div class="table-scroll"><table id="st_sheet">
+        <thead>
+            <tr><th>Medication</th><th>Physical Count</th><th>Note (optional)</th></tr>
+        </thead>
+        <tbody>
+        {% for m in uncounted %}
+            <tr>
+                <td>{{ m }}<input type="hidden" name="med_name" value="{{ m }}"></td>
+                <td><input name="counted__{{ loop.index0 }}" type="number" min="0"
+                           style="width:7em;" autocomplete="off"></td>
+                <td><input name="note__{{ loop.index0 }}" type="text"
+                           style="width:14em;" placeholder="Shelf, batch, remarks"></td>
+            </tr>
+        {% else %}
+            <tr><td colspan="3">Every medication has been counted in this stock take.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    {% if uncounted %}
+    <div class="form-buttons">
+        <input type="submit" value="Post Counts">
+    </div>
+    {% endif %}
+</form>
+<script>
+function stFilter() {
+    var q = document.getElementById('st_filter').value.toLowerCase();
+    var rows = document.querySelectorAll('#st_sheet tbody tr');
+    for (var i = 0; i < rows.length; i++) {
+        var cell = rows[i].cells[0];
+        if (!cell) { continue; }
+        rows[i].style.display = cell.textContent.toLowerCase().indexOf(q) > -1 ? '' : 'none';
+    }
+}
+</script>
+
+<form method="POST" action="{{ url_for('stock_take') }}" style="margin-top:20px;">
+    <input type="hidden" name="action" value="close">
+    <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
+    <button type="submit" class="delete-btn" onclick="return confirm('Close {{ active.reference }}? No further counts can be added to it.');">Close This Stock Take</button>
+</form>
+{% endif %}
+
+<h3>Counted Items ({{ counts|length }})</h3>
+{% if counts %}
+<form method="GET" action="{{ url_for('stock_take') }}" style="display:inline">
+    <button type="submit" name="export" value="csv">Download CSV</button>
+    <span style="font-size:13px;">&nbsp;the count sheet as posted so far,
+    with the variance against the system.</span>
+</form>
+{% endif %}
+<p>Counted: {{ counts|length }} &nbsp;|&nbsp; Agreed: {{ agreed_count }} &nbsp;|&nbsp;
+   Issued not recorded: {{ issued_not_recorded }} &nbsp;|&nbsp;
+   Recorded not issued: {{ recorded_not_issued }}</p>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Counted At</th><th>Medication</th><th>System Balance</th><th>Physical Count</th>
+            <th>Variance</th><th>Discrepancy Type</th><th>Counted By</th><th>Note</th></tr>
+    </thead>
+    <tbody>
+    {% for c in counts %}
+        <tr class="{% if c.variance == 0 %}normal{% elif c.variance < 0 %}expired{% else %}close-to-expire{% endif %}">
+            <td>{{ c.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ c.med_name }}</td>
+            <td>{{ c.system_balance }}</td>
+            <td>{{ c.counted }}</td>
+            <td>{{ '%+d'|format(c.variance) }}</td>
+            <td>{{ c.discrepancy_label }}</td>
+            <td>{{ c.counted_by }}</td>
+            <td>{{ c.note or '-' }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="8">Nothing counted yet in this stock take.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% endif %}
+{% endblock %}

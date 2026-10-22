@@ -1,0 +1,891 @@
+{% extends "base.html" %}
+{% block title %}Inventory Reports &middot; NMC Pharmacy{% endblock %}
+{% block heading %}Inventory Reports{% endblock %}
+{% block page_styles %}
+<style>
+  .bulk-expiry-bar { background: #fff3cd; border: 1px solid #ffc107;
+                     border-radius: 6px; padding: 12px; margin: 10px 0;
+                     font-size: 14px; }
+  .bulk-expiry-bar input, .bulk-expiry-bar button { margin-left: 8px; }
+  @media print { .bulk-expiry-bar { display: none; } }
+</style>
+{% endblock %}
+{% block content %}{% if message %}
+    <p class="message {% if message_class %}{{ message_class }}{% elif 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+<h2>Generate Report</h2>
+<form method="POST" action="{{ url_for('reports') }}">
+    <label>Report Type:</label>
+    <select name="report_type" required>
+        <option value="stock_on_hand">Stock on Hand</option>
+        <option value="expired_list">Expired Stock on Shelf (to action)</option>
+        <option value="expiry_writeoffs">Losses (expiry &amp; damage)</option>
+        <option value="internal_issues">Internal Issues (to departments)</option>
+        <option value="unmet_demand">Unmet Demand (stockouts)</option>
+        <option value="sick_leave">Sick Leave Register</option>
+        <option value="near_expired_list">Near Expired Drug List</option>
+        <option value="out_of_stock_list">Out of Stock List</option>
+        <option value="inventory">Inventory Report</option>
+        <option value="receive_list">Receive List</option>
+        <option value="controlled_drug_register">Controlled Drug Register</option>
+        <option value="order_request">Order Request (Requisition)</option>
+        <option value="monthly_report">Period Report (day / week / month / quarter / year)</option>
+        <option value="duplicate_visits">Possible Double-Dispensing (to check)</option>
+    </select><br>
+    <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" type="date" value="{{ start_date or default_start }}"><br>
+    <label>End Date (YYYY-MM-DD, if applicable):</label><input name="end_date" type="date" value="{{ end_date or default_end }}"><br>
+    <label>Category:</label>
+    <select name="category">
+        <option value="pharmaceutical" {% if category == 'pharmaceutical' %}selected{% endif %}>Pharmaceuticals</option>
+        <option value="supply" {% if category == 'supply' %}selected{% endif %}>Medical Supplies</option>
+        <option value="donor" {% if category == 'donor' %}selected{% endif %}>Donor Funded</option>
+        <option value="both" {% if category == 'both' %}selected{% endif %}>All categories</option>
+    </select><br>
+    <label>Search (optional):</label><input name="search" type="text" placeholder="Filter results by relevant fields"><br>
+    <label>Period (Period Report only):</label>
+    <select name="period">
+        {% for v, lbl in [('day','Day'), ('week','Week'), ('month','Month'),
+                          ('quarter','Quarter'), ('year','Year')] %}
+        <option value="{{ v }}" {% if v == 'month' %}selected{% endif %}>{{ lbl }}</option>
+        {% endfor %}
+    </select>
+    <span style="font-size:13px;">&nbsp;the start date picks the period; the whole period is covered.</span><br>
+    <label>Months of Cover (Order Request only):</label>
+    <select name="cover_months">
+        {% for m in [2, 3, 4, 6] %}
+        <option value="{{ m }}" {% if m == 3 %}selected{% endif %}>{{ m }} months</option>
+        {% endfor %}
+    </select><br>
+    <input type="submit" value="Generate Report">
+    {# Submits the same form with the same period, so the file is the report
+       you are looking at rather than a second, possibly different, query. #}
+    <button type="submit" name="export" value="csv"
+            formnovalidate>Download CSV</button>
+</form>
+{% if is_admin %}
+{# Every other download here answers one question. This one is the whole
+   register, for keeping rather than reading. #}
+<div style="border:1px solid #dee2e6; background:#fff; border-radius:6px;
+            padding:12px 14px; margin:14px 0;">
+    <h3 style="margin:0 0 6px;">Back up everything</h3>
+    <p style="font-size:13px; margin:0 0 10px;">
+    One file holding every record the pharmacy system has &mdash; dispensing,
+    the controlled drug register, deliveries, stock takes, temperatures, the
+    key register, loans and the audit log. Keep a copy somewhere that would
+    survive losing this computer. It contains patient names and diagnoses, so
+    treat it like the paper register.</p>
+    <a href="{{ url_for('backup_download') }}">
+        <button type="button">Download Full Backup</button></a>
+</div>
+{% endif %}
+{% if report_type in ['stock_on_hand', 'expired_list', 'near_expired_list', 'out_of_stock_list'] and stock_data %}
+<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
+    <input type="hidden" name="report_type" value="{{ report_type }}">
+    <div class="filter-section">
+        <div>
+            <label>Search Medication:</label>
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="Filter by medication name">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Filter">
+            <a href="{{ url_for('reports') }}">Back to Menu</a>
+        </div>
+    </div>
+</form>
+<h2>{{ report_title }}</h2>
+<p><strong>{{ category_label }}</strong></p>
+{% if report_type == 'expired_list' %}
+<p style="font-size:13px;">This is a <strong>work list</strong>: expired stock still
+on the shelf. Items leave it as you remove them. For the record of what was
+actually written off, run <em>Expiry Write-Offs</em>.</p>
+{% endif %}
+{% if is_admin and report_type in ['expired_list', 'near_expired_list'] %}
+<p style="font-size:13px;"><strong>Remove Expired</strong> writes the units off the
+shelf &mdash; enter how many actually expired, which may be less than the whole
+balance if only one batch is affected. <strong>Correct Date</strong> is for when the
+expiry was recorded wrongly; it changes the date and moves no stock. Both are
+recorded in the audit log.</p>
+{% endif %}
+{% if is_admin and report_type == 'expired_list' and stock_data %}
+{# One pass instead of two interactions per item. The form lives OUTSIDE the
+   table because the per-row forms below cannot be nested inside it; the row
+   inputs join this one through their form="" attribute. #}
+<form id="bulk-expiry" method="POST" action="{{ url_for('remove_expired_bulk') }}"
+      onsubmit="return confirm('Write off every ticked item? Stock will be reduced.');">
+    <input type="hidden" name="report_type" value="{{ report_type }}">
+</form>
+<div class="bulk-expiry-bar">
+    <strong>Clear the whole list:</strong>
+    every row is ticked with its full balance. Untick anything that should stay,
+    or change a quantity where only part of the stock expired.
+    <input name="bulk_reason" type="text" form="bulk-expiry"
+           placeholder="Reason for the whole pass (optional)" style="width:18em;">
+    <button type="submit" form="bulk-expiry" class="delete-btn">Remove All Ticked</button>
+</div>
+{% endif %}
+<div class="table-scroll"><table>
+    <thead>
+        <tr>
+            {% if is_admin and report_type == 'expired_list' %}<th>Write off</th>{% endif %}
+            <th>Medication</th><th>Balance</th><th>Expiry Date</th><th>Batch</th><th>Price</th><th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for med in stock_data %}
+        <tr class="{{ med.status }}">
+            {% if is_admin and report_type == 'expired_list' %}
+            <td>
+                <input type="checkbox" name="sel" value="{{ med.name }}"
+                       form="bulk-expiry" checked>
+                <input name="qty__{{ med.name }}" type="number" min="1"
+                       max="{{ med.balance }}" value="{{ med.balance }}"
+                       form="bulk-expiry" style="width:5em;"
+                       title="Units to write off in the bulk pass">
+            </td>
+            {% endif %}
+            <td>{{ med.name }}</td>
+            <td>{{ med.balance }}</td>
+            <td>{{ med.expiry_date }}</td>
+            <td>{{ med.batch }}</td>
+            <td>R{{ "%.2f"|format(med.price) }}</td>
+            <td class="action-buttons">
+                {% if is_admin and report_type in ['expired_list', 'near_expired_list'] %}
+                {# NEW (Expiry handling): two DIFFERENT problems live on this list.
+                   Either some units really have expired and must leave the shelf —
+                   often only part of what is on hand, since batches expire at
+                   different times — or the date was simply typed wrong and nothing
+                   should move at all. A single "remove from shelf" button would
+                   force the first answer onto both, so they are separate actions
+                   and the removal takes a quantity. #}
+                <form method="POST" action="{{ url_for('remove_expired') }}" style="display:inline;">
+                    <input type="hidden" name="med_name" value="{{ med.name }}">
+                    <input type="hidden" name="report_type" value="{{ report_type }}">
+                    <input name="quantity" type="number" min="1" max="{{ med.balance }}"
+                           value="{{ med.balance }}" style="width:5em;" required
+                           title="Units to remove — defaults to the whole balance, change it if only part of the stock has expired">
+                    <input name="reason" type="text" placeholder="Reason / batch" style="width:9em;">
+                    <button type="submit" class="delete-btn"
+                            onclick="return confirm('Remove these units of {{ med.name }} from the shelf? Stock will be reduced.');">Remove Expired</button>
+                </form>
+                <form method="POST" action="{{ url_for('correct_expiry') }}" style="display:inline;">
+                    <input type="hidden" name="med_name" value="{{ med.name }}">
+                    <input type="hidden" name="report_type" value="{{ report_type }}">
+                    <input name="expiry_date" type="date" value="{{ med.expiry_date }}" required>
+                    <button type="submit" class="edit-btn">Correct Date</button>
+                </form>
+                {% endif %}
+                {% if is_admin %}
+                <a href="{{ url_for('edit_medication', med_name=med.name) }}"><button class="edit-btn">Edit</button></a>
+                <form class="delete-btn" method="POST" action="{{ url_for('delete_medication') }}" style="display: inline;">
+                    <input type="hidden" name="med_name" value="{{ med.name }}">
+                    <button type="submit" class="delete-btn" onclick="return confirm('Are you sure you want to delete {{ med.name }}?');">Delete</button>
+                </form>
+                {% else %}
+                <span>-</span>
+                {% endif %}
+            </td>
+        </tr>
+    {% else %}
+        <tr><td colspan="6">No medications matching the criteria.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% elif report_type == 'inventory' and report_data %}
+<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
+    <input type="hidden" name="report_type" value="inventory">
+    <div class="filter-section">
+        <div><label>Start Date:</label><input name="start_date" type="date" value="{{ start_date or '' }}"></div>
+        <div><label>End Date:</label><input name="end_date" type="date" value="{{ end_date or '' }}"></div>
+        <div><label>Search Medication:</label><input name="search" type="text" value="{{ search or '' }}" placeholder="Filter by medication name"></div>
+        <div class="button-div"><input type="submit" value="Refine"><a href="{{ url_for('reports') }}">Back to Menu</a></div>
+    </div>
+</form>
+<h2>Inventory Report for {{ start_date }} to {{ end_date }}</h2>
+<p><strong>{{ category_label }}</strong></p>
+{% if is_admin %}
+<p>Each row reconciles: <strong>Beginning + Received &minus; Dispensed
+&minus; To Departments + Adjustment + Expired + Damaged = Current</strong>.
+<strong>To Departments</strong> is stock sent to a department rather than a
+patient &mdash; it is consumption and counts toward AMC, because it has to be
+replaced. <strong>Damaged</strong> is stock lost, and does not.
+Adjustment is the net of any physical-count corrections made during the period —
+see Audit &rarr; Stock Take Discrepancies for the detail behind it. Expired is
+stock written off the shelf. Both are shown signed.
+AMC is average monthly consumption over the selected period — dispensing plus
+internal issues. Write-offs, damage and count corrections are excluded from it.
+<strong>Unmet</strong> is demand that could not be filled because stock had run
+out; <strong>Adjusted AMC</strong> adds it back, so it reflects what was actually
+asked for rather than what happened to be on the shelf. Where the two differ, the
+plain AMC is understating demand — which is exactly what happens to an item that
+keeps running out. <strong>Fill rate</strong> is the share of demand that was
+met.</p>
+{% else %}
+<p>Each row reconciles: <strong>Beginning + Received &minus; Issued
+&minus; To Departments = Current</strong>.</p>
+<p style="font-size:13px;"><strong>Issued</strong> is everything that left the
+shelf to patients or was written off it &mdash; the general outward column, which
+is why it is not headed "Dispensed". <strong>To Departments</strong> is stock sent
+to a department rather than a patient. AMC is average monthly consumption
+&mdash; dispensing plus issues to departments, since both have to be replaced.</p>
+{% endif %}
+<div class="table-scroll"><table>
+    <thead>
+        {# NEW: the Adjustment column is admin-only. Non-admins see a row that
+           still adds up, because dispensed_effective has the adjustment folded
+           into it — see the comment in the reports() route for why that is the
+           honest place to put it. #}
+        {# NEW: an admin sees Dispensed as pure patient dispensing, because the
+           adjustment, expiry and damage columns sit beside it. A non-admin does
+           not see those columns — they are folded into this one — so calling it
+           "Dispensed" would be a mislabel: the figure includes stock that was
+           written off, not handed to anyone. "Issued" is the honest general
+           heading for the same number. #}
+        <tr><th>Item</th>{% if category == 'both' %}<th>Category</th>{% endif %}
+            <th>Beginning Balance</th><th>Received</th>
+            <th>{% if is_admin %}Dispensed{% else %}Issued{% endif %}</th>
+            {% if is_admin %}<th>Adjustment</th><th>Expired</th>{% endif %}
+            <th>To Departments</th>
+            {% if is_admin %}<th>Damaged</th>{% endif %}
+            <th>Current Balance</th><th>AMC</th><th>Unmet</th><th>Adjusted AMC</th>
+            <th>Fill Rate</th><th>Amount to Order</th></tr>
+    </thead>
+    <tbody>
+    {% for row in report_data %}
+        <tr>
+            <td>{{ row.med_name }}</td>
+            {% if category == 'both' %}<td>{{ row.category }}</td>{% endif %}
+            <td>{{ row.beginning_balance }}</td>
+            <td>{{ row.received }}</td>
+            {% if is_admin %}
+            <td>{{ row.dispensed }}</td>
+            <td>{% if row.adjustment %}{{ '%+d'|format(row.adjustment) }}{% else %}0{% endif %}</td>
+            <td>{% if row.expired %}{{ '%+d'|format(row.expired) }}{% else %}0{% endif %}</td>
+            {% else %}
+            <td>{{ row.dispensed_effective }}</td>
+            {% endif %}
+            <td>{{ row.issued }}</td>
+            {% if is_admin %}<td>{% if row.damaged %}{{ '%+d'|format(row.damaged) }}{% else %}0{% endif %}</td>{% endif %}
+            <td>{{ row.current_balance }}</td><td>{{ row.amc }}</td>
+            <td>{% if row.unmet %}<strong>{{ row.unmet }}</strong>{% else %}0{% endif %}</td>
+            <td>{{ row.adjusted_amc }}</td>
+            <td>{% if row.fill_rate is not none %}{{ row.fill_rate }}%{% else %}&ndash;{% endif %}</td>
+            <td>{{ row.amount_to_order }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="{{ (14 if is_admin else 11) + (1 if category == 'both' else 0) }}">No data for this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% elif report_type == 'duplicate_visits' %}
+<h2>Possible Double-Dispensing</h2>
+<p style="font-size:13px;">Until 20 October a <strong>partial</strong> dispense
+left the whole visit sitting in the form, because only the word "successfully"
+cleared it. The medicines that <em>had</em> dispensed were already recorded and
+their stock already deducted &mdash; so pressing Dispense again, which is the
+natural thing to do when a form looks unsubmitted, dispensed them a second
+time. The form no longer does that. These are the records it may already have
+made.</p>
+<p style="font-size:13px;">Listed below: the same patient, the same medication,
+the same quantity, recorded twice within
+{{ duplicate_window }} minutes, over the last six months. That does not happen
+by accident in a pharmacy, but <strong>it is not a verdict</strong> &mdash;
+check each one against what you remember before correcting anything. A real
+second visit can be left alone.</p>
+{% if duplicates %}
+<p class="message partial">{{ duplicates|length }} to check.
+{% set u = namespace(v=0) %}{% set c = namespace(v=0.0) %}
+{% for d in duplicates %}{% set u.v = u.v + (d.units or 0) %}{% set c.v = c.v + (d.value or 0) %}{% endfor %}
+If every one is a duplicate, {{ u.v }} units worth R{{ '%.2f'|format(c.v) }}
+were counted out of stock without leaving the shelf.</p>
+{% endif %}
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Patient</th><th>Medication</th><th>Quantity</th>
+            <th>First recorded</th><th>Recorded again</th><th>Apart</th>
+            <th>Units</th><th>Value</th><th>Dispenser</th></tr>
+    </thead>
+    <tbody>
+    {% for d in duplicates %}
+        <tr>
+            <td>{{ d.patient }}</td>
+            <td>{{ d.med_name }}</td>
+            <td>{{ d.quantity }}</td>
+            <td>{{ d.first.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ d.second.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ d.minutes }} min</td>
+            <td>{{ d.units }}</td>
+            <td>R{{ '%.2f'|format(d.value or 0) }}</td>
+            <td>{{ d.dispenser }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="9">Nothing looks like a visit recorded twice.
+        That is the answer you want.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+<p style="font-size:13px;">To correct one, open Dispensing, find the later
+visit and delete it &mdash; the stock goes back and the deletion is audited.</p>
+
+{% elif report_type == 'sick_leave' %}
+<h2>Sick Leave Register for {{ start_date }} to {{ end_date }}</h2>
+<p style="font-size:13px;">Every visit whose outcome was sick leave, with the days
+given. One line per visit, not per medication &mdash; a patient who received three
+items on one visit was given one period of leave, not three.</p>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Date</th><th>Patient</th><th>Company</th><th>Days</th>
+            <th>Diagnoses</th><th>Prescriber</th><th>Dispenser</th></tr>
+    </thead>
+    <tbody>
+    {% for l in sick_leave %}
+        <tr>
+            <td>{{ l.date }}</td>
+            <td>{{ l.patient }}</td>
+            <td>{{ l.company or '-' }}</td>
+            <td><strong>{{ l.days }}</strong></td>
+            <td>{{ l.diagnoses or '-' }}</td>
+            <td>{{ l.prescriber or '-' }}</td>
+            <td>{{ l.dispenser or '-' }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="7">No sick leave was recorded in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% if sick_leave %}
+<h3>Summary</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Certificates</th><th>Patients</th><th>Total Days</th>
+               <th>Average Days</th><th>Longest</th></tr></thead>
+    <tbody>
+        <tr><td>{{ sick_leave|length }}</td>
+            <td>{{ sick_leave_totals.patients }}</td>
+            <td>{{ sick_leave_totals.days }}</td>
+            <td>{{ sick_leave_totals.average }}</td>
+            <td>{{ sick_leave_totals.longest }}</td></tr>
+    </tbody>
+</table></div>
+{% if sick_leave_totals.repeat %}
+<h3>More Than One Certificate in the Period</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Patient</th><th>Certificates</th><th>Total Days</th></tr></thead>
+    <tbody>
+    {% for r in sick_leave_totals.repeat %}
+        <tr><td>{{ r.patient }}</td><td>{{ r.count }}</td><td>{{ r.days }}</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% endif %}
+<div class="form-buttons">
+    <button type="button" onclick="window.print();">Print This Register</button>
+</div>
+{% endif %}
+
+{% elif report_type == 'internal_issues' %}
+<h2>Internal Issues for {{ start_date }} to {{ end_date }}</h2>
+<p style="font-size:13px;">Stock issued out of the store to a department rather
+than dispensed to a patient. This is <strong>consumption</strong>: it counts
+toward each item's AMC and the order request replaces it, because the stock was
+used and has to be bought again. Damage and expiry are losses and appear under
+<em>Losses</em> instead.</p>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Date</th><th>Department</th><th>Medication</th><th>Quantity</th>
+            <th>Value</th><th>Received By</th><th>Note</th><th>Issued By</th></tr>
+    </thead>
+    <tbody>
+    {% for i in issues %}
+        <tr>
+            <td>{{ i.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ i.get('department') or 'Unspecified' }}</td>
+            <td>{{ i.med_name }}</td><td>{{ i.quantity }}</td>
+            <td>R{{ "%.2f"|format(i.line_value if i.get('line_value') is not none else i.quantity * (i.get('price') or 0)) }}</td>
+            <td>{{ i.get('issued_to') or '-' }}</td>
+            <td>{{ i.get('note') or '-' }}</td><td>{{ i.user }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="8">No internal issues in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% if issues %}
+<h3>By Department</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Department</th><th>Lines</th><th>Units</th><th>Value</th><th>Share</th></tr></thead>
+    <tbody>
+    {% for d in issue_totals.by_dept %}
+        <tr><td>{{ d.name }}</td><td>{{ d.lines }}</td><td>{{ d.units }}</td>
+            <td>R{{ "%.2f"|format(d.value) }}</td>
+            <td>{% if issue_totals.value %}{{ "%.1f"|format(d.value / issue_totals.value * 100) }}%{% else %}&ndash;{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+<h3>By Medication</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Medication</th><th>Lines</th><th>Units</th><th>Value</th></tr></thead>
+    <tbody>
+    {% for m in issue_totals.by_med %}
+        <tr><td>{{ m.name }}</td><td>{{ m.lines }}</td><td>{{ m.units }}</td>
+            <td>R{{ "%.2f"|format(m.value) }}</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+<h3>Summary</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Issues</th><th>Departments</th><th>Units</th><th>Total Value</th></tr></thead>
+    <tbody>
+        <tr><td>{{ issue_totals.lines }}</td><td>{{ issue_totals.dept_count }}</td>
+            <td>{{ issue_totals.units }}</td>
+            <td>R{{ "%.2f"|format(issue_totals.value) }}</td></tr>
+    </tbody>
+</table></div>
+<div class="form-buttons">
+    <button type="button" onclick="window.print();">Print This Report</button>
+</div>
+{% endif %}
+
+{% elif report_type == 'unmet_demand' %}
+<h2>Unmet Demand for {{ start_date }} to {{ end_date }}</h2>
+<p style="font-size:13px;">Every occasion a medication was asked for and could not
+be supplied in full. This is the demand that never reaches the dispensing figures,
+and the reason AMC alone understates what an item is really needed for &mdash; the
+more often something runs out, the less it appears to be used.</p>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Date</th><th>Medication</th><th>Requested</th><th>Given</th>
+            <th>Short</th><th>Value Short</th><th>Patient</th><th>Prescriber</th><th>User</th></tr>
+    </thead>
+    <tbody>
+    {% for u in unmet_list %}
+        <tr class="expired">
+            <td>{{ u.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ u.med_name }}</td><td>{{ u.requested }}</td><td>{{ u.given }}</td>
+            <td><strong>{{ u.shortfall }}</strong></td>
+            <td>R{{ "%.2f"|format(u.shortfall_value) }}</td>
+            <td>{{ u.patient }}</td><td>{{ u.prescriber or '-' }}</td><td>{{ u.user }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="9">Every request in this period was filled in full.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% if unmet_list %}
+<h3>By Medication</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Medication</th><th>Occasions</th><th>Units Short</th>
+               <th>Units Dispensed</th><th>Fill Rate</th><th>Value Short</th></tr></thead>
+    <tbody>
+    {% for m in unmet_totals.by_med %}
+        <tr class="{% if m.fill_rate is not none and m.fill_rate < 90 %}expired{% elif m.fill_rate is not none and m.fill_rate < 98 %}close-to-expire{% else %}normal{% endif %}">
+            <td>{{ m.med_name }}</td><td>{{ m.count }}</td><td>{{ m.shortfall }}</td>
+            <td>{{ m.dispensed }}</td>
+            <td>{% if m.fill_rate is not none %}{{ m.fill_rate }}%{% else %}&ndash;{% endif %}</td>
+            <td>R{{ "%.2f"|format(m.value) }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+<h3>Summary</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Occasions</th><th>Items Affected</th><th>Units Short</th>
+               <th>Overall Fill Rate</th><th>Value Short</th></tr></thead>
+    <tbody>
+        <tr><td>{{ unmet_list|length }}</td><td>{{ unmet_totals.item_count }}</td>
+            <td>{{ unmet_totals.shortfall }}</td>
+            <td>{% if unmet_totals.fill_rate is not none %}{{ unmet_totals.fill_rate }}%{% else %}&ndash;{% endif %}</td>
+            <td>R{{ "%.2f"|format(unmet_totals.value) }}</td></tr>
+    </tbody>
+</table></div>
+<p style="font-size:13px;">Fill rate is units supplied as a share of units
+requested. The Order Request already adds these shortfalls back when working out
+what to buy.</p>
+<div class="form-buttons">
+    <button type="button" onclick="window.print();">Print This Report</button>
+</div>
+{% endif %}
+
+{% elif report_type == 'expiry_writeoffs' %}
+<h2>Stock Losses for {{ start_date }} to {{ end_date }}</h2>
+<p style="font-size:13px;">Stock that was actually removed from the shelf as
+expired, or written off as damaged or lost, listed item by item.
+Total cost is the quantity times the unit cost recorded for that write-off.{% if is_admin %}
+Quantity, unit cost and remarks on any line can be corrected here; changing a
+quantity moves stock on hand by the difference, so a figure entered in error puts
+the stock back.{% endif %}
+This is the record of loss &mdash; distinct from
+<em>Expired Stock on Shelf</em>, which is a work list of what still needs
+removing and empties as you deal with it. Values are at the unit price recorded
+when the stock was written off.</p>
+<div class="table-scroll"><table>
+    <thead>
+        {# Column order and headings are fixed by the register form this report
+           has to match: DATE, Item Description, QTY, EXPIRY DATE, Batch/Lot,
+           Total COST, Remarks. Kind, unit cost and the user who recorded it are
+           still held on every record and still drive the summaries below. #}
+        <tr><th>DATE</th><th>Item Description</th><th>QTY</th><th>EXPIRY DATE</th>
+            <th>Batch/Lot</th><th>Total COST</th><th>Remarks</th>
+            {% if is_admin %}<th>Correct</th>{% endif %}</tr>
+    </thead>
+    <tbody>
+    {% for w in writeoffs %}
+        <tr class="expired">
+            <td>{{ w.timestamp.strftime('%Y-%m-%d') }}</td>
+            <td>{{ w.med_name }}</td>
+            <td>{{ w.units }}</td>
+            <td>{{ w.expiry_date or '-' }}</td>
+            <td>{{ w.batch or '-' }}</td>
+            <td>R{{ "%.2f"|format(w.value) }}</td>
+            <td>{{ w.remarks or '-' }}</td>
+            {% if is_admin %}
+            {# Correcting a quantity here moves stock by the DIFFERENCE — see
+               the note in edit_loss(). The form is per row so one correction
+               cannot accidentally rewrite another. #}
+            <td class="action-buttons">
+                <form method="POST" action="{{ url_for('edit_loss') }}" style="display:inline;">
+                    <input type="hidden" name="loss_id" value="{{ w.id }}">
+                    <input type="hidden" name="start_date" value="{{ start_date }}">
+                    <input type="hidden" name="end_date" value="{{ end_date }}">
+                    <input name="quantity" type="number" min="1" value="{{ w.units }}"
+                           style="width:5.5em;" required title="Units written off">
+                    <input name="price" type="number" step="0.0001" min="0"
+                           value="{{ "%.4f"|format(w.price) }}" style="width:7em;" required
+                           title="Unit cost used to value this loss">
+                    <input name="remarks" type="text" value="{{ w.remarks }}"
+                           style="width:12em;" placeholder="Remarks"
+                           title="Free text shown in the Remarks column">
+                    <button type="submit" class="edit-btn"
+                            onclick="return confirm('Correct this loss for {{ w.med_name }}? Changing the quantity will adjust stock on hand by the difference.');">Save</button>
+                </form>
+            </td>
+            {% endif %}
+        </tr>
+    {% else %}
+        <tr><td colspan="{{ 8 if is_admin else 7 }}">No stock was written off in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% if writeoffs %}
+<h3>Summary</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Write-Offs</th><th>Items Affected</th><th>Units Lost</th><th>Value Lost</th></tr></thead>
+    <tbody>
+        <tr><td>{{ writeoffs|length }}</td><td>{{ writeoff_totals.item_count }}</td>
+            <td>{{ writeoff_totals.units }}</td>
+            <td>R{{ "%.2f"|format(writeoff_totals.value) }}</td></tr>
+    </tbody>
+</table></div>
+<h3>By Medication</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Medication</th><th>Times Written Off</th><th>Units Lost</th><th>Value Lost</th></tr></thead>
+    <tbody>
+    {% for m in writeoff_totals.by_med %}
+        <tr><td>{{ m.med_name }}</td><td>{{ m.count }}</td>
+            <td>{{ m.units }}</td><td>R{{ "%.2f"|format(m.value) }}</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+<p style="font-size:13px;">An item appearing here repeatedly is usually an
+over-ordering signal rather than a storage one &mdash; compare its AMC against
+how much is being brought in.</p>
+<div class="form-buttons">
+    <button type="button" onclick="window.print();">Print This Report</button>
+</div>
+{% endif %}
+
+{% elif report_type == 'monthly_report' and monthly %}
+<h2>{{ monthly.period_kind|capitalize }} Report &mdash; {{ monthly.label }}</h2>
+<p style="font-size:13px;">Covering {{ monthly.starts }} to {{ monthly.ends }}
+inclusive.</p>
+<p style="font-size:13px;">All figures at <strong>cost</strong>, valued from the
+price recorded on each transaction when it happened &mdash; not from today's
+price &mdash; so a report run again next year still says the same thing.
+{% if monthly.estimated_lines %}<br><strong>Note:</strong> {{ monthly.estimated_lines }}
+dispensing line(s) in this period predate cost capture and are valued at the
+item's current price. Those figures are indicative.{% endif %}</p>
+
+<h3>Stock Value Movement</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Movement</th><th>Value</th><th>Note</th></tr></thead>
+    <tbody>
+        <tr><td>Opening stock value</td><td>R{{ "%.2f"|format(monthly.opening_value) }}</td>
+            <td>at the start of the period</td></tr>
+        <tr><td>Received from suppliers</td><td>R{{ "%.2f"|format(monthly.received_value) }}</td>
+            <td>{{ monthly.receipt_lines }} line(s) across {{ monthly.delivery_count }} delivery(ies)</td></tr>
+        <tr><td>Opening loads</td><td>R{{ "%.2f"|format(monthly.opening_load_value) }}</td>
+            <td>stock brought onto the system</td></tr>
+        <tr><td>Dispensed</td><td>&minus;R{{ "%.2f"|format(monthly.dispensed_value) }}</td>
+            <td>{{ monthly.items_dispensed }} item(s) over {{ monthly.visits }} visit(s)</td></tr>
+        <tr><td>Issued to departments</td>
+            <td>&minus;R{{ "%.2f"|format(monthly.issued_value) }}</td>
+            <td>{{ monthly.issued_lines }} line(s) &mdash; counts as consumption</td></tr>
+        <tr class="{% if monthly.damaged_value %}expired{% else %}normal{% endif %}">
+            <td>Damaged or lost</td>
+            <td>R{{ "%+.2f"|format(monthly.damaged_value) }}</td>
+            <td>{{ monthly.damaged_lines }} write-off(s) &mdash; not consumption</td></tr>
+        <tr class="{% if monthly.expired_value %}expired{% else %}normal{% endif %}">
+            <td>Expired stock written off</td>
+            <td>R{{ "%+.2f"|format(monthly.expired_value) }}</td>
+            <td>{{ monthly.expired_lines }} write-off(s)</td></tr>
+        {% if is_admin %}
+        <tr class="{% if monthly.adjustment_value %}expired{% else %}normal{% endif %}">
+            <td>Stock take adjustments</td>
+            <td>R{{ "%+.2f"|format(monthly.adjustment_value) }}</td>
+            <td>{{ monthly.adjustment_lines }} item(s) corrected</td></tr>
+        {% endif %}
+        <tr style="font-weight:bold;"><td>Closing stock value</td>
+            <td>R{{ "%.2f"|format(monthly.closing_value) }}</td>
+            <td>at today's unit prices</td></tr>
+    </tbody>
+</table></div>
+<p style="font-size:13px;">Opening and closing values are the stock on hand at each
+point, priced at each item's current unit price. Movements are priced as they
+happened, so the two bases differ and the column will not add up exactly when
+supplier prices have changed during the period &mdash; that difference is a price
+effect, not a stock discrepancy.</p>
+
+<h3>Dispensing</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Measure</th><th>Value</th></tr></thead>
+    <tbody>
+        <tr><td>Visits</td><td>{{ monthly.visits }}</td></tr>
+        <tr><td>Items dispensed</td><td>{{ monthly.items_dispensed }}</td></tr>
+        <tr><td>Items per visit</td><td>{{ monthly.items_per_visit }}</td></tr>
+        <tr><td>Patients seen</td><td>{{ monthly.patients }}</td></tr>
+        <tr><td>Total cost dispensed</td><td>R{{ "%.2f"|format(monthly.dispensed_value) }}</td></tr>
+        <tr><td>Visits per patient</td><td>{{ monthly.visits_per_patient }}</td></tr>
+        <tr><td>Average cost per visit</td><td>R{{ "%.2f"|format(monthly.cost_per_visit) }}</td></tr>
+        <tr><td><strong>Average cost per patient</strong></td>
+            <td><strong>R{{ "%.2f"|format(monthly.cost_per_patient) }}</strong></td></tr>
+        <tr><td>Average cost per item</td><td>R{{ "%.2f"|format(monthly.cost_per_item) }}</td></tr>
+    </tbody>
+</table></div>
+
+<h3>Procurement</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Measure</th><th>Value</th></tr></thead>
+    <tbody>
+        <tr><td>Orders raised</td><td>{{ monthly.order_count }}</td></tr>
+        <tr><td>Total ordered</td><td>R{{ "%.2f"|format(monthly.order_total) }}</td></tr>
+        <tr><td>Invoices received</td><td>{{ monthly.invoice_count }}</td></tr>
+        <tr><td>Total invoiced</td><td>R{{ "%.2f"|format(monthly.invoice_total) }}</td></tr>
+        <tr><td>Goods actually received</td><td>R{{ "%.2f"|format(monthly.received_value) }}</td></tr>
+        <tr class="{% if monthly.invoice_gap|abs >= 0.01 %}close-to-expire{% else %}normal{% endif %}">
+            <td>Invoiced less goods received</td>
+            <td>R{{ "%+.2f"|format(monthly.invoice_gap) }}</td></tr>
+    </tbody>
+</table></div>
+<p style="font-size:13px;">An order counts in the period its first invoice was
+recorded, since there is no separate order record. Where one order is invoiced
+across two periods it is counted once, in the earlier one.</p>
+
+{% if monthly.by_dept %}
+<h3>Internal Issues by Department</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Department</th><th>Lines</th><th>Value</th><th>Share of Issues</th></tr></thead>
+    <tbody>
+    {% for d in monthly.by_dept %}
+        <tr><td>{{ d.name }}</td><td>{{ d.lines }}</td>
+            <td>R{{ "%.2f"|format(d.value) }}</td>
+            <td>{% if monthly.issued_value %}{{ "%.1f"|format(d.value / monthly.issued_value * 100) }}%{% else %}&ndash;{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% endif %}
+
+<h3>Highest Cost Items ({{ monthly.top_items|length }})</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Medication</th><th>Units Dispensed</th><th>Cost</th><th>Share of Total</th></tr></thead>
+    <tbody>
+    {% for t in monthly.top_items %}
+        <tr><td>{{ t.med_name }}</td><td>{{ t.units }}</td>
+            <td>R{{ "%.2f"|format(t.value) }}</td><td>{{ t.share }}%</td></tr>
+    {% else %}
+        <tr><td colspan="4">Nothing dispensed in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+<div class="form-buttons">
+    <button type="button" onclick="window.print();">Print This Report</button>
+</div>
+
+{% elif report_type == 'order_request' %}
+<h2>Order Request</h2>
+<p><strong>Reference:</strong> {{ order_request.reference }} &nbsp;|&nbsp;
+   <strong>Raised:</strong> {{ order_request.raised_on }} &nbsp;|&nbsp;
+   <strong>By:</strong> {{ order_request.raised_by }} &nbsp;|&nbsp;
+   <strong>Cover:</strong> {{ order_request.cover_months }} months</p>
+<p style="font-size:13px;">Every item whose stock will not last
+{{ order_request.cover_months }} months at its current AMC. The quantity is
+rounded <strong>up to whole packs</strong>, since that is how the supplier
+sells &mdash; the units column shows what you actually receive, which is
+usually a little more than the shortfall.
+Items with no recorded demand are not included: without an AMC there is
+no basis for a quantity, and guessing one is worse than leaving it to your
+judgement.<br>
+Quantities are worked out from <strong>demand</strong>, not consumption: where an
+item ran out, the units that were asked for and could not be supplied are added
+back. Ordering to consumption alone is how a stockout becomes permanent &mdash;
+you dispense less because you have less, so you order less.
+{% if order_request.demand_adjusted %}<strong>{{ order_request.demand_adjusted }}
+item(s) below were adjusted upward this way.</strong>{% endif %}</p>
+
+{% for group in order_request.groups %}
+<h3>{{ group.supplier }} &mdash; {{ group.lines|length }} item(s), R{{ "%.2f"|format(group.total) }}</h3>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Medication</th><th>AMC (consumption)</th><th>Unmet</th>
+            <th>AMC used</th><th>On Hand</th><th>Months Left</th>
+            <th>Shortfall</th><th>Pack Size</th><th>Packs</th><th>Units</th>
+            <th>Price/Pack</th><th>Line Cost</th></tr>
+    </thead>
+    <tbody>
+    {% for l in group.lines %}
+        <tr class="{{ l.status }}">
+            <td>{{ l.med_name }}</td><td>{{ l.plain_amc }}</td>
+            <td>{% if l.unmet %}<strong>{{ l.unmet }}</strong>{% else %}0{% endif %}</td>
+            <td>{{ l.amc }}</td><td>{{ l.balance }}</td>
+            <td>{{ l.mos_label }}</td><td>{{ l.shortfall }}</td>
+            <td>{% if l.pack_known %}{{ l.pack_size }}{% else %}<strong>not recorded</strong>{% endif %}</td>
+            <td>{{ l.packs }}</td><td>{{ l.units }}</td>
+            <td>{% if l.pack_price %}R{{ "%.2f"|format(l.pack_price) }}{% else %}&ndash;{% endif %}</td>
+            <td>{% if l.pack_price %}R{{ "%.2f"|format(l.line_cost) }}{% else %}&ndash;{% endif %}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% else %}
+<p class="message success">Nothing needs ordering &mdash; every item with recorded
+consumption has more than {{ order_request.cover_months }} months of stock.</p>
+{% endfor %}
+
+{% if order_request.groups %}
+<h3>Summary</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Suppliers</th><th>Items</th><th>Packs</th><th>Estimated Total</th>
+               <th>No price on file</th><th>No pack size on file</th></tr></thead>
+    <tbody>
+        <tr>
+            <td>{{ order_request.groups|length }}</td>
+            <td>{{ order_request.line_count }}</td>
+            <td>{{ order_request.total_packs }}</td>
+            <td>R{{ "%.2f"|format(order_request.grand_total) }}</td>
+            <td>{{ order_request.unpriced }}</td>
+            <td>{{ order_request.unsized }}</td>
+        </tr>
+    </tbody>
+</table></div>
+{% if order_request.unpriced %}
+<p class="message error" style="font-size:13px;">{{ order_request.unpriced }} item(s)
+have no pack price on file, so their cost is not included in the total. They are
+still listed &mdash; the quantity is what matters for the request.</p>
+{% endif %}
+{% if order_request.unsized %}
+<p class="message error" style="font-size:13px;">{{ order_request.unsized }} item(s)
+have no pack size on file, so their quantity is expressed in single units. Check
+these against the supplier's pack before sending &mdash; the pack size is recorded
+automatically the first time an item is received on a delivery, or you can set it
+now under Edit Medication.</p>
+{% endif %}
+<p style="font-size:13px;">Estimated at the last pack price recorded for each item,
+so treat the total as indicative rather than a quotation.</p>
+<div class="form-buttons">
+    <button type="button" onclick="window.print();">Print This Request</button>
+</div>
+{% endif %}
+{% elif report_type == 'receive_list' and receive_list %}
+<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
+    <input type="hidden" name="report_type" value="receive_list">
+    <div class="filter-section">
+        <div><label>Start Date:</label><input name="start_date" type="date" value="{{ start_date or '' }}"></div>
+        <div><label>End Date:</label><input name="end_date" type="date" value="{{ end_date or '' }}"></div>
+        <div><label>Search:</label><input name="search" type="text" value="{{ search or '' }}" placeholder="Search medication, batch, supplier..."></div>
+        <div class="button-div"><input type="submit" value="Refine"><a href="{{ url_for('reports') }}">Back to Menu</a></div>
+    </div>
+</form>
+<h2>Receive List for {{ start_date }} to {{ end_date }}</h2>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Medication</th><th>Quantity</th><th>Batch</th><th>Price</th><th>Expiry Date</th><th>Stock Receiver</th><th>Order Number</th><th>Supplier</th><th>Invoice Number</th><th>User</th><th>Timestamp</th></tr>
+    </thead>
+    <tbody>
+    {% for t in receive_list %}
+        <tr>
+            <td>{{ t.med_name }}</td><td>{{ t.quantity }}</td><td>{{ t.batch }}</td>
+            <td>R{{ "%.2f"|format(t.price) }}</td><td>{{ t.expiry_date }}</td>
+            <td>{{ t.stock_receiver }}</td><td>{{ t.order_number }}</td><td>{{ t.supplier }}</td>
+            <td>{{ t.invoice_number }}</td><td>{{ t.user }}</td>
+            <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="11">No receive transactions in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% elif report_type == 'controlled_drug_register' and controlled_register %}
+<form method="POST" action="{{ url_for('reports') }}" class="filter-form">
+    <input type="hidden" name="report_type" value="controlled_drug_register">
+    <div class="filter-section">
+        <div><label>Start Date:</label><input name="start_date" type="date" value="{{ start_date or '' }}"></div>
+        <div><label>End Date:</label><input name="end_date" type="date" value="{{ end_date or '' }}"></div>
+        <div><label>Search:</label><input name="search" type="text" value="{{ search or '' }}" placeholder="Search transactions..."></div>
+        <div class="button-div"><input type="submit" value="Refine"><a href="{{ url_for('reports') }}">Back to Menu</a></div>
+    </div>
+</form>
+<h2>Controlled Drug Register for {{ start_date }} to {{ end_date }}</h2>
+{% for reg in controlled_register %}
+    <h3>{{ reg.med_name }}</h3>
+    <p style="font-size:13px;">Opening balance <strong>{{ reg.beginning_balance }}</strong>
+    &nbsp;|&nbsp; received in <strong>{{ reg.received }}</strong>
+    &nbsp;|&nbsp; went out <strong>{{ reg.dispensed }}</strong>
+    &nbsp;|&nbsp; closing balance <strong>{{ reg.ending_balance }}</strong>
+    {% if not reg.reconciles %}
+    <br><span class="temp-breach" style="padding:2px 6px;">More left the
+    cupboard in this period than could have been in it: the opening balance
+    works out below zero. Something was recorded outside these dates, or a
+    balance has been edited directly &mdash; this needs explaining before the
+    register is signed.</span>
+    {% endif %}</p>
+    {% if reg.transactions %}
+    {# In and Out, rather than one Quantity column carrying a minus sign on
+       some rows and not others. An expiry removal is stored negative and a
+       dispense positive, so a single column showed "-10" for one and "20"
+       for the other when both left the cupboard. #}
+    <div class="table-scroll"><table>
+        <thead>
+            <tr><th>Date</th><th>Movement</th><th>In</th><th>Out</th>
+                <th>Balance After</th><th>Prescriber</th><th>Issuer/Receiver</th>
+                <th>User</th><th>Reference/Patient</th></tr>
+        </thead>
+        <tbody>
+        {% for tx in reg.transactions %}
+            <tr>
+                <td>{{ tx.get('date', tx.timestamp.strftime('%Y-%m-%d')) }}</td>
+                <td>{{ tx.movement }}</td>
+                <td>{% if tx.in_qty %}{{ tx.in_qty }}{% else %}&ndash;{% endif %}</td>
+                <td>{% if tx.out_qty %}{{ tx.out_qty }}{% else %}&ndash;{% endif %}</td>
+                <td>{{ tx.balance_after }}</td>
+                <td>{{ tx.get('prescriber', '') }}</td>
+                <td>{{ tx.get('dispenser', tx.get('stock_receiver', tx.get('issued_to', ''))) }}</td>
+                <td>{{ tx.get('user', '') }}</td>
+                <td>{{ tx.get('patient', tx.get('department', tx.get('order_number', tx.get('supplier', tx.get('reason', ''))))) }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    {% else %}
+    <p>No transactions in this period.</p>
+    {% endif %}
+{% endfor %}
+{% elif report_type %}
+{# This used to be the catch-all for the whole report chain, so the controlled
+   drug message was what greeted you on the reports page before you had chosen
+   anything at all. It now only answers for the report you actually asked
+   for. #}
+    {% if report_type == 'controlled_drug_register' %}
+    <p>No controlled drugs have moved in this period. Nothing was dispensed,
+    received, issued or written off.</p>
+    {% else %}
+    <p>That report has nothing in it for this period.</p>
+    {% endif %}
+{% endif %}
+{% endblock %}
