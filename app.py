@@ -6955,11 +6955,29 @@ def stock_take() -> ResponseReturnValue:
 
                 names = request.form.getlist('med_name')
                 posted = agreed = short = over = skipped = 0
-                details_only = detail_changes = bad_dates = 0
+                details_only = detail_changes = bad_dates = confirmed = 0
+                # The expiry and batch boxes arrive already filled with what
+                # is on file, so a box sent back unchanged is not an entry.
+                # Without this, posting the sheet would record a "correction"
+                # on every row of it.
+                on_file = {m['name']: m for m in medications.find(
+                    {'name': {'$in': names}},
+                    {'_id': 0, 'name': 1, 'expiry_date': 1, 'batch': 1})}
                 for i, name in enumerate(names):
                     raw = (request.form.get(f'counted__{i}') or '').strip()
                     expiry = (request.form.get(f'expiry__{i}') or '').strip()
                     batch = (request.form.get(f'batch__{i}') or '').strip()
+                    agree = request.form.get(f'agree__{i}') == 'on'
+                    current = on_file.get(name) or {}
+                    if expiry and expiry == _expiry_iso(current.get('expiry_date')):
+                        expiry = ''
+                    if batch and batch == (current.get('batch') or '').strip():
+                        batch = ''
+                    # A figure typed in wins over the tick: if somebody ticked
+                    # "agrees" and then counted something different, the
+                    # number they wrote down is the one that happened.
+                    if raw != '':
+                        agree = False
 
                     # A date the app cannot read is dropped rather than
                     # written, and said out loud. The count on the same row
@@ -6969,7 +6987,7 @@ def stock_take() -> ResponseReturnValue:
                         bad_dates += 1
                         expiry = ''
 
-                    if raw == '' and not expiry and not batch:
+                    if raw == '' and not expiry and not batch and not agree:
                         continue          # blank row: nothing entered, leave it
 
                     counted: int | None = None
@@ -6986,10 +7004,12 @@ def stock_take() -> ResponseReturnValue:
                     outcome = _record_count(
                         medications, transactions, counts_col, st, name, counted,
                         (request.form.get(f'note__{i}') or '').strip(), current_user,
-                        expiry=expiry or None, batch=batch or None)
+                        expiry=expiry or None, batch=batch or None, agree=agree)
                     if outcome is None:
                         skipped += 1
                         continue
+                    if agree:
+                        confirmed += 1
                     detail_changes += outcome['detail_changes']
                     if not outcome['counted']:
                         details_only += 1
@@ -7005,6 +7025,9 @@ def stock_take() -> ResponseReturnValue:
                 if posted:
                     msg = (f'{posted} count(s) posted to {st["reference"]}: '
                            f'{agreed} agreed, {short} short, {over} over.')
+                    if confirmed:
+                        msg += (f' {confirmed} of the agreed were ticked as '
+                                f'matching the system rather than counted.')
                 elif details_only:
                     msg = f'No counts were entered in {st["reference"]}.'
                 else:
@@ -7121,9 +7144,17 @@ def stock_take() -> ResponseReturnValue:
                           .sort('timestamp', -1).limit(2000))
             for c in counts:
                 c['discrepancy_label'] = DISCREPANCY_LABELS.get(c.get('discrepancy_type'), '-')
-            # Only the names are sent to the counting sheet — never the
-            # balances. The count has to be blind.
-            med_names = [m['name'] for m in _by_name(medications.find(_active(), {'_id': 0, 'name': 1}))]
+            # The sheet used to carry names only, so the count was blind. It
+            # now shows what the system has — balance, expiry and batch — so a
+            # pharmacist short of time can walk a shelf and act only where the
+            # shelf and the system disagree. That was asked for, knowing the
+            # trade: a figure on the page is easier to agree with than to
+            # check. So agreeing is a tick per row, recorded as "confirmed"
+            # rather than "counted", and the register keeps the difference.
+            sheet_docs = _by_name(medications.find(
+                _active(), {'_id': 0, 'name': 1, 'balance': 1,
+                            'expiry_date': 1, 'batch': 1}))
+            med_names = [m['name'] for m in sheet_docs]
             # Items already counted in THIS stock take drop off the sheet, so
             # the list shrinks as the work is done and nothing is counted twice
             # by accident.
@@ -7131,13 +7162,17 @@ def stock_take() -> ResponseReturnValue:
                 'med_name',
                 {'stock_take_id': str(active['_id']), 'counted': {'$ne': None}}))
             uncounted = [m for m in med_names if m not in done]
+            sheet = [{'name': m['name'], 'balance': m.get('balance', 0),
+                      'expiry': _expiry_iso(m.get('expiry_date')),
+                      'batch': (m.get('batch') or '').strip()}
+                     for m in sheet_docs if m['name'] not in done]
             if request.values.get('export') == 'csv':
                 return _register_csv_response('stock_take', counts)
 
             return render_template(
                 'stock_take.html', nav_links=get_nav_links(), message=message,
                 active=active, counts=counts, med_names=med_names,
-                uncounted=uncounted, sessions=[],
+                uncounted=uncounted, sheet=sheet, sessions=[],
                 agreed_count=sum(1 for c in counts if c.get('variance') == 0),
                 issued_not_recorded=sum(1 for c in counts
                                         if (c.get('variance') or 0) < 0),
@@ -7155,6 +7190,7 @@ def stock_take() -> ResponseReturnValue:
         return render_template(
             'stock_take.html', nav_links=get_nav_links(), message=message,
             active=None, sessions=sessions, counts=[], med_names=[], uncounted=[],
+            sheet=[],
             agreed_count=0, issued_not_recorded=0, recorded_not_issued=0,
         )
 
@@ -7171,7 +7207,8 @@ def _record_count(medications: Collection, transactions: Collection,
                   counts_col: Collection, st: Doc, med_name: str,
                   counted: float | None, note: str, user: str,
                   expiry: str | None = None,
-                  batch: str | None = None) -> Doc | None:
+                  batch: str | None = None,
+                  agree: bool = False) -> Doc | None:
     """Apply one line of a stock take. None if the medication is unknown.
 
     The one place a count is recorded. The single-item path and the count
@@ -7189,6 +7226,14 @@ def _record_count(medications: Collection, transactions: Collection,
     that is what a stock take is for — but the value it replaced is kept on
     the line, so the register shows the change rather than quietly absorbing
     it.
+
+    agree=True is the tick on the sheet that says "the shelf matches the
+    figure on the system". It is recorded as a count equal to the balance at
+    the moment it is posted, read in the same operation that applies any
+    expiry or batch correction, so a dispense in between cannot turn a
+    confirmation into a false discrepancy. The line is marked as confirmed
+    rather than counted, so the register never claims a number was written
+    down when it was ticked.
     """
     updates: Doc = {}
     if counted is not None:
@@ -7197,12 +7242,17 @@ def _record_count(medications: Collection, transactions: Collection,
         updates['expiry_date'] = expiry
     if batch:
         updates['batch'] = batch
-    if not updates:
+    if not updates and not agree:
         return None                     # nothing was entered on this line
 
-    before = medications.find_one_and_update(
-        {'name': med_name}, {'$set': updates},
-        return_document=ReturnDocument.BEFORE)
+    if updates:
+        before = medications.find_one_and_update(
+            {'name': med_name}, {'$set': updates},
+            return_document=ReturnDocument.BEFORE)
+    else:
+        before = medications.find_one({'name': med_name})
+    if before and agree and counted is None:
+        counted = before.get('balance', 0)
     if not before:
         write_app_warning(
             'medication_not_found',
@@ -7218,9 +7268,11 @@ def _record_count(medications: Collection, transactions: Collection,
     if counted is not None:
         variance = counted - system_balance
         dtype = classify_variance(variance)
-        balance_change = (f'balance: {system_balance} -> {counted} '
-                          f'(variance {variance:+g}, '
-                          f'{DISCREPANCY_LABELS[dtype].lower()})')
+        balance_change = (
+            f'confirmed: shelf agrees with the system ({system_balance})'
+            if agree and 'balance' not in updates else
+            f'balance: {system_balance} -> {counted} '
+            f'(variance {variance:+g}, {DISCREPANCY_LABELS[dtype].lower()})')
 
     # The correction is posted to the ledger as its own signed type. Every
     # report back-calculates a beginning balance from the current balance and
@@ -7244,6 +7296,8 @@ def _record_count(medications: Collection, transactions: Collection,
         'med_name': med_name, 'system_balance': system_balance,
         'counted': counted, 'variance': variance, 'discrepancy_type': dtype,
         'note': note, 'counted_by': user, 'timestamp': now,
+        'method': ('confirmed' if agree and 'balance' not in updates
+                   else ('counted' if 'balance' in updates else 'detail')),
     }
     changes = []
     if expiry:
@@ -7264,6 +7318,17 @@ def _record_count(medications: Collection, transactions: Collection,
                       f"{st['reference']} / {med_name}", '; '.join(changes))
     return {'variance': variance, 'counted': counted is not None,
             'detail_changes': len(changes) - (1 if counted is not None else 0)}
+
+
+def _expiry_iso(raw: Any) -> str:
+    """An expiry as the date box holds it, YYYY-MM-DD, or '' if there is none.
+
+    Stored expiries are mostly that already, but some carry a time and some
+    are datetimes, so both the sheet and the comparison on posting go through
+    here and agree about what "unchanged" means.
+    """
+    d = _parse_expiry(raw)
+    return d.isoformat() if d else ''
 
 
 def _load_stock_take(stock_takes: Collection, raw_id: str | None) -> Doc | None:
