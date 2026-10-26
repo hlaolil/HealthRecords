@@ -3030,9 +3030,31 @@ def reports() -> ResponseReturnValue:
                             # the demand-based version sits beside it, so the
                             # gap between the two is visible rather than buried.
                             unmet             = demand.get(med_name, _ZERO_DEMAND)['shortfall']
-                            adjusted_amc      = (consumption + unmet) / days_in_period * 30
-                            lead_time_stock   = avg_daily * 60
-                            amount_to_order   = max(0, amc - current_balance + lead_time_stock)
+                            # A whole number, because nobody orders 41.37 of
+                            # anything, rounded to the nearest unit (a half goes
+                            # up, as on paper - Python's own round() would send
+                            # 40.5 down to 40).
+                            adjusted_amc      = int((consumption + unmet)
+                                                    / days_in_period * 30 + 0.5)
+                            # Ordered from the Adjusted AMC, since it is now the
+                            # only AMC the table shows: a month in hand plus two
+                            # months of lead time, less what is on the shelf.
+                            # Working it out from the plain AMC would order from
+                            # a figure nobody can see, and under-order exactly
+                            # the items that keep running out.
+                            amount_to_order   = max(0, 3 * adjusted_amc - current_balance)
+                            # Everything that left the shelf, whatever the
+                            # reason: dispensed, issued to a department, expired,
+                            # damaged, and the net of stock-take corrections.
+                            # Expired, damaged and corrections are stored signed
+                            # (negative when stock goes), so they are subtracted;
+                            # stock FOUND at a count therefore comes off Issued,
+                            # as asked. One column, so the row always reads
+                            #   Beginning + Received - Issued = Current
+                            # and the breakdown is in the registers, the expiry
+                            # write-offs and Audit > Stock Take.
+                            issued_total      = (dispensed + issued - adjustment
+                                                 - expired - damaged)
 
                             report_data.append({
                                 'med_name': med_name, 'category': _cat_of(med),
@@ -3054,11 +3076,19 @@ def reports() -> ResponseReturnValue:
                                 # holds for the non-admin view.
                                 'dispensed_effective': dispensed - adjustment - expired - damaged,
                                 'current_balance': current_balance,
+                                'issued_total': _tidy(issued_total),
+                                # False only when the records cannot explain
+                                # the shelf: the back-calculated beginning would
+                                # be negative and is shown as 0, so the row no
+                                # longer adds up. Flagged on the page rather
+                                # than forced to balance with an invented figure.
+                                'reconciles': (beginning_balance + received
+                                               - issued_total == current_balance),
                                 'amc': _tidy(amc),
-                                'unmet': unmet, 'adjusted_amc': _tidy(adjusted_amc),
+                                'unmet': unmet, 'adjusted_amc': adjusted_amc,
                                 'fill_rate': (round(consumption / (consumption + unmet) * 100, 1)
                                               if (consumption + unmet) else None),
-                                'amount_to_order': _tidy(amount_to_order)
+                                'amount_to_order': amount_to_order
                             })
 
                     elif report_type == 'receive_list':
@@ -4040,27 +4070,17 @@ def _pager(page: int, page_size: int, total: int) -> Doc:
 # keys, so the file reads the way the printed report does and does not change
 # shape whenever an internal field is added.
 # ---------------------------------------------------------------------------
-# The inventory table is the one report whose COLUMNS change with the role:
-# an admin sees Dispensed with Adjustment, Expired and Damaged beside it, while
-# a non-admin sees one honest "Issued" figure with those three already folded
-# in. The download has to follow that, for two separate reasons. Giving a
-# non-admin the admin columns would hand them figures the screen withholds; and
-# putting dispensed_effective in the same sheet as the Adjustment, Expired and
-# Damaged columns would double-count them, so the row would not reconcile.
-INVENTORY_TAIL = [
-    ('current_balance', 'Current Balance'), ('amc', 'AMC'),
-    ('unmet', 'Unmet'), ('adjusted_amc', 'Adjusted AMC'),
-    ('fill_rate', 'Fill Rate %'), ('amount_to_order', 'Amount to Order')]
-INVENTORY_HEAD = [
+# The inventory table shows the same columns to everyone: Issued is one
+# column with every outward movement folded into it, so there is nothing an
+# admin sees that a non-admin's row would fail to add up without. The
+# download follows the screen exactly.
+INVENTORY_COLUMNS = [
     ('med_name', 'Item'), ('category', 'Category'),
-    ('beginning_balance', 'Beginning Balance'), ('received', 'Received')]
-INVENTORY_COLUMNS_ADMIN = INVENTORY_HEAD + [
-    ('dispensed', 'Dispensed'), ('adjustment', 'Adjustment'),
-    ('expired', 'Expired'), ('issued', 'To Departments'),
-    ('damaged', 'Damaged')] + INVENTORY_TAIL
-INVENTORY_COLUMNS_USER = INVENTORY_HEAD + [
-    ('dispensed_effective', 'Issued'),
-    ('issued', 'To Departments')] + INVENTORY_TAIL
+    ('beginning_balance', 'Beginning Balance'), ('received', 'Received'),
+    ('issued_total', 'Issued'), ('current_balance', 'Current Balance'),
+    ('adjusted_amc', 'Adjusted AMC'), ('amount_to_order', 'Amount to Order')]
+INVENTORY_COLUMNS_ADMIN = INVENTORY_COLUMNS
+INVENTORY_COLUMNS_USER = INVENTORY_COLUMNS
 
 CSV_REPORTS = {
     'inventory': ('Inventory Report', 'report_data', INVENTORY_COLUMNS_USER),
