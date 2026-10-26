@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+{#- NEW (Dashboard): consumption trend and stock-health overview.
+
+    Tiles and panels use inline styles rather than new CSS classes so the shared
+    stylesheet in base.html stays untouched — only the row status classes
+    (.expired, .close-to-expire, .normal) are reused, so colour meaning stays
+    consistent with the rest of the app: red = act now, amber = watch,
+    plain = fine. -#}
+{% block title %}Dashboard &middot; NMC Pharmacy{% endblock %}
+{% block heading %}Dashboard{% endblock %}
+{% block content %}{% if message %}
+    <p class="message error">{{ message }}</p>
+{% endif %}
+
+<form method="GET" action="{{ url_for('dashboard') }}" class="filter-form">
+    <div class="filter-section">
+        <div>
+            <label>Period:</label>
+            <select name="months">
+                {% for c in month_choices %}
+                <option value="{{ c }}" {% if c == months_back %}selected{% endif %}>Last {{ c }} months</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Sort by:</label>
+            <select name="sort">
+                <option value="urgency" {% if sort_by == 'urgency' %}selected{% endif %}>Most urgent first</option>
+                <option value="amc" {% if sort_by == 'amc' %}selected{% endif %}>Highest AMC</option>
+                <option value="trend" {% if sort_by == 'trend' %}selected{% endif %}>Biggest change vs AMC</option>
+                <option value="name" {% if sort_by == 'name' %}selected{% endif %}>Medication name</option>
+            </select>
+        </div>
+        <div>
+            <label>Show:</label>
+            <select name="limit">
+                <option value="25" {% if limit == 25 %}selected{% endif %}>Top 25</option>
+                <option value="50" {% if limit == 50 %}selected{% endif %}>Top 50</option>
+                <option value="100" {% if limit == 100 %}selected{% endif %}>Top 100</option>
+                <option value="0" {% if limit == 0 %}selected{% endif %}>All items</option>
+            </select>
+        </div>
+        <div>
+            <label>Category:</label>
+            <select name="category">
+                <option value="pharmaceutical" {% if category == 'pharmaceutical' %}selected{% endif %}>Pharmaceuticals</option>
+                <option value="supply" {% if category == 'supply' %}selected{% endif %}>Medical Supplies</option>
+                <option value="donor" {% if category == 'donor' %}selected{% endif %}>Donor Funded</option>
+                <option value="both" {% if category == 'both' %}selected{% endif %}>All categories</option>
+            </select>
+        </div>
+        <div>
+            <label>Search Item:</label>
+            <input name="search" type="text" value="{{ search or '' }}" placeholder="Filter by name">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Apply">
+            <a href="{{ url_for('dashboard') }}">Reset</a>
+        </div>
+    </div>
+</form>
+
+<h2>Stock Health &mdash; {{ category_label }}</h2>
+<div style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:20px;">
+{% for t in tiles %}
+    <div style="flex:1 1 150px; min-width:150px; border:1px solid #ccc; border-radius:6px; padding:12px;
+                background-color:{{ t.bg }}; color:{{ t.fg }};">
+        <div style="font-size:26px; font-weight:bold; line-height:1.1;">{{ t.value }}</div>
+        <div style="font-size:13px; margin-top:4px;">{{ t.label }}</div>
+        {% if t.sub %}<div style="font-size:11px; opacity:0.8; margin-top:2px;">{{ t.sub }}</div>{% endif %}
+    </div>
+{% endfor %}
+</div>
+
+<h2>Activity by Month</h2>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Measure</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}</tr>
+    </thead>
+    <tbody>
+        <tr><td><strong>Dispensing visits</strong></td>{% for v in act.visits %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Items dispensed</strong></td>{% for v in act.lines %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Items per visit</strong></td>{% for v in act.per_visit %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Patients seen</strong></td>{% for v in act.patients %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Value dispensed</strong></td>{% for v in totals.val_dispensed %}<td>R{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Stock receipts</strong></td>{% for v in act.receipts %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Deliveries</strong></td>{% for v in act.deliveries %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Value received</strong></td>{% for v in totals.val_received %}<td>R{{ v }}</td>{% endfor %}</tr>
+        {% if is_admin %}
+        <tr><td><strong>Items adjusted at stock take</strong></td>
+            {% for v in act.adjusted_lines %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Value of adjustments</strong></td>
+            {% for v in totals.val_adjusted %}<td>R{{ v }}</td>{% endfor %}</tr>
+        {% endif %}
+    </tbody>
+</table></div>
+<p style="font-size:13px;">
+A dispensing visit is one patient encounter; an item is one medication line
+within it, so a visit with three medicines counts as one visit and three items.
+<strong>Patients seen</strong> counts distinct patient names in the month, so a
+patient returning twice is counted once.
+Quantities are deliberately not totalled across medications here — adding
+tablets to vials to millilitres gives a number that means nothing. Value is
+used instead, since money is comparable across dosage forms. Per-medication
+quantities are in the table below, where they do mean something.
+Value is calculated at each item's current unit price, so it is indicative
+rather than an accounting figure.
+The final column is the current month to date, so it is always a part-month and
+will read low. AMC is calculated from the completed months only.
+</p>
+
+<h2>Visit Outcomes by Month</h2>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Outcome</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
+            <th>Total</th><th>Days</th></tr>
+    </thead>
+    <tbody>
+    {% for o in clinical.outcomes %}
+        <tr><td><strong>{{ o.name }}</strong></td>
+            {% for v in o.counts %}<td>{{ v }}</td>{% endfor %}
+            <td>{{ o.total }}</td>
+            <td>{% if o.days %}{{ o.days }}{% else %}&ndash;{% endif %}</td></tr>
+    {% else %}
+        <tr><td colspan="{{ month_labels|length + 3 }}">No outcomes recorded yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+<p style="font-size:13px;">Counted per <strong>visit</strong>, not per medication
+&mdash; a visit that produced three items is one referral, not three. Outcome is
+optional, so a visit with none recorded appears in no row here. Days apply to sick
+leave and admission.</p>
+
+<h2>Disease Trends</h2>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Diagnosis</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
+            <th>Total</th><th>Trend</th></tr>
+    </thead>
+    <tbody>
+    {% for d in clinical.diagnoses %}
+        <tr><td>{{ d.name }}</td>
+            {% for v in d.counts %}<td>{{ v }}</td>{% endfor %}
+            <td>{{ d.total }}</td><td>{{ d.trend }}</td></tr>
+    {% else %}
+        <tr><td colspan="{{ month_labels|length + 2 }}">No diagnoses recorded yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+<p style="font-size:13px;">The twelve most frequent diagnoses across
+{{ clinical.episodes }} visit(s), by episode. <strong>Trend</strong> compares the
+last completed month against the average of the months before it, so a genuine
+rise stands out from ordinary variation. A visit recording several diagnoses
+counts once under each.</p>
+
+<h2>Consumption by Month &amp; AMC ({{ rows|length }} of {{ total_items }} items)</h2>
+<p style="font-size:13px;">
+<strong>AMC</strong> is the average of the completed months shown.
+<strong>MOS</strong> is months of stock — current balance divided by AMC, i.e. how
+long today's stock lasts at the recent rate.
+<strong>Trend</strong> compares the last completed month against AMC.
+<strong>Unmet</strong> is demand that could not be filled because stock had run out,
+and <strong>fill rate</strong> is the share of demand that was met — an item with a
+low fill rate has an AMC that understates what people actually wanted.
+<strong>Pattern</strong> flags how steady demand has been: an erratic item needs more
+buffer than its AMC alone suggests.
+The peak month in each row is shown in bold.
+</p>
+<div class="table-scroll"><table>
+    <thead>
+        <tr>
+            <th>Medication</th>
+            {% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
+            <th>AMC</th><th>Unmet</th><th>Fill Rate</th><th>Trend</th><th>Pattern</th>
+            <th>Balance</th><th>MOS</th><th>Suggested Order</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for r in rows %}
+        <tr class="{{ r.status }}">
+            <td>{{ r.med_name }}</td>
+            {% for v in r.monthly %}
+            <td>{% if r.peak is not none and loop.index0 == r.peak and v %}<strong>{{ v }}</strong>{% else %}{{ v }}{% endif %}</td>
+            {% endfor %}
+            <td>{{ r.amc }}</td>
+            <td>{% if r.unmet %}<strong>{{ r.unmet }}</strong>{% else %}0{% endif %}</td>
+            <td>{% if r.fill_rate is not none %}{{ r.fill_rate }}%{% else %}&ndash;{% endif %}</td>
+            <td>{{ r.trend_label }}</td>
+            <td>{{ r.pattern }}</td>
+            <td>{{ r.balance }}</td>
+            <td>{{ r.mos_label }}</td>
+            <td>{{ r.suggested_order }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="{{ month_labels|length + 9 }}">No medications matching the criteria.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+
+<h2>Expiring Within 90 Days ({{ expiring|length }})</h2>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Medication</th><th>Expiry Date</th><th>Days Left</th><th>Balance</th>
+            <th>Value</th><th>AMC</th><th>Likely Unused</th></tr>
+    </thead>
+    <tbody>
+    {% for e in expiring %}
+        <tr class="{{ e.status }}">
+            <td>{{ e.med_name }}</td>
+            <td>{{ e.expiry_date }}</td>
+            <td>{{ e.days_left }}</td>
+            <td>{{ e.balance }}</td>
+            <td>R{{ "%.2f"|format(e.value) }}</td>
+            <td>{{ e.amc }}</td>
+            <td>{{ e.likely_unused }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="7">Nothing expiring in the next 90 days.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+<p style="font-size:13px;">"Likely unused" projects how much will still be on the
+shelf at expiry if the item keeps moving at its AMC — that is the quantity at
+risk of being written off.</p>
+
+{% if is_admin %}
+<h2>Stock Take Discrepancies by Month</h2>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Measure</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}</tr>
+    </thead>
+    <tbody>
+        <tr><td><strong>Items counted</strong></td>{% for v in st_totals.counted %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Agreed</strong></td>{% for v in st_totals.agreed %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr class="expired"><td><strong>Issued, not recorded</strong> (units)</td>
+            {% for v in st_totals.short_units %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr class="close-to-expire"><td><strong>Recorded, not issued</strong> (units)</td>
+            {% for v in st_totals.over_units %}<td>{{ v }}</td>{% endfor %}</tr>
+        <tr><td><strong>Accuracy</strong></td>{% for v in st_totals.accuracy %}<td>{{ v }}</td>{% endfor %}</tr>
+    </tbody>
+</table></div>
+<p style="font-size:13px;">Accuracy is the share of counted lines that agreed with
+the system. A falling accuracy rate is worth investigating before the next count.
+<a href="{{ url_for('audit_log', view='stocktake', only='discrepancies') }}">See every discrepancy &rarr;</a></p>
+
+<h3>Largest Discrepancies in the Period ({{ top_discrepancies|length }})</h3>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Medication</th><th>Net Variance</th><th>Counts</th><th>Type</th><th>Last Counted</th></tr>
+    </thead>
+    <tbody>
+    {% for d in top_discrepancies %}
+        <tr class="{% if d.net < 0 %}expired{% else %}close-to-expire{% endif %}">
+            <td>{{ d.med_name }}</td>
+            <td>{{ '%+d'|format(d.net) }}</td>
+            <td>{{ d.count }}</td>
+            <td>{{ d.label }}</td>
+            <td>{{ d.last_counted }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="5">No discrepancies recorded in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+
+<h3>Never Counted ({{ never_counted|length }})</h3>
+<p style="font-size:13px;">Items with stock on hand that have not appeared in any
+stock take. These are the shelves where a discrepancy would still be invisible.</p>
+<div class="table-scroll"><table>
+    <thead><tr><th>Medication</th><th>Balance</th><th>Value</th></tr></thead>
+    <tbody>
+    {% for n in never_counted %}
+        <tr><td>{{ n.med_name }}</td><td>{{ n.balance }}</td><td>R{{ "%.2f"|format(n.value) }}</td></tr>
+    {% else %}
+        <tr><td colspan="3">Every item with stock has been counted at least once.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% endif %}
+{% endblock %}

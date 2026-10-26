@@ -1,0 +1,44 @@
+{#- The medication list is fetched once from /api/medications rather than
+    written into every page that needs it, and the companies and positions
+    come from /api/people-options — from the record rather than from a list
+    kept by hand. Results are cached in module scope, so the second form on
+    a page costs nothing.
+
+    Included by the pages that have a medication picker: dispense,
+    receive, internal_issue and add_medication. -#}
+
+<script>
+// FIX: medication list is fetched once from /api/medications instead of being
+// duplicated in every template. Results are cached in module scope.
+let _medicationOptions = null;
+let _peopleOptionsLoaded = null;
+
+// Companies and positions, from the record rather than from this file.
+async function loadPeopleOptions() {
+    if (_peopleOptionsLoaded) return _peopleOptionsLoaded;
+    _peopleOptionsLoaded = (async function () {
+        try {
+            const res = await fetch('/api/people-options');
+            if (!res.ok) return;
+            const d = await res.json();
+            if (Array.isArray(d.companies)) companyOptions = d.companies;
+            if (Array.isArray(d.positions)) positionOptions = d.positions;
+        } catch (e) { /* the boxes still take anything typed */ }
+    })();
+    return _peopleOptionsLoaded;
+}
+document.addEventListener('DOMContentLoaded', loadPeopleOptions);
+
+async function getMedicationOptions() {
+    if (_medicationOptions) return _medicationOptions;
+    try {
+        const res = await fetch('/api/medications');
+        _medicationOptions = await res.json();
+    } catch(e) {
+        console.error('Failed to load medication list', e);
+        _medicationOptions = [];
+    }
+    return _medicationOptions;
+}
+</script>
+

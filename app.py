@@ -6924,28 +6924,49 @@ def stock_take() -> ResponseReturnValue:
 
                 names = request.form.getlist('med_name')
                 posted = agreed = short = over = skipped = 0
+                details_only = detail_changes = bad_dates = 0
                 for i, name in enumerate(names):
                     raw = (request.form.get(f'counted__{i}') or '').strip()
-                    if raw == '':
-                        continue          # blank row: nothing was counted, leave it
-                    try:
-                        counted = int(raw)
-                    except ValueError:
-                        skipped += 1
-                        continue
-                    if counted < 0:
-                        skipped += 1
-                        continue
+                    expiry = (request.form.get(f'expiry__{i}') or '').strip()
+                    batch = (request.form.get(f'batch__{i}') or '').strip()
+
+                    # A date the app cannot read is dropped rather than
+                    # written, and said out loud. The count on the same row
+                    # still posts: losing a counted quantity over a mistyped
+                    # date would be the worse trade.
+                    if expiry and not _parse_expiry(expiry):
+                        bad_dates += 1
+                        expiry = ''
+
+                    if raw == '' and not expiry and not batch:
+                        continue          # blank row: nothing entered, leave it
+
+                    counted: int | None = None
+                    if raw != '':
+                        try:
+                            counted = int(raw)
+                        except ValueError:
+                            skipped += 1
+                            continue
+                        if counted < 0:
+                            skipped += 1
+                            continue
+
                     outcome = _record_count(
                         medications, transactions, counts_col, st, name, counted,
-                        (request.form.get(f'note__{i}') or '').strip(), current_user)
+                        (request.form.get(f'note__{i}') or '').strip(), current_user,
+                        expiry=expiry or None, batch=batch or None)
                     if outcome is None:
                         skipped += 1
                         continue
+                    detail_changes += outcome['detail_changes']
+                    if not outcome['counted']:
+                        details_only += 1
+                        continue
                     posted += 1
-                    if outcome == 0:
+                    if outcome['variance'] == 0:
                         agreed += 1
-                    elif outcome < 0:
+                    elif outcome['variance'] < 0:
                         short += 1
                     else:
                         over += 1
@@ -6953,8 +6974,18 @@ def stock_take() -> ResponseReturnValue:
                 if posted:
                     msg = (f'{posted} count(s) posted to {st["reference"]}: '
                            f'{agreed} agreed, {short} short, {over} over.')
+                elif details_only:
+                    msg = f'No counts were entered in {st["reference"]}.'
                 else:
                     msg = 'No counts were entered.'
+                if details_only:
+                    msg += (f' {details_only} row(s) had an expiry or batch '
+                            f'but no count, so their balances were left alone.')
+                if detail_changes:
+                    msg += f' {detail_changes} expiry/batch detail(s) updated.'
+                if bad_dates:
+                    msg += (f' {bad_dates} expiry date(s) were not in '
+                            f'YYYY-MM-DD form and were not saved.')
                 if skipped:
                     msg += f' {skipped} row(s) skipped as invalid or unknown.'
                 flash(msg)
@@ -6971,87 +7002,62 @@ def stock_take() -> ResponseReturnValue:
                     return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
 
                 med_name = (request.form.get('med_name') or '').strip()
-                try:
-                    counted = int(request.form.get('counted', ''))
-                except (TypeError, ValueError):
-                    flash('Physical count must be a whole number.')
-                    return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
-                if counted < 0:
-                    flash('Physical count cannot be negative.')
-                    return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+                raw = (request.form.get('counted') or '').strip()
+                expiry = (request.form.get('expiry_date') or '').strip()
+                batch = (request.form.get('batch') or '').strip()
 
-                # Read the system balance and write the corrected one in a
-                # single atomic operation. Reading first and updating after
-                # would leave a window in which a dispense could land between
-                # the two and be silently overwritten by the count.
-                before = medications.find_one_and_update(
-                    {'name': med_name},
-                    {'$set': {'balance': counted}},
-                    return_document=ReturnDocument.BEFORE
-                )
-                if not before:
-                    write_app_warning(
-                        'medication_not_found',
-                        f'Medication "{med_name}" not found during stock take {st["reference"]}.',
-                        {'med_name': med_name, 'stock_take': st['reference']}
-                    )
-                    flash(f'Medication "{med_name}" not found. Add it first, then count it.')
-                    return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+                counted = None
+                if raw != '':
+                    try:
+                        counted = int(raw)
+                    except ValueError:
+                        flash('Physical count must be a whole number.')
+                        return redirect(url_for('stock_take',
+                                                stock_take_id=str(st['_id'])))
+                    if counted < 0:
+                        flash('Physical count cannot be negative.')
+                        return redirect(url_for('stock_take',
+                                                stock_take_id=str(st['_id'])))
+                if counted is None and not expiry and not batch:
+                    flash('Enter a count, or an expiry date or batch number.')
+                    return redirect(url_for('stock_take',
+                                            stock_take_id=str(st['_id'])))
+                if expiry and not _parse_expiry(expiry):
+                    flash('The expiry date must be in YYYY-MM-DD form.')
+                    return redirect(url_for('stock_take',
+                                            stock_take_id=str(st['_id'])))
 
-                system_balance   = before.get('balance', 0)
-                variance         = counted - system_balance
-                discrepancy_type = classify_variance(variance)
-                now              = datetime.utcnow()
+                # One implementation, shared with the count sheet. This used
+                # to be a second copy of the same ninety lines, which is how
+                # the two could have drifted apart without anything failing.
+                outcome = _record_count(
+                    medications, transactions, counts_col, st, med_name, counted,
+                    (request.form.get('note') or '').strip(), current_user,
+                    expiry=expiry or None, batch=batch or None)
+                if outcome is None:
+                    flash(f'Medication "{med_name}" not found. '
+                          f'Add it first, then count it.')
+                    return redirect(url_for('stock_take',
+                                            stock_take_id=str(st['_id'])))
 
-                # The correction is posted to the transaction ledger as its own
-                # signed type. Every report in this app back-calculates a
-                # beginning balance from the current balance and the movements
-                # in between; a balance corrected without a matching ledger
-                # entry would break that arithmetic for every period containing
-                # the count.
-                if variance != 0:
-                    transactions.insert_one({
-                        'type': 'adjustment',
-                        'med_name': med_name,
-                        'quantity': variance,          # signed
-                        'batch': before.get('batch'),
-                        'price': before.get('price'),
-                        'expiry_date': before.get('expiry_date'),
-                        'schedule': before.get('schedule'),
-                        'system_balance': system_balance,
-                        'counted': counted,
-                        'discrepancy_type': discrepancy_type,
-                        'stock_take_id': str(st['_id']),
-                        'stock_take_reference': st['reference'],
-                        'user': current_user,
-                        'timestamp': now,
-                    })
-
-                counts_col.insert_one({
-                    'stock_take_id': str(st['_id']),
-                    'reference': st['reference'],
-                    'med_name': med_name,
-                    'system_balance': system_balance,
-                    'counted': counted,
-                    'variance': variance,
-                    'discrepancy_type': discrepancy_type,
-                    'note': (request.form.get('note') or '').strip(),
-                    'counted_by': current_user,
-                    'timestamp': now,
-                })
-
-                write_audit_entry(
-                    'UPDATE', 'stock_take_count', f"{st['reference']} / {med_name}",
-                    f"balance: {system_balance} -> {counted} (variance {variance:+d}, "
-                    f"{DISCREPANCY_LABELS[discrepancy_type].lower()})"
-                )
-
-                if variance == 0:
-                    flash(f'{med_name}: counted {counted}. Agrees with the system.')
-                else:
-                    flash(f'{med_name}: counted {counted}, system had {system_balance} '
-                          f'({variance:+d}). Recorded as "{DISCREPANCY_LABELS[discrepancy_type]}" '
-                          f'and the balance is now {counted}.')
+                bits = []
+                if outcome['counted']:
+                    variance = outcome['variance']
+                    if variance == 0:
+                        bits.append(f'counted {counted}. Agrees with the system')
+                    else:
+                        dtype = classify_variance(variance)
+                        bits.append(
+                            f'counted {counted}, system had '
+                            f'{counted - variance:g} ({variance:+g}). Recorded as '
+                            f'"{DISCREPANCY_LABELS[dtype]}" and the balance is '
+                            f'now {counted}')
+                if outcome['detail_changes']:
+                    bits.append(f"{outcome['detail_changes']} detail(s) corrected")
+                elif not outcome['counted']:
+                    bits.append('expiry and batch recorded; the balance was '
+                                'left as it was')
+                flash(f"{med_name}: {'; '.join(bits)}.")
                 return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
 
             # --- Close a stock take --------------------------------------
@@ -7090,7 +7096,9 @@ def stock_take() -> ResponseReturnValue:
             # Items already counted in THIS stock take drop off the sheet, so
             # the list shrinks as the work is done and nothing is counted twice
             # by accident.
-            done = set(counts_col.distinct('med_name', {'stock_take_id': str(active['_id'])}))
+            done = set(counts_col.distinct(
+                'med_name',
+                {'stock_take_id': str(active['_id']), 'counted': {'$ne': None}}))
             uncounted = [m for m in med_names if m not in done]
             if request.values.get('export') == 'csv':
                 return _register_csv_response('stock_take', counts)
@@ -7099,17 +7107,20 @@ def stock_take() -> ResponseReturnValue:
                 'stock_take.html', nav_links=get_nav_links(), message=message,
                 active=active, counts=counts, med_names=med_names,
                 uncounted=uncounted, sessions=[],
-                agreed_count=sum(1 for c in counts if c['variance'] == 0),
-                issued_not_recorded=sum(1 for c in counts if c['variance'] < 0),
-                recorded_not_issued=sum(1 for c in counts if c['variance'] > 0),
+                agreed_count=sum(1 for c in counts if c.get('variance') == 0),
+                issued_not_recorded=sum(1 for c in counts
+                                        if (c.get('variance') or 0) < 0),
+                recorded_not_issued=sum(1 for c in counts
+                                        if (c.get('variance') or 0) > 0),
             )
 
         sessions = list(stock_takes.find().sort([('status', 1), ('started_at', -1)]).limit(200))
         for s in sessions:
             sid = str(s['_id'])
-            s['counted_lines']     = counts_col.count_documents({'stock_take_id': sid})
+            s['counted_lines']     = counts_col.count_documents(
+                {'stock_take_id': sid, 'counted': {'$ne': None}})
             s['discrepancy_lines'] = counts_col.count_documents(
-                {'stock_take_id': sid, 'variance': {'$ne': 0}})
+                {'stock_take_id': sid, 'variance': {'$nin': [0, None]}})
         return render_template(
             'stock_take.html', nav_links=get_nav_links(), message=message,
             active=None, sessions=sessions, counts=[], med_names=[], uncounted=[],
@@ -7126,16 +7137,40 @@ def stock_take() -> ResponseReturnValue:
 
 
 def _record_count(medications: Collection, transactions: Collection,
-                  counts_col: Collection, st: Doc, med_name: str, counted: float,
-                  note: str, user: str) -> float | None:
-    """Apply one physical count. Returns the variance, or None if unknown item.
+                  counts_col: Collection, st: Doc, med_name: str,
+                  counted: float | None, note: str, user: str,
+                  expiry: str | None = None,
+                  batch: str | None = None) -> Doc | None:
+    """Apply one line of a stock take. None if the medication is unknown.
 
-    Shared by the single-item path and the count sheet so both correct stock,
-    post the signed adjustment and log the line in exactly the same way — the
-    sheet must not be a second, subtly different implementation.
+    The one place a count is recorded. The single-item path and the count
+    sheet both come through here, so the sheet cannot drift into being a
+    second, subtly different implementation.
+
+    The quantity is optional, because a stock take also turns up an expiry
+    date or a batch number that does not match what is on file, and noticing
+    that is worth recording even when the shelf is not being recounted. A
+    line with no quantity corrects the detail and leaves the balance exactly
+    as it was: no adjustment is posted, and it does not count as an item
+    counted.
+
+    Whatever is given replaces what is on file — the shelf is the truth, and
+    that is what a stock take is for — but the value it replaced is kept on
+    the line, so the register shows the change rather than quietly absorbing
+    it.
     """
+    updates: Doc = {}
+    if counted is not None:
+        updates['balance'] = counted
+    if expiry:
+        updates['expiry_date'] = expiry
+    if batch:
+        updates['batch'] = batch
+    if not updates:
+        return None                     # nothing was entered on this line
+
     before = medications.find_one_and_update(
-        {'name': med_name}, {'$set': {'balance': counted}},
+        {'name': med_name}, {'$set': updates},
         return_document=ReturnDocument.BEFORE)
     if not before:
         write_app_warning(
@@ -7144,30 +7179,60 @@ def _record_count(medications: Collection, transactions: Collection,
             {'med_name': med_name, 'stock_take': st['reference']})
         return None
 
-    system_balance = before.get('balance', 0)
-    variance = counted - system_balance
-    dtype = classify_variance(variance)
     now = datetime.utcnow()
-    if variance != 0:
+    system_balance = before.get('balance', 0)
+    variance: float | None = None
+    dtype: str | None = None
+    balance_change = ''
+    if counted is not None:
+        variance = counted - system_balance
+        dtype = classify_variance(variance)
+        balance_change = (f'balance: {system_balance} -> {counted} '
+                          f'(variance {variance:+g}, '
+                          f'{DISCREPANCY_LABELS[dtype].lower()})')
+
+    # The correction is posted to the ledger as its own signed type. Every
+    # report back-calculates a beginning balance from the current balance and
+    # the movements in between, so a balance corrected without a matching
+    # entry would break the arithmetic for every period containing the count.
+    # A detail-only line moves nothing, so it posts nothing.
+    if variance:
         transactions.insert_one({
             'type': 'adjustment', 'med_name': med_name, 'quantity': variance,
             'batch': before.get('batch'), 'price': before.get('price'),
-            'expiry_date': before.get('expiry_date'), 'schedule': before.get('schedule'),
+            'expiry_date': before.get('expiry_date'),
+            'schedule': before.get('schedule'),
             'system_balance': system_balance, 'counted': counted,
             'discrepancy_type': dtype,
             'stock_take_id': str(st['_id']), 'stock_take_reference': st['reference'],
             'user': user, 'timestamp': now,
         })
-    counts_col.insert_one({
+
+    line: Doc = {
         'stock_take_id': str(st['_id']), 'reference': st['reference'],
-        'med_name': med_name, 'system_balance': system_balance, 'counted': counted,
-        'variance': variance, 'discrepancy_type': dtype, 'note': note,
-        'counted_by': user, 'timestamp': now,
-    })
-    write_audit_entry('UPDATE', 'stock_take_count', f"{st['reference']} / {med_name}",
-                      f'balance: {system_balance} -> {counted} (variance {variance:+d}, '
-                      f'{DISCREPANCY_LABELS[dtype].lower()})')
-    return variance
+        'med_name': med_name, 'system_balance': system_balance,
+        'counted': counted, 'variance': variance, 'discrepancy_type': dtype,
+        'note': note, 'counted_by': user, 'timestamp': now,
+    }
+    changes = []
+    if expiry:
+        line['expiry_before'] = before.get('expiry_date')
+        line['expiry_after'] = expiry
+        if str(before.get('expiry_date') or '') != expiry:
+            changes.append(f"expiry: {before.get('expiry_date') or '(none)'} -> {expiry}")
+    if batch:
+        line['batch_before'] = before.get('batch')
+        line['batch_after'] = batch
+        if str(before.get('batch') or '') != batch:
+            changes.append(f"batch: {before.get('batch') or '(none)'} -> {batch}")
+    counts_col.insert_one(line)
+
+    if balance_change:
+        changes.insert(0, balance_change)
+    write_audit_entry('UPDATE', 'stock_take_count',
+                      f"{st['reference']} / {med_name}", '; '.join(changes))
+    return {'variance': variance, 'counted': counted is not None,
+            'detail_changes': len(changes) - (1 if counted is not None else 0)}
 
 
 def _load_stock_take(stock_takes: Collection, raw_id: str | None) -> Doc | None:
@@ -7593,8 +7658,10 @@ REGISTER_CSV = {
         ('condition_out', 'Condition out'), ('condition_in', 'Condition back'),
         ('issued_by', 'Issued by'), ('note', 'Note')]),
     'stock_take': ('Stock Take', [
-        ('med_name', 'Medication'), ('expected', 'On system'),
+        ('med_name', 'Medication'), ('system_balance', 'On system'),
         ('counted', 'Counted'), ('variance', 'Variance'),
+        ('expiry_before', 'Expiry was'), ('expiry_after', 'Expiry now'),
+        ('batch_before', 'Batch was'), ('batch_after', 'Batch now'),
         ('counted_by', 'Counted by'), ('timestamp', 'When'),
         ('note', 'Note')]),
 }
