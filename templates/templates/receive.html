@@ -1,0 +1,491 @@
+{% extends "base.html" %}
+{% block title %}Receiving &middot; NMC Pharmacy{% endblock %}
+{% block heading %}Receiving{% endblock %}
+{% block page_styles %}
+<style>
+  .draft-note { font-size: 12px; color: #0c5460; background: #d1ecf1;
+                border-radius: 4px; padding: 4px 8px; margin-top: 4px;
+                display: none; }
+  .draft-note.shown { display: block; }
+</style>
+{% endblock %}
+{% block content %}{% include "_medication_options.html" %}
+
+{% if message %}
+<p class="message {% if 'successfully' in message|lower or 'deleted' in message|lower or 'reduced' in message|lower %}success{% else %}error{% endif %}">
+    {{ message }}
+</p>
+{% endif %}
+
+{# NEW (Deliveries): receiving now happens inside a DELIVERY, which carries
+
+# NEW (Deliveries): receiving now happens inside a DELIVERY, which carries
+   the supplier, order number + order total, and invoice number + invoice total
+   ONCE. Line items inherit them, so those four fields are typed once per
+   delivery instead of once per medication.
+
+   That is the convenience benefit. The control benefit is the three-way match:
+   what was ordered vs what was invoiced vs what actually arrived. Mismatches
+   are surfaced immediately but never block receiving — stock physically on the
+   shelf must always be recordable. #}
+
+{% if rx_data %}
+<h2>Edit Receive Line</h2>
+<form method="POST" action="{{ url_for('edit_receive', receive_id=rx_data.receive_id) }}" class="receive-form">
+    <input type="hidden" name="receive_id" value="{{ rx_data.receive_id }}">
+    <div class="common-section">
+        <div><label>Medication:</label>
+            <input name="med_name" id="med_name" list="med_suggestions" value="{{ rx_data.med_name }}" required></div>
+        <div><label>Quantity:</label>
+            <input name="quantity" type="number" min="1" value="{{ rx_data.quantity }}" required></div>
+        <div><label>Batch:</label><input name="batch" value="{{ rx_data.batch }}" required></div>
+        <div><label>Price per Unit:</label>
+            <input name="price" type="number" step="0.01" min="0" value="{{ rx_data.price }}" required></div>
+        <div><label>Expiry Date:</label>
+            <input name="expiry_date" type="date" value="{{ rx_data.expiry_date }}" required></div>
+        <div><label>Schedule:</label>
+            <select name="schedule" required>
+            {% for opt in ['controlled', 'not controlled'] %}
+                <option value="{{ opt }}" {% if rx_data.schedule == opt %}selected{% endif %}>{{ opt|title }}</option>
+            {% endfor %}
+            </select></div>
+        <div><label>Stock Receiver:</label>
+            <input name="stock_receiver" value="{{ rx_data.stock_receiver if rx_data else current_user }}" required></div>
+        <div><label>Order Number:</label>
+            <input name="order_number" value="{{ rx_data.order_number }}" required></div>
+        <div><label>Supplier:</label>
+            <input name="supplier" value="{{ rx_data.supplier }}" required></div>
+        <div><label>Invoice Number:</label>
+            <input name="invoice_number" value="{{ rx_data.invoice_number }}" required></div>
+    </div>
+    <datalist id="med_suggestions"></datalist>
+    <div class="form-buttons">
+        <input type="submit" value="Update Receive">
+        <a href="{{ url_for('receive') }}"><button type="button">Cancel</button></a>
+    </div>
+</form>
+
+{% elif delivery %}
+<h2>{{ delivery.reference }} &mdash; {{ delivery.supplier }}</h2>
+<p><strong>Status:</strong> {{ delivery.status|upper }} &nbsp;|&nbsp;
+   <strong>Order:</strong> {{ delivery.order_number }} &nbsp;|&nbsp;
+   <strong>Invoice:</strong> {{ delivery.invoice_number }} &nbsp;|&nbsp;
+   Opened {{ delivery.opened_at.strftime('%Y-%m-%d %H:%M') }} by {{ delivery.received_by }}
+   {% if delivery.closed_at %}&nbsp;|&nbsp; Closed {{ delivery.closed_at.strftime('%Y-%m-%d %H:%M') }} by {{ delivery.closed_by }}{% endif %}
+</p>
+<p><a href="{{ url_for('receive') }}">&larr; All deliveries</a></p>
+
+{% if order_summary and order_summary.invoice_count %}
+<h3>Order {{ order_summary.order_number }}</h3>
+<p style="font-size:13px;">One order is often filled by several part-deliveries, each
+with its own invoice. This is the position across <strong>all</strong> invoices
+raised against this order number.</p>
+<div class="table-scroll"><table>
+    <thead><tr><th>Order Total</th><th>Invoices</th><th>Invoiced to Date</th>
+               <th>Goods Received</th><th>Still to Invoice</th><th>Status</th></tr></thead>
+    <tbody>
+        <tr class="{% if order_summary.over_invoiced %}expired{% elif order_summary.fully_invoiced %}normal{% else %}close-to-expire{% endif %}">
+            <td>R{{ "%.2f"|format(order_summary.order_total) }}</td>
+            <td>{{ order_summary.invoice_count }}</td>
+            <td>R{{ "%.2f"|format(order_summary.invoiced) }}</td>
+            <td>R{{ "%.2f"|format(order_summary.goods) }}</td>
+            <td>R{{ "%.2f"|format(order_summary.outstanding) }}</td>
+            <td>{% if order_summary.over_invoiced %}Invoiced beyond the order
+                {% elif order_summary.fully_invoiced %}Fully invoiced
+                {% else %}Part-delivered{% endif %}</td>
+        </tr>
+    </tbody>
+</table></div>
+{% if order_summary.conflicting_totals %}
+<p class="message error" style="font-size:13px;">The invoices recorded against this
+order do not agree on the order total. The figure above is from the most recently
+opened delivery. Check the paperwork.</p>
+{% endif %}
+{% if order_summary.invoice_count > 1 %}
+<div class="table-scroll"><table>
+    <thead><tr><th>Delivery</th><th>Invoice</th><th>Invoice Total</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for sib in order_summary.siblings %}
+        <tr {% if sib.id == delivery._id|string %}style="font-weight:bold;"{% endif %}>
+            <td><a href="{{ url_for('receive', delivery_id=sib.id) }}">{{ sib.reference }}</a></td>
+            <td>{{ sib.invoice_number }}</td>
+            <td>R{{ "%.2f"|format(sib.invoice_total) }}</td>
+            <td>{{ sib.status|upper }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% endif %}
+{% endif %}
+
+<h3>This Invoice vs Goods Received</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Document</th><th>Total</th><th>Compared With</th><th>Difference</th><th>Status</th></tr></thead>
+    <tbody>
+        <tr class="{{ recon.goods_class }}">
+            <td>Invoice {{ delivery.invoice_number }}</td>
+            <td>R{{ "%.2f"|format(delivery.invoice_total) }}</td>
+            <td>Goods received R{{ "%.2f"|format(recon.goods_value) }}</td>
+            <td>{{ recon.goods_diff_label }}</td>
+            <td>{{ recon.goods_note }}</td>
+        </tr>
+    </tbody>
+</table></div>
+<p style="font-size:13px;">Goods received is the sum of the line values captured
+below, each computed from the pack price rather than a rounded unit price, so a
+pack size that does not divide cleanly cannot cause a false mismatch. A mismatch is flagged but never blocks
+receiving &mdash; stock that is physically on the shelf must always be
+recordable. Investigate it, then close the delivery.</p>
+
+{% if delivery.status == 'open' %}
+<h3>Add a Line</h3>
+<p style="font-size:13px;">Supplier, order number and invoice number come from the
+delivery above &mdash; you do not re-enter them per item.<br>
+Enter the quantity in <strong>single units</strong> (the way stock is counted) and
+the price of a <strong>whole pack</strong> (the way the supplier bills). The unit
+price is worked out from the two, so stock values are correct. For an item already
+priced singly, leave pack size as 1.</p>
+<form method="POST" action="{{ url_for('receive') }}" class="receive-form">
+    <input type="hidden" name="action" value="line">
+    <input type="hidden" name="delivery_id" value="{{ delivery._id|string }}">
+    <div class="common-section">
+        <div><label>Medication:</label>
+            <input name="med_name" id="med_name" list="med_suggestions" required autocomplete="off"></div>
+        <div><label>Quantity (single units):</label>
+            <input name="quantity" type="number" min="1" required></div>
+        <div><label>Pack Size (units per pack):</label>
+            <input name="pack_size" type="number" min="1" value="1" required></div>
+        <div><label>Price per Pack (R):</label>
+            <input name="pack_price" type="number" step="0.01" min="0" required></div>
+        <div><label>Batch:</label><input name="batch" required></div>
+        <div><label>Expiry Date:</label><input name="expiry_date" type="date" required></div>
+        {# The draft note belongs HERE, beside the line being typed — not on the
+           Start a Delivery form, where it was and where the user typing a line
+           would never see it. #}
+        <div id="line-draft-note" class="draft-note"></div>
+    </div>
+    {# FIX (Bug): the schedule dropdown used to live here, and receiving wrote it
+       onto the medication. Picking the wrong option while receiving a controlled
+       drug silently RECLASSIFIED it as not controlled, and the item then
+       disappeared from the controlled drug register with nothing to show why.
+       Schedule is a property of the medication, not of a consignment, so it is
+       set once under Add Medication and inherited here. Batch, expiry, price and
+       pack size genuinely do vary per delivery and are still captured above. #}
+    <datalist id="med_suggestions"></datalist>
+    <div class="form-buttons"><input type="submit" value="Add Line"></div>
+</form>
+
+<form method="POST" action="{{ url_for('receive') }}" style="margin-top:16px;">
+    <input type="hidden" name="action" value="close">
+    <input type="hidden" name="delivery_id" value="{{ delivery._id|string }}">
+    <button type="submit" class="delete-btn"
+            onclick="return confirm('Close {{ delivery.reference }}? No further lines can be added.');">
+        Close This Delivery</button>
+</form>
+{% endif %}
+
+<h3>Lines Captured ({{ delivery_lines|length }})</h3>
+<div class="table-scroll"><table>
+    <thead><tr><th>Medication</th><th>Units</th><th>Pack Size</th><th>Packs</th>
+               <th>Price/Pack</th><th>Unit Price</th><th>Line Value</th>
+               <th>Batch</th><th>Expiry</th><th>Captured</th></tr></thead>
+    <tbody>
+    {% for l in delivery_lines %}
+        <tr>
+            <td>{{ l.med_name }}</td><td>{{ l.quantity }}</td>
+            <td>{{ l.get('pack_size') or 1 }}</td>
+            <td>{{ '%g'|format(l.quantity / (l.get('pack_size') or 1)) }}</td>
+            {# a missing key yields Undefined, which is NOT none - so test with
+               .get(), or rows written before pack pricing existed blow up here #}
+            <td>{% if l.get('pack_price') is not none %}R{{ "%.2f"|format(l.get('pack_price')) }}{% else %}&ndash;{% endif %}</td>
+            <td>R{{ "%.4f"|format(l.price) }}</td>
+            <td>R{{ "%.2f"|format(l.get('line_value') if l.get('line_value') is not none else l.quantity * l.price) }}</td>
+            <td>{{ l.batch }}</td><td>{{ l.expiry_date }}</td>
+            <td>{{ l.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="10">No lines captured yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+
+{% else %}
+<h2>Start a Delivery</h2>
+<p>Capture the paperwork once, then add each medication as a line. Several
+deliveries can be open at the same time.</p>
+<form method="POST" action="{{ url_for('receive') }}" class="receive-form">
+    <input type="hidden" name="action" value="open">
+    <div class="common-section">
+        <div><label>Supplier:</label><input name="supplier" required></div>
+        <div><label>Order Number:</label><input name="order_number" required></div>
+        <div><label>Order Total (R):</label>
+            <input name="order_total" type="number" step="0.01" min="0" required></div>
+        <div><label>Invoice Number:</label><input name="invoice_number" required></div>
+        <div><label>Invoice Total (R):</label>
+            <input name="invoice_total" type="number" step="0.01" min="0" required></div>
+        <div><label>Received By:</label><input name="stock_receiver" value="{{ current_user }}" required></div>
+        <div><label>Note (optional):</label><input name="note" type="text"></div>
+    </div>
+    <div class="form-buttons"><input type="submit" value="Open Delivery"></div>
+</form>
+
+<h2>Deliveries ({{ deliveries|length }})</h2>
+<div class="table-scroll"><table>
+    <thead>
+        <tr><th>Reference</th><th>Supplier</th><th>Order</th><th>Order Total</th>
+            <th>Invoice</th><th>Invoice Total</th><th>Goods Received</th>
+            <th>Difference</th><th>Lines</th><th>Status</th><th>Opened</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+    {% for d in deliveries %}
+        <tr class="{{ d.row_class }}">
+            <td>{{ d.reference }}</td><td>{{ d.supplier }}</td>
+            <td>{{ d.order_number }}</td><td>R{{ "%.2f"|format(d.order_total) }}</td>
+            <td>{{ d.invoice_number }}</td><td>R{{ "%.2f"|format(d.invoice_total) }}</td>
+            <td>R{{ "%.2f"|format(d.goods_value) }}</td>
+            <td>{{ d.diff_label }}</td>
+            <td>{{ d.line_count }}</td><td>{{ d.status|upper }}</td>
+            <td>{{ d.opened_at.strftime('%Y-%m-%d') }}</td>
+            <td class="action-buttons">
+                <a href="{{ url_for('receive', delivery_id=d._id|string) }}">
+                    <button class="edit-btn">{% if d.status == 'open' %}Continue{% else %}View{% endif %}</button></a>
+            </td>
+        </tr>
+    {% else %}
+        <tr><td colspan="12">No deliveries yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% endif %}
+
+<hr>
+
+<h2>Receive Transactions</h2>
+
+{% if window_defaulted %}
+<p class="message" style="font-size:13px;">Showing <strong>this month</strong> by
+default. Set a date range to look further back, or use the search box &mdash; a
+search looks across all records, not just this month.</p>
+{% endif %}
+{% from "_pagebar.html" import pagebar with context %}
+
+
+<form method="GET" action="{{ url_for('receive') }}" class="filter-form">
+    <div class="filter-section">
+        <div>
+            <label>Start Date:</label>
+            {# BUG: this showed the month the APP had chosen when no range was
+               asked for. The route drops that default as soon as there is a
+               search — so a search really does look at everything — but the
+               form submitted the dates sitting in these boxes along with it,
+               which put the month straight back on. The promise under the
+               heading was true on the first load and a lie from the second.
+               So when the window was defaulted, these start empty. #}
+            <input name="start_date" type="date"
+                   value="{% if not window_defaulted %}{{ start_date or '' }}{% endif %}">
+        </div>
+        <div>
+            <label>End Date:</label>
+            <input name="end_date" type="date"
+                   value="{% if not window_defaulted %}{{ end_date or '' }}{% endif %}">
+        </div>
+        <div>
+            <label>Search:</label>
+            <input name="search" type="text" value="{{ search or '' }}"
+                   placeholder="Search medication, batch, supplier...">
+        </div>
+        <div class="button-div">
+            <input type="submit" value="Filter">
+            <a href="{{ url_for('receive') }}">Clear</a>
+        </div>
+    </div>
+</form>
+
+{{ pagebar(pager, 'receive', '' if window_defaulted else start_date, '' if window_defaulted else end_date, search, unit) }}
+<div class="table-scroll"><table>
+    <thead>
+        <tr>
+            <th>Medication</th><th>Quantity</th><th>Batch</th><th>Price</th>
+            <th>Expiry Date</th><th>Stock Receiver</th><th>Order Number</th>
+            <th>Supplier</th><th>Invoice Number</th><th>User</th>
+            <th>Timestamp</th><th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for t in tx_list %}
+        <tr>
+            <td>{{ t.med_name }}</td>
+            <td>{{ t.quantity }}</td>
+            <td>{{ t.batch }}</td>
+            <td>R{{ "%.2f"|format(t.price) }}</td>
+            <td>{{ t.expiry_date }}</td>
+            <td>{{ t.stock_receiver }}</td>
+            <td>{{ t.order_number }}</td>
+            <td>{{ t.supplier }}</td>
+            <td>{{ t.invoice_number }}</td>
+            <td>{{ t.user }}</td>
+            <td>{{ t.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            <td class="action-buttons">
+                {% if session['user']['role'] != 'viewer' %}
+                    <a href="{{ url_for('edit_receive',
+                                        receive_id=t._id,
+                                        start_date=start_date,
+                                        end_date=end_date,
+                                        search=search) }}">
+                        <button type="button" class="edit-btn">Edit</button>
+                    </a>
+                {% endif %}
+                {% if session['user']['role'] == 'admin' %}
+                <form class="delete-btn" method="POST" action="{{ url_for('delete_receive') }}"
+                        style="display:inline;"
+                        onsubmit="return confirm('Permanently delete this receive entry?\nStock will be reduced.');">
+                    <input type="hidden" name="receive_id" value="{{ t._id }}">
+                    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
+                    <input type="hidden" name="end_date"   value="{{ end_date   or '' }}">
+                    <input type="hidden" name="search"     value="{{ search     or '' }}">
+                    <button type="submit" class="delete-btn">Delete</button>
+                </form>
+                {% endif %}
+                {% if session['user']['role'] == 'viewer' %}
+                    <span>—</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="12">No receive transactions.</td></tr>
+        {% endfor %}
+    </tbody>
+</table></div>
+{{ pagebar(pager, 'receive', '' if window_defaulted else start_date, '' if window_defaulted else end_date, search, unit) }}
+
+<script>
+document.addEventListener('DOMContentLoaded', async () => {
+    const input    = document.getElementById('med_name');
+    const datalist = document.getElementById('med_suggestions');
+    if (!input) return;
+
+    // FIX (Performance): options come from /api/medications, not an inline array
+    const options = await getMedicationOptions();
+    options.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        datalist.appendChild(opt);
+    });
+
+    input.addEventListener('input', () => {
+        const q = input.value.toLowerCase();
+        Array.from(datalist.options).forEach(opt => {
+            opt.style.display = opt.value.toLowerCase().includes(q) ? '' : 'none';
+        });
+    });
+
+    // Pack size and schedule describe the product, not the purchase, so the
+    // app already knows them from the last time this item was received.
+    // Retyping the pack size was also a live hazard: the field resets to 1,
+    // and a pack size of 1 values a pack-priced item at the pack price per
+    // unit. Price is deliberately NOT filled — that belongs to this invoice.
+    let medDefaults = null;
+    async function fillFromMedication(nameInput) {
+        if (medDefaults === null) {
+            try {
+                const res = await fetch('/api/medication-defaults');
+                medDefaults = res.ok ? await res.json() : {};
+            } catch (e) { medDefaults = {}; }
+        }
+        const d = medDefaults[nameInput.value.trim()];
+        if (!d) return;
+        const form = nameInput.closest('form') || document;
+        const ps = form.querySelector('[name="pack_size"]');
+        const sc = form.querySelector('[name="schedule"]');
+        // Only fill what the user has not already set away from its default.
+        if (ps && d.pack_size && (ps.value === '' || ps.value === '1')) {
+            ps.value = d.pack_size;
+        }
+        if (sc && d.schedule && !sc.dataset.touched) {
+            sc.value = d.schedule;
+        }
+        if (sc && !sc.dataset.bound) {
+            sc.dataset.bound = '1';
+            sc.addEventListener('change', () => { sc.dataset.touched = '1'; });
+        }
+    }
+    document.querySelectorAll('[name="med_name"]').forEach(el => {
+        el.addEventListener('change', () => fillFromMedication(el));
+        el.addEventListener('blur', () => fillFromMedication(el));
+    });
+
+    // A delivery line is six fields read off a box, and a twenty-line
+    // delivery is a long sitting. Losing one to a timeout or a stray click
+    // means fetching the box again. The part-typed line is kept in the
+    // browser, per tab, and cleared the moment the line is accepted.
+    var LINE_KEY = 'delivery-line-draft';
+    var LINE_POSTED = {{ (request.args.get('line_added') == '1')|tojson }};
+    var LINE_FIELDS = ['med_name', 'quantity', 'pack_size', 'pack_price',
+                       'batch', 'expiry_date'];
+
+    function lineForm() {
+        var el = document.querySelector('[name="med_name"]');
+        return el ? el.closest('form') : null;
+    }
+    function lineDraftClear() {
+        try { sessionStorage.removeItem(LINE_KEY); } catch (e) {}
+        var n = document.getElementById('line-draft-note');
+        if (n) n.className = 'draft-note';
+    }
+    function lineDraftSave() {
+        var form = lineForm();
+        if (!form) return;
+        var data = {};
+        var any = false;
+        LINE_FIELDS.forEach(function (f) {
+            var el = form.querySelector('[name="' + f + '"]');
+            if (!el) return;
+            data[f] = el.value;
+            // pack_size arrives pre-filled, so it alone is not a draft.
+            if (el.value && f !== 'pack_size') any = true;
+        });
+        try {
+            if (any) sessionStorage.setItem(LINE_KEY, JSON.stringify(data));
+            else sessionStorage.removeItem(LINE_KEY);
+        } catch (e) {}
+    }
+    function lineDraftRestore() {
+        var form = lineForm();
+        if (!form) return;
+        var d;
+        try {
+            var raw = sessionStorage.getItem(LINE_KEY);
+            d = raw ? JSON.parse(raw) : null;
+        } catch (e) { d = null; }
+        if (!d) return;
+        LINE_FIELDS.forEach(function (f) {
+            var el = form.querySelector('[name="' + f + '"]');
+            if (el && d[f]) el.value = d[f];
+        });
+        var n = document.getElementById('line-draft-note');
+        if (n) {
+            n.textContent = 'This is the line you had started. Nothing was lost.';
+            n.className = 'draft-note shown';
+        }
+    }
+
+    // BUG (mine): this used to look for the words "units received onto" in the
+    // page text to decide whether a line had posted. document.body.textContent
+    // includes the text of <script> elements, so the sentence in THIS comment's
+    // own code matched itself on every load — the draft was wiped the instant
+    // the page came back, which is the one moment it exists for. The server
+    // knows the answer, so it says so in the redirect instead of the page being
+    // asked to guess from its own prose.
+    if (LINE_POSTED) {
+        lineDraftClear();
+    } else if (lineForm()) {
+        lineDraftRestore();
+    }
+    if (lineForm()) {
+        ['input', 'change'].forEach(function (evt) {
+            lineForm().addEventListener(evt, lineDraftSave, true);
+        });
+    }
+});
+</script>
+{% endblock %}
