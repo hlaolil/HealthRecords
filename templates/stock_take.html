@@ -2,12 +2,13 @@
 {#- NEW (Stock Take): admin-only physical count. Two views share one template —
     the session list (no active session selected) and the counting sheet.
 
-    Counting is BLIND: the entry form deliberately never shows the system
-    balance for the item being counted. The system figure and the variance are
-    revealed only AFTER the count has been committed, in the counted-lines table
-    below the form. This is why the form and the table are separate — an admin
-    cannot see what they are "supposed" to find before they write down what they
-    actually found. -#}
+    The count used to be BLIND — the sheet never showed the system balance,
+    so nobody could agree with a figure instead of counting. It now shows the
+    balance, expiry and batch, at the pharmacist's request, so that a stock
+    take short of time can act only where the shelf and the system disagree.
+    The safeguard is that agreeing is a deliberate tick per row, recorded as
+    "confirmed" rather than "counted", so the register still shows which items
+    had a number written down. -#}
 {% block title %}Stock Take &middot; NMC Pharmacy{% endblock %}
 {% block heading %}Stock Take{% endblock %}
 {% block page_styles %}
@@ -17,6 +18,10 @@
   .st-one { border: 1px solid #dee2e6; border-radius: 6px; padding: 10px 14px;
             margin-top: 18px; background: #fff; }
   .st-one summary { cursor: pointer; font-weight: bold; color: #0056b3; }
+  .st-system { font-weight: bold; text-align: right; }
+  .st-agree { text-align: center; }
+  .st-agree input { width: 22px; height: 22px; }
+  .st-changed { background: #fff3cd; border-color: #e0a800 !important; }
 </style>
 {% endblock %}
 {% block content %}{% if message %}
@@ -77,47 +82,57 @@ Each item's balance is corrected the moment you record its count.</p>
    are ignored, so a sheet can be posted as many times as you like and the
    remaining items simply stay on it. The system balance is still absent: the
    count has to be blind. #}
-<p>Fill in the counts you have done and press <strong>Post Counts</strong>.
-Rows left blank are ignored, so you can post part of the sheet now and the rest
-later &mdash; counted items drop off this list. The system figure is not shown
-until after you post.</p>
-<p class="st-hint">The expiry and batch columns are optional. Fill one in only
-when what is on the shelf does not match what is on file, and it will be
-corrected &mdash; the figure it replaced is kept on the counted line below, so
-the change stays visible. A row with an expiry or batch but <em>no</em> count
-leaves the balance alone and stays on this sheet to be counted.</p>
+<p>Each row shows what the system has. Where the shelf matches, tick
+<strong>Agrees</strong>. Where it doesn't, type what you actually counted. The
+expiry and batch boxes already hold what is on file, so change them only if the
+pack says something different. Press <strong>Post Counts</strong> whenever you
+like: rows you haven't touched stay on the sheet, and rows you've posted drop
+off.</p>
+<p class="st-hint">A tick is recorded as <em>confirmed</em>, not as a figure
+you counted, so the register shows which items were checked against the system
+and which were counted outright. If you tick a row and also type a count, the
+count is the one that is recorded. For controlled drugs, counting is safer than
+ticking.</p>
 <form method="POST" action="{{ url_for('stock_take') }}">
     <input type="hidden" name="action" value="count_sheet">
     <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
     <p>
         <input type="text" id="st_filter" placeholder="Filter this list..."
                onkeyup="stFilter()" style="width:16em;">
+        <button type="button" onclick="stTickShown()">Tick all shown as agreeing</button>
         <span style="font-size:13px;">&nbsp;typing here only hides rows; it does not clear anything you have entered.</span>
     </p>
     <div class="table-scroll"><table id="st_sheet">
         <thead>
-            <tr><th>Medication</th><th>Physical Count</th>
-                <th>Expiry<br><small>optional</small></th>
-                <th>Batch No.<br><small>optional</small></th>
+            <tr><th>Medication</th><th>On System</th>
+                <th>Agrees<br><small>tick if shelf matches</small></th>
+                <th>Physical Count<br><small>only if different</small></th>
+                <th>Expiry<br><small>change if different</small></th>
+                <th>Batch No.<br><small>change if different</small></th>
                 <th>Note (optional)</th></tr>
         </thead>
         <tbody>
-        {% for m in uncounted %}
+        {% for m in sheet %}
             <tr>
-                <td>{{ m }}<input type="hidden" name="med_name" value="{{ m }}"></td>
+                <td>{{ m.name }}<input type="hidden" name="med_name" value="{{ m.name }}"></td>
+                <td class="st-system">{{ m.balance }}</td>
+                <td class="st-agree"><input name="agree__{{ loop.index0 }}" type="checkbox"
+                           aria-label="{{ m.name }} matches the system"></td>
                 <td><input name="counted__{{ loop.index0 }}" type="number" min="0"
-                           style="width:7em;" autocomplete="off"></td>
-                {# Blank means "leave what is on file alone". Anything entered
-                   replaces it, and the line keeps the value it replaced. #}
-                <td><input name="expiry__{{ loop.index0 }}" type="date"
+                           class="st-count" style="width:7em;" autocomplete="off"></td>
+                {# Filled with what is on file. Leave it and nothing changes;
+                   change it and the old value is kept on the counted line. #}
+                <td><input name="expiry__{{ loop.index0 }}" type="date" class="st-detail"
+                           value="{{ m.expiry }}" data-orig="{{ m.expiry }}"
                            style="width:10em;" autocomplete="off"></td>
-                <td><input name="batch__{{ loop.index0 }}" type="text"
+                <td><input name="batch__{{ loop.index0 }}" type="text" class="st-detail"
+                           value="{{ m.batch }}" data-orig="{{ m.batch }}"
                            style="width:9em;" autocomplete="off" maxlength="40"></td>
                 <td><input name="note__{{ loop.index0 }}" type="text"
                            style="width:14em;" placeholder="Shelf, remarks"></td>
             </tr>
         {% else %}
-            <tr><td colspan="5">Every medication has been counted in this stock take.</td></tr>
+            <tr><td colspan="7">Every medication has been counted in this stock take.</td></tr>
         {% endfor %}
         </tbody>
     </table></div>
@@ -128,6 +143,35 @@ leaves the balance alone and stays on this sheet to be counted.</p>
     {% endif %}
 </form>
 <script>
+// Ticks the rows on view that have no count typed in. With the filter box
+// that is "this shelf agrees": filter to the shelf, check it, tick it.
+function stTickShown() {
+    document.querySelectorAll('#st_sheet tbody tr').forEach(function (tr) {
+        if (tr.style.display === 'none') return;
+        var box = tr.querySelector('input[name^="agree__"]');
+        var count = tr.querySelector('input[name^="counted__"]');
+        if (box && count && count.value.trim() === '') box.checked = true;
+    });
+}
+document.addEventListener('DOMContentLoaded', function () {
+    // Typing a count unticks "agrees" on that row — the number wins anyway,
+    // and the page should say so rather than show both.
+    document.querySelectorAll('#st_sheet input[name^="counted__"]').forEach(function (c) {
+        c.addEventListener('input', function () {
+            var box = c.closest('tr').querySelector('input[name^="agree__"]');
+            if (box && c.value.trim() !== '') box.checked = false;
+        });
+    });
+    // An expiry or batch that differs from the file is highlighted, so it
+    // is plain before posting which details are about to change.
+    document.querySelectorAll('#st_sheet .st-detail').forEach(function (d) {
+        var mark = function () {
+            d.classList.toggle('st-changed', d.value !== (d.dataset.orig || ''));
+        };
+        d.addEventListener('input', mark);
+        d.addEventListener('change', mark);
+    });
+});
 function stFilter() {
     var q = document.getElementById('st_filter').value.toLowerCase();
     var rows = document.querySelectorAll('#st_sheet tbody tr');
@@ -215,7 +259,7 @@ may be left blank if you only need to fix an expiry date or a batch number
             <td>{{ c.system_balance }}</td>
             <td>{% if c.counted is none %}&ndash;{% else %}{{ c.counted }}{% endif %}</td>
             <td>{% if c.variance is none %}&ndash;{% else %}{{ '%+g'|format(c.variance) }}{% endif %}</td>
-            <td>{% if c.variance is none %}Detail only{% else %}{{ c.discrepancy_label }}{% endif %}</td>
+            <td>{% if c.variance is none %}Detail only{% else %}{{ c.discrepancy_label }}{% if c.method == 'confirmed' %} <small>(ticked)</small>{% endif %}{% endif %}</td>
             <td>{% if c.expiry_after %}
                     {%- if c.expiry_before and c.expiry_before != c.expiry_after -%}
                         <del>{{ c.expiry_before }}</del> &rarr; <strong>{{ c.expiry_after }}</strong>
