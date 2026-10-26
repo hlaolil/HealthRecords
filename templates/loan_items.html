@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Equipment Register &middot; NMC Pharmacy{% endblock %}
+{% block heading %}Equipment Register{% endblock %}
+{% block page_styles %}
+<style>
+  @media print { .nav-links, .no-print, form { display: none !important; } }
+  .loan-out { background-color: #fff3cd !important; }
+  .loan-overdue { background-color: #f8d7da !important; }
+  .loan-off { color: #777; }
+  .loan-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
+  /* Keep the inline status form inside its column: the page's form styling
+     is full-width and would otherwise push it out of the cell. */
+  .loan-actions { display: flex; gap: 6px; align-items: center; }
+  .loan-actions form { display: inline; margin: 0; padding: 0;
+                       background: none; box-shadow: none; }
+  .loan-actions select { width: auto; min-width: 96px; padding: 5px; margin: 0; }
+  .loan-actions button { padding: 6px 10px; font-size: 13px; margin: 0; }
+</style>
+{% endblock %}
+{% block content %}{% if message %}
+    <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+
+<h2>Add an Item</h2>
+<p class="loan-hint">One entry per physical item. Two pairs of crutches are two
+entries, each with its own code, so you can tell which one is with which
+patient and which one keeps coming back damaged. Leave the code blank and one
+is generated for you.</p>
+<form method="POST" action="{{ url_for('loan_items') }}" class="dispense-form">
+    <input type="hidden" name="action" value="add_item">
+    <div class="common-section">
+        <div>
+            <label>Item Type:</label>
+            <select name="item_type" required>
+                {% for t in item_types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Item Code:</label>
+            <input name="item_code" type="text" maxlength="20" placeholder="auto">
+        </div>
+        <div>
+            <label>Size / Description:</label>
+            <input name="size" type="text" maxlength="40" placeholder="Adult L">
+        </div>
+        <div>
+            <label>Condition:</label>
+            <select name="condition">
+                {% for ccc in conditions %}<option value="{{ ccc }}">{{ ccc }}</option>{% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Note:</label>
+            <input name="note" type="text" maxlength="120">
+        </div>
+    </div>
+    <button type="submit">Add Item</button>
+</form>
+
+<h2>Register &mdash; {{ rows|length }} item{{ '' if rows|length == 1 else 's' }}</h2>
+<p class="loan-hint">Availability is worked out from the loan ledger, not
+stored on the item, so this table cannot disagree with what is actually out.</p>
+<div class="table-scroll"><table>
+    <tr>
+        <th>Code</th><th>Type</th><th>Size</th><th>Condition</th>
+        <th>State</th><th>With</th><th>Due</th><th>Note</th><th>Action</th>
+    </tr>
+    {% for r in rows %}
+    <tr class="{% if r.overdue %}loan-overdue{% elif r.loan %}loan-out{% endif %}">
+        <td>{{ r.code }}</td>
+        <td>{{ r.item_type }}</td>
+        <td>{{ r.size or '-' }}</td>
+        <td>{{ r.condition or '-' }}</td>
+        <td{% if r.shelf in ['Retired', 'Lost'] and not r.loan %} class="loan-off"{% endif %}>{{ r.state }}</td>
+        <td>{{ r.loan.patient_name if r.loan else '-' }}</td>
+        <td>{{ r.loan.due_date.strftime('%Y-%m-%d') if r.loan and r.loan.due_date else '-' }}</td>
+        <td>{{ r.note or '-' }}</td>
+        <td>
+            {% if not r.loan %}
+            <div class="loan-actions">
+            <form method="POST" action="{{ url_for('loan_items') }}">
+                <input type="hidden" name="action" value="set_status">
+                <input type="hidden" name="item_id" value="{{ r.id }}">
+                <select name="status">
+                    {% for s in shelf_statuses %}
+                    <option value="{{ s }}" {% if s == r.shelf %}selected{% endif %}>{{ s }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit">Set</button>
+            </form>
+            </div>
+            {% else %}
+            <span class="loan-hint">out &mdash; cannot change</span>
+            {% endif %}
+        </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="9">No items yet. Add the first one above.</td></tr>
+    {% endfor %}
+</table></div>
+{% endblock %}
