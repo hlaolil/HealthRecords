@@ -400,6 +400,18 @@
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         text-align: center;
     }
+    /* Show / Hide beside every password box. The button sits inside the
+       right-hand end of the box so the box keeps its full width, and the
+       box gets padding on that side so the typing never runs under it. */
+    .pw-wrap { position: relative; display: block; }
+    .pw-wrap input { padding-right: 64px !important; box-sizing: border-box; }
+    .pw-toggle {
+        position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+        min-height: 0 !important; padding: 4px 10px; margin: 0;
+        font-size: 13px; background: #e9ecef; color: #0056b3;
+        border: 1px solid #ced4da; border-radius: 4px; cursor: pointer;
+    }
+    .pw-toggle:hover { background: #dee2e6; }
     /* ------------------------------------------------------------------
        Screens narrower than a laptop.
 
@@ -543,6 +555,41 @@
 
     resetTimer();
 })();
+</script>
+<script>
+// Show / Hide for every password box on the page: login, registration and
+// the change-password form all get it from here, so no page can be the one
+// that was forgotten. The box goes back to hidden as the form is submitted,
+// so the browser still recognises it as a password and offers to save it,
+// and a password is never left showing on a screen somebody walks past.
+document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('input[type="password"]').forEach(function (box) {
+        var wrap = document.createElement('span');
+        wrap.className = 'pw-wrap';
+        box.parentNode.insertBefore(wrap, box);
+        wrap.appendChild(box);
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'pw-toggle';
+        btn.textContent = 'Show';
+        btn.setAttribute('aria-label', 'Show password');
+        btn.setAttribute('aria-pressed', 'false');
+        wrap.appendChild(btn);
+        btn.addEventListener('click', function () {
+            var showing = box.type === 'text';
+            box.type = showing ? 'password' : 'text';
+            btn.textContent = showing ? 'Show' : 'Hide';
+            btn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+            btn.setAttribute('aria-pressed', String(!showing));
+            box.focus();
+        });
+        if (box.form) {
+            box.form.addEventListener('submit', function () {
+                box.type = 'password';
+            });
+        }
+    });
+});
 </script>
 {#- A page with styling of its own puts it here, after the shared
     stylesheet above so it still wins, and in the head where a stylesheet

@@ -5157,6 +5157,36 @@ def temperature() -> ResponseReturnValue:
             # looking at, a row per reading is what a spreadsheet can count.
             return _register_csv_response('temperature', readings)
 
+        # Every room's chart for the month, on one page. Choosing a room one
+        # at a time meant four page loads to see whether anything had drifted
+        # out of range anywhere, and the question asked of this page is
+        # almost always "is everything all right?" — which is a question
+        # about all of them at once. One query for the month, split by room.
+        month_readings = list(logs.find({'date': {'$gte': start, '$lt': end}})
+                              .sort([('date', 1), ('session', 1)]))
+        charts: Docs = []
+        for loc_name in TEMP_LOCATIONS:
+            loc_readings = [r for r in month_readings
+                            if r.get('location') == loc_name]
+            lo_l, hi_l = TEMP_LIMITS.get(loc_name, (15.0, 25.0))
+            loc_breaches = sum(
+                1 for r in loc_readings
+                if (v := _reading_temp(r)) is not None and (v > hi_l or v < lo_l))
+            loc_thermo = TEMP_THERMOMETERS.get(loc_name, '')
+            if not loc_thermo:
+                for r in sorted(loc_readings, key=lambda r: r['timestamp'],
+                                reverse=True):
+                    if r.get('thermometer'):
+                        loc_thermo = r['thermometer']
+                        break
+            charts.append({
+                'location': loc_name, 'lo': lo_l, 'hi': hi_l,
+                'recorded': len(loc_readings), 'breaches': loc_breaches,
+                'thermometer': loc_thermo,
+                'svg': _temperature_chart(loc_readings, year, month,
+                                          loc_name, loc_thermo),
+            })
+
         return render_template(
             'temperature.html', nav_links=get_nav_links(), message=message,
             message_class=message_class, is_admin=is_admin,
@@ -5172,6 +5202,7 @@ def temperature() -> ResponseReturnValue:
             round_rows=round_rows, round_session=round_session,
             round_time=now_local.strftime('%H:%M'),
             round_date_label=now_local.strftime('%A %d %B %Y'),
+            charts=charts,
             chart=_temperature_chart(readings, year, month, location, thermometer))
 
     except ServerSelectionTimeoutError:
@@ -5189,7 +5220,7 @@ def temperature() -> ResponseReturnValue:
             round_rows=[], round_session=local_session(),
             round_time=local_now().strftime('%H:%M'),
             round_date_label=local_now().strftime('%A %d %B %Y'),
-            chart=''), 500
+            charts=[], chart=''), 500
 
 
 # ============================================================================

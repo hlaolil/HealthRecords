@@ -10,6 +10,11 @@
     @page { size: A4 landscape; margin: 10mm; }
   }
   .temp-chart { border: 1px solid #ccc; padding: 8px; background: #fff; margin: 10px 0; }
+  .temp-room { margin-bottom: 26px; }
+  .temp-register { margin-top: 18px; border: 1px solid #dee2e6; border-radius: 6px;
+                   padding: 8px 12px; background: #fff; }
+  .temp-register summary { cursor: pointer; font-weight: bold; color: #0056b3; }
+  @media print { .temp-room { page-break-after: always; } }
   .temp-breach { background-color: #f8d7da !important; }
   .temp-round { max-width: 760px; margin-bottom: 8px; }
   .temp-round-input { width: 110px; font-size: 20px; padding: 8px; text-align: center; }
@@ -124,7 +129,7 @@ than adding a second.</p>
 <form method="GET" action="{{ url_for('temperature') }}" class="filter-form">
     <div class="filter-section">
         <div>
-            <label>Location:</label>
+            <label>Room for the table &amp; CSV:</label>
             <select name="location">
                 {% for loc in locations %}
                 <option value="{{ loc }}" {% if loc == location %}selected{% endif %}>{{ loc }}</option>
@@ -138,29 +143,36 @@ than adding a second.</p>
         <div class="button-div">
             <input type="submit" value="Show Month">
             <button type="submit" name="export" value="csv" formnovalidate>Download CSV</button>
-            <button type="button" onclick="window.print();">Print Chart &amp; Register</button>
+            <button type="button" onclick="window.print();">Print Charts</button>
         </div>
     </div>
 </form>
 
-<h2>{{ location }} &mdash; {{ month_label }}</h2>
+<h2>All rooms &mdash; {{ month_label }}</h2>
+<p style="font-size:13px;color:#555;">On each chart the morning reading is the
+blue line, the afternoon reading is the red line, and the black line is the
+average of the two. A day missing either check has no average, so the black
+line breaks there.</p>
+
+{# Every room at once, because "is everything all right?" is a question about
+   all of them. The register of initials, times and notes is still here, below,
+   one room at a time — it is for checking a particular entry, not for looking. #}
+{% for c in charts %}
+<div class="temp-room">
+<h3>{{ c.location }}{% if c.thermometer %} <small>&middot; thermometer {{ c.thermometer }}</small>{% endif %}</h3>
 <p style="font-size:13px;">
-Acceptable range for this location: <strong>{{ "%g"|format(limit_lo) }}&deg;C to
-{{ "%g"|format(limit_hi) }}&deg;C</strong>.
-Checks recorded: <strong>{{ recorded_count }} of {{ expected_count }}</strong>
-({{ days_complete }} of {{ days_in_month }} days with both checks).
-{% if breach_count %}<strong style="color:#c62828;">Readings outside the
-acceptable range: {{ breach_count }}.</strong>{% else %}No reading fell outside
-the acceptable range.{% endif %}
-<br><span style="color:#555;">On the chart the morning reading is the blue
-line, the afternoon reading is the red line, and the black line is the average
-of the two. A day missing either check has no average, so the black line breaks
-there.</span>
+Acceptable range: <strong>{{ "%g"|format(c.lo) }}&deg;C to {{ "%g"|format(c.hi) }}&deg;C</strong>.
+Checks recorded: <strong>{{ c.recorded }} of {{ expected_count }}</strong>.
+{% if c.breaches %}<strong style="color:#c62828;">Outside the range: {{ c.breaches }}.</strong>
+{% else %}Nothing outside the range.{% endif %}
 </p>
+<div class="temp-chart">{{ c.svg|safe }}</div>
+</div>
+{% endfor %}
 
-<div class="temp-chart">{{ chart|safe }}</div>
-
-<h3>Register</h3>
+<details class="temp-register no-print">
+<summary>Readings table &mdash; {{ location }}, {{ month_label }}
+({{ days_complete }} of {{ days_in_month }} days with both checks)</summary>
 <div class="table-scroll"><table>
     <thead>
         <tr>
@@ -209,6 +221,7 @@ there.</span>
 Each line on the chart runs straight through the readings that exist, with a
 mark only where one was taken; a missed check shows as a blank column in the
 Initials and Write time rows and as a dash in this table.</p>
+</details>
 <p style="margin-top:18px;">Checked by: ______________________ &nbsp;&nbsp;
 Signature: ______________________ &nbsp;&nbsp; Date: ______________</p>
 {% endblock %}
