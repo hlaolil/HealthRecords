@@ -4596,17 +4596,28 @@ TEMP_MIN_PLAUSIBLE, TEMP_MAX_PLAUSIBLE = -50.0, 80.0
 # The store-room scale is the official one. The fridge scale is the same grid
 # re-labelled for 2-8 degree storage, since the reference chart covers store
 # rooms only.
+# One row is one whole degree, on every chart.
+#
+# The scale used to copy the five labels printed on the paper form - +30,
+# +26, +22, +18, +15 - three rows apart. But 30 to 26 is four degrees and 18
+# to 15 is three, so the rows meant 1 1/3 degrees at the top of the chart and
+# 1 degree at the bottom: the spacing did not match the numbering, and the
+# lower half of every room chart was stretched. The fridge was 2/3 of a degree
+# a row, so no grid line fell on a whole degree. Now the numbers and the lines
+# agree everywhere, every printed label is still there, and the ones between
+# them are filled in.
+#
+# 'top' is the warmest row and 'bottom' the coldest; a reading beyond either
+# end is drawn on the end row, never dropped.
 TEMP_SCALES = {
-    'room': {'anchors': [(0, 30.0), (3, 26.0), (6, 22.0), (9, 18.0),
-                         (12, 15.0), (13, 14.0)],
-             'labelled': {0: '+30°C', 3: '+26°C', 6: '+22°C',
-                          9: '+18°C', 12: '+15°C'}},
-    'fridge': {'anchors': [(0, 10.0), (3, 8.0), (6, 6.0), (9, 4.0),
-                           (12, 2.0), (13, 1.0)],
-               'labelled': {0: '+10°C', 3: '+8°C', 6: '+6°C',
-                            9: '+4°C', 12: '+2°C'}},
+    'room': {'top': 30, 'bottom': 14},
+    'fridge': {'top': 10, 'bottom': 1},
 }
-TEMP_ROWS = 14
+# The grid is the same height whatever the scale, so the chart keeps its
+# shape on paper; a scale with more degrees gets thinner rows.
+TEMP_GRID_H = 14 * 26
+# Rows on a store-room chart (30 down to 14).
+TEMP_ROWS = TEMP_SCALES['room']['top'] - TEMP_SCALES['room']['bottom'] + 1
 
 # The chart's own convention, printed in its legend: actual in black pen,
 # minimum in blue, maximum in red. Each series also carries its own marker
@@ -4634,7 +4645,17 @@ def _month_bounds(year: int, month: int) -> tuple[datetime, datetime, int]:
 
 
 def _temp_scale(location: str) -> dict[str, Any]:
-    return TEMP_SCALES['fridge' if location == 'Fridge' else 'room']
+    """The rows of a chart: how many, what each is labelled, and where."""
+    s = TEMP_SCALES['fridge' if location == 'Fridge' else 'room']
+    top, bottom = s['top'], s['bottom']
+    rows = top - bottom + 1
+    return {
+        'rows': rows,
+        # Two anchors make it a straight line: row 0 is the top degree and
+        # each row below is one degree colder.
+        'anchors': [(0, float(top)), (rows - 1, float(bottom))],
+        'labelled': {r: f'+{top - r}°C' for r in range(rows)},
+    }
 
 
 def _temp_row(value: float, anchors: Sequence[tuple[int, float]]) -> float:
@@ -4702,6 +4723,7 @@ def _temperature_chart(readings: Iterable[Doc], year: int, month: int, location:
     cold, hot = TEMP_SPOTS.get(location, ((15.0, 17.5), (23.0, 25.0)))
     scale = _temp_scale(location)
     anchors, labelled = scale['anchors'], scale['labelled']
+    n_rows = scale['rows']
 
     by_slot = {}
     for r in readings:
@@ -4716,9 +4738,9 @@ def _temperature_chart(readings: Iterable[Doc], year: int, month: int, location:
     cw = gw / COLS
     head_y, head_h = 96, 22    # "Days of the month" strip
     ti_h = 15                  # "Time interval" strip
-    row_h = 26
+    row_h = TEMP_GRID_H / n_rows
     grid_top = head_y + head_h + ti_h
-    grid_bot = grid_top + TEMP_ROWS * row_h
+    grid_bot = grid_top + TEMP_GRID_H
     init_y, time_y = grid_bot, grid_bot + 20
     table_bot = time_y + 20
 
@@ -4780,7 +4802,7 @@ def _temperature_chart(readings: Iterable[Doc], year: int, month: int, location:
                  f'stroke="#000000" stroke-width="1"/>')
     o.append(f'<line x1="{gx:.1f}" y1="{head_y}" x2="{gx:.1f}" '
              f'y2="{table_bot:.1f}" stroke="#000000" stroke-width="1"/>')
-    for row in range(1, TEMP_ROWS):
+    for row in range(1, n_rows):
         y = grid_top + row * row_h
         o.append(f'<line x1="{M}" y1="{y:.1f}" x2="{W - M}" y2="{y:.1f}" '
                  f'stroke="#9e9e9e" stroke-width="0.5"/>')
