@@ -11,6 +11,10 @@
   }
   .temp-chart { border: 1px solid #ccc; padding: 8px; background: #fff; margin: 10px 0; }
   .temp-room { margin-bottom: 26px; }
+  .temp-act { white-space: nowrap; margin: 2px 0; }
+  /* The nav stays at the top of the screen; land below it, not under it. */
+  #correct { scroll-margin-top: 120px; }
+  .temp-act-round { display: inline-block; min-width: 5.5em; font-size: 12px; color: #555; }
   .temp-register { margin-top: 18px; border: 1px solid #dee2e6; border-radius: 6px;
                    padding: 8px 12px; background: #fff; }
   .temp-register summary { cursor: pointer; font-weight: bold; color: #0056b3; }
@@ -75,23 +79,32 @@ checked &mdash; nothing is recorded for it.</p>
     </div>
 </form>
 
-<details class="temp-manual">
-<summary>Record or correct a single reading (another day, or the other round)</summary>
+{% set e = edit_reading %}
+<details class="temp-manual" id="correct"{% if e %} open{% endif %}>
+<summary>{% if e %}Correcting the {{ e.session|lower }} reading for {{ e.location }}, {{ e.date }}{% else %}Record or correct a single reading (another day, or the other round){% endif %}</summary>
+{% if e %}
+<p class="message partial" style="font-size:13px;">It was recorded as
+<strong>{{ "%g"|format(e.temp) if e.temp is not none else '–' }}&deg;C</strong>{% if e.recorded_by %} by {{ e.recorded_by }}{% endif %}.
+Change what is wrong and save. The register keeps who took the reading and
+notes that you corrected it, and from what.
+<a href="{{ url_for('temperature', location=location, month=month_value) }}">Cancel</a></p>
+{% else %}
 <p style="font-size:13px;">Use this to catch up a missed check or fix an earlier
 one. Recording the same room, date and round again corrects that entry rather
 than adding a second.</p>
+{% endif %}
 <form method="POST" action="{{ url_for('temperature') }}" class="dispense-form">
     <input type="hidden" name="action" value="record">
     <div class="common-section">
         <div>
             <label>Date:</label>
-            <input name="date" type="date" value="{{ today }}" max="{{ today }}" required>
+            <input name="date" type="date" value="{{ e.date if e else today }}" max="{{ today }}" required>
         </div>
         <div>
             <label>Location:</label>
             <select name="location" required>
                 {% for loc in locations %}
-                <option value="{{ loc }}" {% if loc == location %}selected{% endif %}>{{ loc }}</option>
+                <option value="{{ loc }}" {% if loc == (e.location if e else location) %}selected{% endif %}>{{ loc }}</option>
                 {% endfor %}
             </select>
         </div>
@@ -99,29 +112,31 @@ than adding a second.</p>
             <label>Session:</label>
             <select name="session" required>
                 {% for s in sessions %}
-                <option value="{{ s }}" {% if s == round_session %}selected{% endif %}>{{ s }}</option>
+                <option value="{{ s }}" {% if s == (e.session if e else round_session) %}selected{% endif %}>{{ s }}</option>
                 {% endfor %}
             </select>
         </div>
         <div>
             <label>Temperature (&deg;C):</label>
-            <input name="temp" type="number" step="0.1" required>
+            <input name="temp" type="number" step="0.1" required
+                   {% if e and e.temp is not none %}value="{{ '%g'|format(e.temp) }}" autofocus{% endif %}>
         </div>
         <div>
             <label>Initials:</label>
             <input name="initials" type="text" maxlength="4" size="4"
-                   value="{{ default_initials }}" required>
+                   value="{{ (e.initials or default_initials) if e else default_initials }}" required>
         </div>
         <div>
             <label>Time of Check:</label>
-            <input name="check_time" type="time" value="{{ round_time }}" required>
+            <input name="check_time" type="time" value="{{ (e.check_time or round_time) if e else round_time }}" required>
         </div>
         <div>
             <label>Note (optional):</label>
-            <input name="note" type="text" placeholder="Thermometer reset, remarks">
+            <input name="note" type="text" placeholder="Thermometer reset, remarks"
+                   value="{{ e.note if e else '' }}">
         </div>
     </div>
-    <div class="form-buttons"><input type="submit" value="Save Reading"></div>
+    <div class="form-buttons"><input type="submit" value="{{ 'Save Correction' if e else 'Save Reading' }}"></div>
 </form>
 </details>
 </div>
@@ -200,15 +215,23 @@ Checks recorded: <strong>{{ c.recorded }} of {{ expected_count }}</strong>.
             {% if is_admin %}
             <td class="action-buttons no-print">
             {% if row.ids %}
+                {# One line per round recorded that day. The buttons used to be
+                   a lone red "M" and "A", which read as two deletes and gave
+                   no way to correct a figure short of deleting it. #}
                 {% for s, rid in row.ids %}
+                <div class="temp-act">
+                <span class="temp-act-round">{{ s }}</span>
+                <a href="{{ url_for('temperature', location=location, month=month_value, edit=rid) }}#correct"><button
+                        type="button" class="edit-btn">Edit</button></a>
                 <form method="POST" action="{{ url_for('temperature') }}" style="display:inline;">
                     <input type="hidden" name="action" value="delete">
                     <input type="hidden" name="reading_id" value="{{ rid }}">
                     <input type="hidden" name="location" value="{{ location }}">
                     <input type="hidden" name="month" value="{{ month_value }}">
                     <button type="submit" class="delete-btn"
-                            onclick="return confirm('Delete the {{ s|lower }} reading for day {{ row.day }}?');">{{ s[0] }}</button>
+                            onclick="return confirm('Delete the {{ s|lower }} reading for day {{ row.day }}?');">Delete</button>
                 </form>
+                </div>
                 {% endfor %}
             {% else %}<span>-</span>{% endif %}
             </td>
