@@ -341,7 +341,7 @@ a signature it never saw.</p>
             {%- if r.status == 'Out' %}<em> (still out{% if r.weekend %}, weekend{% endif %})</em>{% endif %}</td>
         <td class="no-print">{{ r.entered_by or '-' }}
             {%- if r.return_pharmacist %}<br><small>return overseen by {{ r.return_pharmacist }}</small>{% endif %}
-            {%- if r.auto_source %}<br><span class="key-auto">from {{ 'their login' if r.auto_source in ['login', 'away-window'] else 'shift handover' }}</span>{% endif %}
+            {%- if r.auto_source %}<br><span class="key-auto">from {{ 'their login' if r.auto_source in ['login', 'away-window', 'pharmacist-idle'] else 'shift handover' }}</span>{% endif %}
             {%- if r.auto_closed %}<br><span class="key-auto">closed by handover</span>{% endif %}
             {%- if r.off_roster %}<br><span class="key-tag key-tag-warn">not in charge</span>{% endif %}
             {%- if r.corrected_by %}<br><small>corrected by {{ r.corrected_by }}</small>{% endif %}</td>
