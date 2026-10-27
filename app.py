@@ -994,6 +994,20 @@ def enforce_session_timeout() -> ResponseReturnValue | None:
     session['last_active'] = now.isoformat()
     session.permanent = True
 
+    # The pharmacist using the app at all is what tells the key register he
+    # is still here. Throttled through his own session so it is at most one
+    # write a minute, and never allowed to get in the way of the request.
+    if session['user'].get('role') == 'admin':
+        last_note = session.get('_key_seen_noted')
+        try:
+            due = (not last_note or (now - datetime.fromisoformat(last_note))
+                   >= timedelta(seconds=60))
+        except ValueError:
+            due = True
+        if due:
+            _key_note_pharmacist_seen(session['user'].get('name', ''))
+            session['_key_seen_noted'] = now.isoformat()
+
     # NEW: if this user's password has expired, block every route except
     # the change-password page itself and logout — otherwise a user could
     # just type /dispense into the address bar and skip the requirement
@@ -6013,6 +6027,47 @@ def _key_arm_handover(user_name: str) -> None:
         app.logger.warning(f'key handover arm failed: {e}')
 
 
+# How long the pharmacist can go without using the app before a login by
+# somebody else is taken as the key changing hands. The browser already signs
+# an idle screen out after this long, so by then he has, in effect, left.
+KEY_IDLE_MINUTES = 30
+
+
+def _key_note_pharmacist_seen(user_name: str) -> None:
+    """Remember when the pharmacist last used the app.
+
+    Called on his requests, at most once a minute, so it costs one small
+    write a minute while he is working and nothing at all when he is not.
+    """
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        _key_control(db).update_one(
+            {'_id': 'state'},
+            {'$set': {'pharmacist_seen_at': local_now(),
+                      'pharmacist_seen_by': user_name}},
+            upsert=True)
+    except Exception as e:
+        app.logger.warning(f'key register: could not note pharmacist activity: {e}')
+
+
+def _key_pharmacist_idle(state: Doc, now: datetime) -> bool:
+    """Has the pharmacist been away from the app long enough to have left?
+
+    The weekday gap: he closes the browser instead of pressing Logout, which
+    will happen, and on a weekday nothing else marked the key as handed over.
+    So a login by somebody else, with the key in and him idle this long, is
+    the handover.
+
+    No record of him at all counts as NOT idle. The record only starts once
+    this version is running and he has used it; until then the app does not
+    know, and a key row nobody asked for is worse than the gap.
+    """
+    seen = state.get('pharmacist_seen_at')
+    if not isinstance(seen, datetime):
+        return False
+    return now - seen >= timedelta(minutes=KEY_IDLE_MINUTES)
+
+
 def _key_in_away_window(now: datetime) -> bool:
     """Between the pharmacist leaving on Friday and returning on Monday.
 
@@ -6102,11 +6157,21 @@ def _key_on_login(user_name: str, is_admin: bool) -> None:
             if state.get('armed'):
                 _key_control(db).update_one({'_id': 'state'},
                                             {'$set': {'armed': False}})
+            _key_note_pharmacist_seen(user_name)
             return
-        if state.get('armed') or _key_in_away_window(now):
+        if state.get('armed'):
+            source = 'login'                  # he pressed Logout
+        elif _key_in_away_window(now):
+            source = 'away-window'            # Friday 11:30 to Monday 12:00
+        elif _key_pharmacist_idle(state, now):
+            source = 'pharmacist-idle'        # a weekday, browser just closed
+        else:
+            source = ''
+        if source:
             _key_open_issue(keys, officers, user_name,
-                            state.get('armed_by') or _key_last_pharmacist(keys),
-                            now, 'login' if state.get('armed') else 'away-window')
+                            state.get('armed_by') or state.get('pharmacist_seen_by')
+                            or _key_last_pharmacist(keys),
+                            now, source)
             _key_control(db).update_one({'_id': 'state'},
                                         {'$set': {'armed': False}}, upsert=True)
     except Exception as e:
