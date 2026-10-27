@@ -4966,8 +4966,8 @@ def temperature() -> ResponseReturnValue:
                     write_audit_entry(
                         'DELETE', 'temperature_reading',
                         f"{doc.get('location')} {doc['date']:%Y-%m-%d} {doc.get('session')}",
-                        f"removed reading high {doc.get('max')} low {doc.get('min')} "
-                        f"actual {doc.get('actual')}")
+                        f"removed reading {_reading_temp(doc)}°C, recorded by "
+                        f"{doc.get('recorded_by') or 'unknown'}")
                     flash(f"Reading deleted for {doc.get('location')} on "
                           f"{doc['date']:%Y-%m-%d} ({doc.get('session')}).", 'success')
                 return redirect(url_for('temperature', location=loc,
@@ -5010,12 +5010,24 @@ def temperature() -> ResponseReturnValue:
                     'recorded_by': current_user, 'timestamp': datetime.utcnow(),
                 }
                 if prior:
+                    # A correction keeps who took the reading and when, and
+                    # adds what it was changed from, by whom - on the reading
+                    # itself, so the register can say so, not only in the
+                    # audit log. It used to overwrite the original recorder.
+                    for k in ('recorded_by', 'timestamp'):
+                        doc.pop(k, None)
+                    doc['corrected_by'] = current_user
+                    doc['corrected_at'] = datetime.utcnow()
                     # Drop the superseded three-figure fields, so a corrected
                     # reading cannot leave a stale 'actual' behind for the
                     # backward-compatible reader to pick up instead.
                     logs.update_one({'_id': prior['_id']},
                                     {'$set': doc,
-                                     '$unset': {'max': '', 'min': '', 'actual': ''}})
+                                     '$unset': {'max': '', 'min': '', 'actual': ''},
+                                     '$push': {'corrections': {
+                                         'from': _reading_temp(prior), 'to': temp,
+                                         'by': current_user,
+                                         'at': datetime.utcnow()}}})
                     write_audit_entry(
                         'UPDATE', 'temperature_reading',
                         f'{loc} {day:%Y-%m-%d} {sess}',
@@ -5078,10 +5090,19 @@ def temperature() -> ResponseReturnValue:
                         'timestamp': datetime.utcnow(),
                     }
                     if prior:
+                        # Same rule as the single-reading form: a correction
+                        # keeps who took the reading and records the change.
+                        for k in ('recorded_by', 'timestamp'):
+                            doc.pop(k, None)
+                        doc['corrected_by'] = current_user
+                        doc['corrected_at'] = datetime.utcnow()
                         logs.update_one(
                             {'_id': prior['_id']},
                             {'$set': doc,
-                             '$unset': {'max': '', 'min': '', 'actual': ''}})
+                             '$unset': {'max': '', 'min': '', 'actual': ''},
+                             '$push': {'corrections': {
+                                 'from': _reading_temp(prior), 'to': temp,
+                                 'by': current_user, 'at': datetime.utcnow()}}})
                         write_audit_entry(
                             'UPDATE', 'temperature_reading',
                             f'{loc_name} {day:%Y-%m-%d} {sess}',
@@ -5157,6 +5178,28 @@ def temperature() -> ResponseReturnValue:
                     break
         default_initials = ''.join(w[0] for w in current_user.split() if w)[:4].upper()
 
+        # ?edit=<id> opens the single-reading form already filled with that
+        # reading, so a correction is changing one figure, not retyping five.
+        # Saving goes through the same route as any reading, which corrects
+        # the entry for that room, date and round rather than adding one.
+        edit_reading = None
+        if request.args.get('edit') and is_admin:
+            try:
+                er = logs.find_one({'_id': ObjectId(request.args['edit'])})
+            except (InvalidId, TypeError):
+                er = None
+            if er:
+                edit_reading = {
+                    'date': er['date'].strftime('%Y-%m-%d'),
+                    'location': er.get('location'),
+                    'session': er.get('session'),
+                    'temp': _reading_temp(er),
+                    'initials': er.get('initials') or '',
+                    'check_time': er.get('check_time') or '',
+                    'note': er.get('note') or '',
+                    'recorded_by': er.get('recorded_by') or '',
+                }
+
         # ----- the round panel: one box per room, everything else derived ---
         now_local = local_now()
         round_session = local_session()
@@ -5195,6 +5238,11 @@ def temperature() -> ResponseReturnValue:
                         breach = True
                     if r.get('note'):
                         notes.append(r['note'])
+                    if r.get('corrections'):
+                        last = r['corrections'][-1]
+                        if last.get('from') is not None and last.get('from') != last.get('to'):
+                            notes.append(f"{(r.get('session') or '').lower()} corrected "
+                                         f"from {last['from']:g}°C by {last.get('by', '?')}")
                     if r.get('recorded_by') and r['recorded_by'] not in by:
                         by.append(r['recorded_by'])
                     if r.get('initials'):
@@ -5258,7 +5306,7 @@ def temperature() -> ResponseReturnValue:
             round_rows=round_rows, round_session=round_session,
             round_time=now_local.strftime('%H:%M'),
             round_date_label=now_local.strftime('%A %d %B %Y'),
-            charts=charts,
+            charts=charts, edit_reading=edit_reading,
             chart=_temperature_chart(readings, year, month, location, thermometer))
 
     except ServerSelectionTimeoutError:
@@ -5276,7 +5324,7 @@ def temperature() -> ResponseReturnValue:
             round_rows=[], round_session=local_session(),
             round_time=local_now().strftime('%H:%M'),
             round_date_label=local_now().strftime('%A %d %B %Y'),
-            charts=[], chart=''), 500
+            charts=[], edit_reading=None, chart=''), 500
 
 
 # ============================================================================
