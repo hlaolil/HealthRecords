@@ -14,11 +14,57 @@
   .loan-actions form { display: inline; margin: 0; padding: 0;
                        background: none; box-shadow: none; }
   .loan-actions select { width: auto; min-width: 96px; padding: 5px; margin: 0; }
-  .loan-actions button { padding: 6px 10px; font-size: 13px; margin: 0; }
+  .loan-actions button { padding: 6px 10px; font-size: 13px; margin: 0; white-space: nowrap; }
+  .loan-correct { border: 2px solid #f0ad4e; border-radius: 8px; padding: 4px 14px 14px;
+                  background: #fffaf0; margin-bottom: 20px;
+                  scroll-margin-top: 150px; }  /* clear the sticky menu */
+  .loan-del { background: #dc3545 !important; }
+  .loan-actions .loan-hint { margin: 0; }
 </style>
 {% endblock %}
 {% block content %}{% if message %}
     <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+
+{% set e = edit_item %}
+{% if e %}
+<div class="loan-correct no-print" id="correct">
+<h2>Correct {{ e.item_code }}</h2>
+<p class="loan-hint">Changes are kept with the item as from/to, with your name.
+{% if e.ever_lent %}The code cannot change: loans are recorded against it.{% endif %}</p>
+<form method="POST" action="{{ url_for('loan_items') }}" class="dispense-form">
+    <input type="hidden" name="action" value="edit_item">
+    <input type="hidden" name="item_id" value="{{ e.id }}">
+    <div class="common-section">
+        <div>
+            <label>Item Type:</label>
+            <select name="item_type" required>
+                {% for t in item_types %}<option value="{{ t }}" {% if t == e.item_type %}selected{% endif %}>{{ t }}</option>{% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Item Code:</label>
+            <input name="item_code" type="text" maxlength="20" value="{{ e.item_code }}" {% if e.ever_lent %}readonly{% endif %}>
+        </div>
+        <div>
+            <label>Size / Description:</label>
+            <input name="size" type="text" maxlength="40" value="{{ e.size }}">
+        </div>
+        <div>
+            <label>Condition:</label>
+            <select name="condition">
+                {% for ccc in conditions %}<option value="{{ ccc }}" {% if ccc == e.condition %}selected{% endif %}>{{ ccc }}</option>{% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Note:</label>
+            <input name="note" type="text" maxlength="120" value="{{ e.note }}">
+        </div>
+    </div>
+    <button type="submit">Save Correction</button>
+    <a href="{{ url_for('loan_items') }}"><button type="button">Cancel</button></a>
+</form>
+</div>
 {% endif %}
 
 <h2>Add an Item</h2>
@@ -76,8 +122,17 @@ stored on the item, so this table cannot disagree with what is actually out.</p>
         <td>{{ r.loan.due_date.strftime('%Y-%m-%d') if r.loan and r.loan.due_date else '-' }}</td>
         <td>{{ r.note or '-' }}</td>
         <td>
-            {% if not r.loan %}
             <div class="loan-actions">
+            <a href="{{ url_for('loan_items', edit=r.id) }}#correct"><button type="button">Edit</button></a>
+            {% if not r.ever_lent %}
+            <form method="POST" action="{{ url_for('loan_items') }}"
+                  onsubmit='return confirm({{ ("Remove " ~ r.code ~ " from the register? Only for an item entered by mistake.")|tojson }});'>
+                <input type="hidden" name="action" value="delete_item">
+                <input type="hidden" name="item_id" value="{{ r.id }}">
+                <button type="submit" class="loan-del">Delete</button>
+            </form>
+            {% endif %}
+            {% if not r.loan %}
             <form method="POST" action="{{ url_for('loan_items') }}">
                 <input type="hidden" name="action" value="set_status">
                 <input type="hidden" name="item_id" value="{{ r.id }}">
@@ -88,10 +143,10 @@ stored on the item, so this table cannot disagree with what is actually out.</p>
                 </select>
                 <button type="submit">Set</button>
             </form>
-            </div>
             {% else %}
-            <span class="loan-hint">out &mdash; cannot change</span>
+            <span class="loan-hint">out</span>
             {% endif %}
+            </div>
         </td>
     </tr>
     {% else %}

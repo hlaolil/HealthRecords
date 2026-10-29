@@ -27,6 +27,19 @@
                          margin: 0; }
   .loan-actions button { padding: 6px 10px; font-size: 13px; margin: 0;
                          white-space: nowrap; }
+  .loan-pick-wrap { grid-column: 1 / -1; }
+  .loan-pick { display: flex; flex-wrap: wrap; gap: 6px 18px; max-height: 220px;
+               overflow-y: auto; border: 1px solid #ced4da; border-radius: 4px;
+               padding: 8px 10px; background: #fff; }
+  .loan-pick label { display: flex; align-items: center; gap: 6px;
+                     font-weight: normal; margin: 0; min-width: 14em; cursor: pointer; }
+  .loan-pick input { width: 20px; height: 20px; min-height: 0; margin: 0; }
+  .loan-correct { border: 2px solid #f0ad4e; border-radius: 8px; padding: 4px 14px 14px;
+                  background: #fffaf0; margin-bottom: 20px;
+                  scroll-margin-top: 150px; }  /* clear the sticky menu */
+  .loan-fixed { font-size: 12px; color: #8a6d3b; display: block; }
+  .loan-actions a button { padding: 6px 10px; font-size: 13px; margin: 0; }
+  .loan-del { background: #dc3545 !important; }
 </style>
 {% endblock %}
 {% block content %}{% if message %}
@@ -40,19 +53,73 @@
     <div class="loan-tile"><span class="n">{{ tiles.unusable }}</span>Damaged / Retired / Lost</div>
 </div>
 
+{% set e = edit_loan %}
+{% if e %}
+<div class="no-print loan-correct" id="correct">
+<h2>Correct Loan {{ e.loan_ref }} &mdash; {{ e.item_code }} ({{ e.status }})</h2>
+<p class="loan-hint">Every change is kept with the loan as from/to, with your
+name, and the original issuer is not touched. To change <em>which item</em> was
+lent, delete this loan and issue the right one.</p>
+<form method="POST" action="{{ url_for('loans') }}" class="dispense-form">
+    <input type="hidden" name="action" value="edit_loan">
+    <input type="hidden" name="loan_id" value="{{ e.id }}">
+    <div class="common-section">
+        <div>
+            <label>Patient Name:</label>
+            <input name="patient_name" type="text" maxlength="80" value="{{ e.patient_name }}" required>
+        </div>
+        <div>
+            <label>Contact Number:</label>
+            <input name="patient_contact" type="text" maxlength="30" value="{{ e.patient_contact }}">
+        </div>
+        <div>
+            <label>Date Issued:</label>
+            <input name="issued_date" type="date" value="{{ e.issued_date }}" max="{{ today }}" required>
+        </div>
+        <div>
+            <label>Due Back:</label>
+            <input name="due_date" type="date" value="{{ e.due_date }}" required>
+        </div>
+        <div>
+            <label>Condition Out:</label>
+            <select name="condition_out">
+                {% for ccc in conditions %}<option value="{{ ccc }}" {% if ccc == e.condition_out %}selected{% endif %}>{{ ccc }}</option>{% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Note:</label>
+            <input name="note" type="text" maxlength="120" value="{{ e.note }}">
+        </div>
+    </div>
+    {% if e.siblings %}
+    <label style="display:flex;gap:8px;align-items:center;font-weight:normal;margin:6px 0 10px;">
+        <input type="checkbox" name="whole_issue" value="1" checked style="width:20px;height:20px;margin:0;">
+        Also correct the patient, contact and dates on {{ e.siblings|join(', ') }}, issued with it
+    </label>
+    {% endif %}
+    <button type="submit">Save Correction</button>
+    <a href="{{ url_for('loans') }}"><button type="button">Cancel</button></a>
+</form>
+</div>
+{% endif %}
+
 <div class="no-print">
 <h2>Issue an Item</h2>
 {% if available %}
 <form method="POST" action="{{ url_for('loans') }}" class="dispense-form">
     <input type="hidden" name="action" value="issue">
     <div class="common-section">
-        <div>
-            <label>Item:</label>
-            <select name="item_code" required>
+        {# Tick one or more: a crutch pair is two items on the register, and
+           they go out together. Each still becomes its own loan row, so each
+           can come back on its own. #}
+        <div class="loan-pick-wrap">
+            <label>Items <small>(tick one or more)</small>:</label>
+            <div class="loan-pick">
                 {% for it in available %}
-                <option value="{{ it.item_code }}">{{ it.item_code }} &mdash; {{ it.item_type }}{% if it.size %} ({{ it.size }}){% endif %}</option>
+                <label><input type="checkbox" name="item_code" value="{{ it.item_code }}">
+                    <strong>{{ it.item_code }}</strong> &mdash; {{ it.item_type }}{% if it.size %} ({{ it.size }}){% endif %}</label>
                 {% endfor %}
-            </select>
+            </div>
         </div>
         <div>
             <label>Patient Name:</label>
@@ -61,10 +128,6 @@
         <div>
             <label>Contact Number:</label>
             <input name="patient_contact" type="text" maxlength="30">
-        </div>
-        <div>
-            <label>OPD / File No:</label>
-            <input name="patient_id" type="text" maxlength="30">
         </div>
         <div>
             <label>Date Issued:</label>
@@ -87,6 +150,20 @@
     </div>
     <button type="submit">Issue</button>
 </form>
+<script>
+// The form cannot require "at least one of these boxes" by itself, so say so
+// before sending rather than after a round trip.
+document.addEventListener('DOMContentLoaded', function () {
+    var f = document.querySelector('.loan-pick');
+    if (!f) return;
+    f.closest('form').addEventListener('submit', function (e) {
+        if (!f.querySelector('input[type=checkbox]:checked')) {
+            e.preventDefault();
+            alert('Tick at least one item to lend.');
+        }
+    });
+});
+</script>
 {% else %}
 <p class="loan-hint">Nothing is available to lend. Every item is either out,
 damaged, retired or lost &mdash; or the register is empty.</p>
@@ -99,7 +176,7 @@ damaged, retired or lost &mdash; or the register is empty.</p>
 {% endif %}
 <div class="table-scroll"><table>
     <tr>
-        <th>Item</th><th>Type</th><th>Patient</th><th>Contact</th><th>OPD No</th>
+        <th>Item</th><th>Type</th><th>Patient</th><th>Contact</th>
         <th>Issued</th><th>Due</th><th>Days Out</th><th>Issued By</th>
         <th class="no-print">Return</th>
     </tr>
@@ -109,7 +186,6 @@ damaged, retired or lost &mdash; or the register is empty.</p>
         <td>{{ r.item_type }}</td>
         <td>{{ r.patient_name }}</td>
         <td>{{ r.patient_contact or '-' }}</td>
-        <td>{{ r.patient_id or '-' }}</td>
         <td>{{ r.issued_date.strftime('%Y-%m-%d') if r.issued_date else '&ndash;'|safe }}</td>
         <td>{{ r.due_date.strftime('%Y-%m-%d') if r.due_date else '-' }}</td>
         <td>{{ r.days_out }}{% if r.overdue %} ({{ r.days_over }} over){% endif %}</td>
@@ -131,12 +207,13 @@ damaged, retired or lost &mdash; or the register is empty.</p>
                 <input type="hidden" name="loan_id" value="{{ r.id }}">
                 <button type="submit">Lost</button>
             </form>
+            <a href="{{ url_for('loans', edit=r.id) }}#correct"><button type="button">Edit</button></a>
             {% endif %}
           </div>
         </td>
     </tr>
     {% else %}
-    <tr><td colspan="10">Nothing is out.</td></tr>
+    <tr><td colspan="9">Nothing is out.</td></tr>
     {% endfor %}
 </table></div>
 
@@ -147,7 +224,7 @@ damaged, retired or lost &mdash; or the register is empty.</p>
 <form method="GET" action="{{ url_for('loans') }}" class="filter-form no-print">
     <div class="filter-section">
         <div>
-            <label>Search patient, item or OPD no:</label>
+            <label>Search patient, item or reference:</label>
             <input name="q" type="text" value="{{ q }}">
         </div>
         <div>
@@ -172,6 +249,7 @@ damaged, retired or lost &mdash; or the register is empty.</p>
         <th>Ref</th><th>Item</th><th>Patient</th><th>Issued</th><th>Due</th>
         <th>Returned</th><th>Days</th><th>Out</th><th>Back</th>
         <th>Status</th><th>By</th><th>Note</th>
+        {% if is_admin %}<th class="no-print">Actions</th>{% endif %}
     </tr>
     {% for r in history %}
     <tr>
@@ -186,10 +264,23 @@ damaged, retired or lost &mdash; or the register is empty.</p>
         <td>{{ r.condition_in or '-' }}</td>
         <td>{{ r.status }}</td>
         <td>{{ r.issued_by }}</td>
-        <td>{{ r.note or '-' }}</td>
+        <td>{{ r.note or '-' }}{% if r.corrected_by %}<span class="loan-fixed">corrected by {{ r.corrected_by }}</span>{% endif %}</td>
+        {% if is_admin %}
+        <td class="no-print">
+          <div class="loan-actions">
+            <a href="{{ url_for('loans', edit=r.id) }}#correct"><button type="button">Edit</button></a>
+            <form method="POST" action="{{ url_for('loans') }}"
+                  onsubmit='return confirm({{ ("Delete loan " ~ r.loan_ref ~ " (" ~ r.item_code ~ " to " ~ r.patient_name ~ ")? Only for a loan entered by mistake. It is recorded in the audit log.")|tojson }});'>
+                <input type="hidden" name="action" value="delete_loan">
+                <input type="hidden" name="loan_id" value="{{ r.id }}">
+                <button type="submit" class="loan-del">Delete</button>
+            </form>
+          </div>
+        </td>
+        {% endif %}
     </tr>
     {% else %}
-    <tr><td colspan="12">No loans match.</td></tr>
+    <tr><td colspan="{{ 13 if is_admin else 12 }}">No loans match.</td></tr>
     {% endfor %}
 </table></div>
 
