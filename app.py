@@ -5359,6 +5359,38 @@ LOAN_STATUS_LOST = 'Lost'
 LOAN_DEFAULT_DAYS = 14          # typical fracture follow-up interval
 LOAN_MAX_DAYS = 365
 
+LOAN_FIELD_LABELS = {
+    'patient_name': 'patient', 'patient_contact': 'contact',
+    'issued_date': 'issued', 'due_date': 'due',
+    'condition_out': 'condition out', 'note': 'note',
+}
+
+
+def _loan_dates_problem(issued: datetime, due: datetime, today: date) -> str | None:
+    """Why these loan dates cannot be right, or None. Shared by issue and edit."""
+    if issued.date() > today:
+        return 'A loan cannot be dated in the future.'
+    if due < issued:
+        return 'The due date cannot be before the issue date.'
+    if (due - issued).days > LOAN_MAX_DAYS:
+        return (f'A loan longer than {LOAN_MAX_DAYS} days is probably '
+                f'a typing error. Shorten it or write the item off.')
+    return None
+
+
+def _loan_show(v: Any) -> str:
+    """A loan field as a person reads it in a flash or audit line."""
+    if isinstance(v, datetime):
+        return f'{v:%Y-%m-%d}'
+    return f'"{v}"' if isinstance(v, str) else ('-' if v is None else str(v))
+
+
+def _loan_by_id(col: Collection, raw: Any) -> Doc | None:
+    try:
+        return col.find_one({'_id': ObjectId(raw or '')})
+    except (InvalidId, TypeError):
+        return None
+
 
 def _loan_next_code(items: Collection, item_type: str) -> str:
     """Next free code for a type, e.g. CR-004.
@@ -5548,14 +5580,96 @@ def loan_items() -> ResponseReturnValue:
                 flash(f"{doc['item_code']} set to {new_status}.", 'success')
                 return redirect(url_for('loan_items'))
 
+            if action == 'edit_item':
+                doc = _loan_by_id(items, request.form.get('item_id'))
+                if not doc:
+                    flash('That item was not found.')
+                    return redirect(url_for('loan_items'))
+                back = redirect(url_for('loan_items', edit=str(doc['_id'])))
+                item_type = (request.form.get('item_type') or '').strip()
+                if item_type not in LOAN_ITEM_TYPES:
+                    flash('Choose a valid item type.')
+                    return back
+                condition = (request.form.get('condition') or '').strip()
+                if condition not in LOAN_CONDITIONS:
+                    condition = doc.get('condition') or 'Good'
+                code = (request.form.get('item_code') or '').strip().upper() or doc['item_code']
+                wanted = {
+                    'item_code': code,
+                    'item_type': item_type,
+                    'size': (request.form.get('size') or '').strip(),
+                    'condition': condition,
+                    'note': (request.form.get('note') or '').strip(),
+                }
+                changes = {k: v for k, v in wanted.items() if (doc.get(k) or '') != v}
+                if not changes:
+                    flash('Nothing was changed.', 'partial')
+                    return redirect(url_for('loan_items'))
+                if 'item_code' in changes:
+                    # Loans find their item by its code. Renaming an item
+                    # that has been lent would cut its history off from it.
+                    if loans_col.find_one({'item_code': doc['item_code']}):
+                        flash(f"{doc['item_code']} has loans recorded against it, "
+                              f'so its code cannot change.')
+                        return back
+                    if items.find_one({'item_code': code}):
+                        flash(f'Item code {code} is already in the register.')
+                        return back
+                trail = {'at': datetime.utcnow(), 'by': session['user']['name'],
+                         'changes': {k: {'from': doc.get(k), 'to': v}
+                                     for k, v in changes.items()}}
+                items.update_one({'_id': doc['_id']},
+                                 {'$set': changes, '$push': {'corrections': trail}})
+                said = '; '.join(f'{k.replace("item_", "")} {_loan_show(doc.get(k))} '
+                                 f'-> {_loan_show(v)}' for k, v in changes.items())
+                write_audit_entry('UPDATE', 'loan_item', code, f'corrected: {said}')
+                flash(f'{code} corrected: {said}.', 'success')
+                return redirect(url_for('loan_items'))
+
+            if action == 'delete_item':
+                doc = _loan_by_id(items, request.form.get('item_id'))
+                if not doc:
+                    flash('That item was not found.')
+                    return redirect(url_for('loan_items'))
+                # Only an item entered by mistake. Once it has been lent its
+                # loans point at it; retire it instead, which keeps the record.
+                if loans_col.find_one({'item_code': doc['item_code']}):
+                    flash(f"{doc['item_code']} has been lent before, so it cannot be "
+                          f'deleted. Set it to Retired instead.')
+                    return redirect(url_for('loan_items'))
+                items.delete_one({'_id': doc['_id']})
+                write_audit_entry('DELETE', 'loan_item', doc['item_code'],
+                                  f"deleted {doc.get('item_type', '')} "
+                                  f"{doc.get('size') or ''}".rstrip()
+                                  + f", condition {doc.get('condition', '')}, never lent")
+                flash(f"{doc['item_code']} removed from the register.", 'success')
+                return redirect(url_for('loan_items'))
+
             flash('Unknown action.')
             return redirect(url_for('loan_items'))
+
+        edit_item = None
+        if request.args.get('edit'):
+            doc = _loan_by_id(items, request.args.get('edit'))
+            if doc:
+                edit_item = {'id': str(doc['_id']), 'item_code': doc.get('item_code', ''),
+                             'item_type': doc.get('item_type', ''),
+                             'size': doc.get('size', ''),
+                             'condition': doc.get('condition') or 'Good',
+                             'note': doc.get('note', '')}
+        lent = set(loans_col.distinct('item_code'))
+        rows = _loan_rows(items, loans_col, today)
+        for r in rows:
+            r['ever_lent'] = r['code'] in lent
+        if edit_item:
+            edit_item['ever_lent'] = edit_item['item_code'] in lent
 
         return render_template(
             'loan_items.html',
             nav_links=get_nav_links(),
             message=message, message_class=message_class,
-            rows=_loan_rows(items, loans_col, today),
+            edit_item=edit_item,
+            rows=rows,
             item_types=LOAN_ITEM_TYPES,
             conditions=LOAN_CONDITIONS,
             shelf_statuses=LOAN_SHELF_STATUSES,
@@ -5582,20 +5696,36 @@ def loans() -> ResponseReturnValue:
             action = request.form.get('action')
 
             if action == 'issue':
-                code = (request.form.get('item_code') or '').strip().upper()
-                item = items.find_one({'item_code': code})
-                if not item:
-                    flash(f'Item code {code} is not in the equipment register.')
+                # One issue may lend several items - a crutch pair is two
+                # items on the register, and both go to the same patient on
+                # the same day. Each still gets its own row, so each can be
+                # returned on its own, but they share one issue reference.
+                codes = list(dict.fromkeys(
+                    c.strip().upper() for c in request.form.getlist('item_code')
+                    if c and c.strip()))
+                if not codes:
+                    flash('Choose at least one item to lend.')
                     return redirect(url_for('loans'))
-                if item.get('status') != 'Available':
-                    flash(f"{code} is marked {item.get('status')} and cannot "
-                          f'be lent out.')
-                    return redirect(url_for('loans'))
-                # The double-issue guard. Without it a refreshed POST, or two
-                # staff at two screens, lends one physical crutch pair to two
-                # patients and the register can never be reconciled again.
-                if loans_col.find_one({'item_code': code, 'status': LOAN_STATUS_OUT}):
-                    flash(f'{code} is already out on loan. Take it back in first.')
+                # All or nothing. Every item is checked before any is lent,
+                # because half a pair recorded is worse than none: the
+                # register would show a patient holding one crutch.
+                problems, chosen = [], []
+                for code in codes:
+                    item = items.find_one({'item_code': code})
+                    if not item:
+                        problems.append(f'{code} is not in the equipment register')
+                    elif item.get('status') != 'Available':
+                        problems.append(f"{code} is marked {item.get('status')}")
+                    # The double-issue guard. Without it a refreshed POST, or
+                    # two staff at two screens, lends one physical item to two
+                    # patients and the register can never be reconciled again.
+                    elif loans_col.find_one({'item_code': code,
+                                             'status': LOAN_STATUS_OUT}):
+                        problems.append(f'{code} is already out on loan')
+                    else:
+                        chosen.append(item)
+                if problems:
+                    flash('Nothing was issued: ' + '; '.join(problems) + '.')
                     return redirect(url_for('loans'))
 
                 patient = (request.form.get('patient_name') or '').strip()
@@ -5609,43 +5739,50 @@ def loans() -> ResponseReturnValue:
                 except (KeyError, ValueError):
                     flash('Enter valid issue and due dates.')
                     return redirect(url_for('loans'))
-                if issued.date() > today:
-                    flash('A loan cannot be dated in the future.')
-                    return redirect(url_for('loans'))
-                if due < issued:
-                    flash('The due date cannot be before the issue date.')
-                    return redirect(url_for('loans'))
-                if (due - issued).days > LOAN_MAX_DAYS:
-                    flash(f'A loan longer than {LOAN_MAX_DAYS} days is probably '
-                          f'a typing error. Shorten it or write the item off.')
+                problem = _loan_dates_problem(issued, due, today)
+                if problem:
+                    flash(problem)
                     return redirect(url_for('loans'))
 
                 condition_out = (request.form.get('condition_out') or 'Good').strip()
                 if condition_out not in LOAN_CONDITIONS:
                     condition_out = 'Good'
-                ref = f"LN-{datetime.utcnow():%Y%m%d}-{uuid4().hex[:4].upper()}"
-                loans_col.insert_one({
-                    'loan_ref': ref,
-                    'item_code': code,
-                    'item_type': item.get('item_type', ''),
-                    'patient_name': patient,
-                    'patient_contact': (request.form.get('patient_contact') or '').strip(),
-                    'patient_id': (request.form.get('patient_id') or '').strip(),
-                    'issued_date': issued,
-                    'due_date': due,
-                    'issued_by': current_user,
-                    'condition_out': condition_out,
-                    'returned_date': None,
-                    'returned_to': None,
-                    'condition_in': None,
-                    'status': LOAN_STATUS_OUT,
-                    'note': (request.form.get('note') or '').strip(),
-                    'created_at': datetime.utcnow(),
-                })
-                write_audit_entry('CREATE', 'loan', ref,
-                                  f'{code} issued to {patient}, due {due:%Y-%m-%d}')
-                flash(f'{code} issued to {patient}. Due back {due:%Y-%m-%d}. '
-                      f'Reference {ref}.', 'success')
+                base = f"LN-{datetime.utcnow():%Y%m%d}-{uuid4().hex[:4].upper()}"
+                contact = (request.form.get('patient_contact') or '').strip()
+                note = (request.form.get('note') or '').strip()
+                refs = []
+                for i, item in enumerate(chosen, start=1):
+                    code = item['item_code']
+                    # A single item keeps the plain reference; a set is
+                    # numbered under it, so the rows read as one issue.
+                    ref = base if len(chosen) == 1 else f'{base}-{i}'
+                    loans_col.insert_one({
+                        'loan_ref': ref,
+                        'issue_ref': base,
+                        'item_code': code,
+                        'item_type': item.get('item_type', ''),
+                        'patient_name': patient,
+                        'patient_contact': contact,
+                        'issued_date': issued,
+                        'due_date': due,
+                        'issued_by': current_user,
+                        'condition_out': condition_out,
+                        'returned_date': None,
+                        'returned_to': None,
+                        'condition_in': None,
+                        'status': LOAN_STATUS_OUT,
+                        'note': note,
+                        'created_at': datetime.utcnow(),
+                    })
+                    write_audit_entry('CREATE', 'loan', ref,
+                                      f'{code} issued to {patient}, due {due:%Y-%m-%d}'
+                                      + (f' (issue {base}, {len(chosen)} items)'
+                                         if len(chosen) > 1 else ''))
+                    refs.append(code)
+                listed = (refs[0] if len(refs) == 1
+                          else ', '.join(refs[:-1]) + ' and ' + refs[-1])
+                flash(f'{listed} issued to {patient}. Due back {due:%Y-%m-%d}. '
+                      f'Reference {base}.', 'success')
                 return redirect(url_for('loans'))
 
             if action == 'return':
@@ -5713,12 +5850,164 @@ def loans() -> ResponseReturnValue:
                 flash(f"{loan['item_code']} written off as lost.", 'partial')
                 return redirect(url_for('loans'))
 
+            if action == 'edit_loan':
+                # A correction, not a rewrite. Each changed field is kept as
+                # from/to in the loan's own history, and the person who issued
+                # it stays the person who issued it. The item itself is not
+                # editable here: lending the wrong crutch is put right by
+                # deleting the loan and issuing the right one, so the
+                # equipment ledger never shows an item out that was not.
+                if not is_admin:
+                    flash('Access denied. Only admins can correct a loan.')
+                    return redirect(url_for('loans'))
+                loan = _loan_by_id(loans_col, request.form.get('loan_id'))
+                if not loan:
+                    flash('That loan was not found.')
+                    return redirect(url_for('loans'))
+                patient = (request.form.get('patient_name') or '').strip()
+                if not patient:
+                    flash('A patient name is required.')
+                    return redirect(url_for('loans', edit=str(loan['_id'])))
+                try:
+                    issued = datetime.strptime(request.form['issued_date'], '%Y-%m-%d')
+                    due = datetime.strptime(request.form['due_date'], '%Y-%m-%d')
+                except (KeyError, ValueError):
+                    flash('Enter valid issue and due dates.')
+                    return redirect(url_for('loans', edit=str(loan['_id'])))
+                problem = _loan_dates_problem(issued, due, today)
+                ret = loan.get('returned_date')
+                if not problem and ret and issued.date() > ret.date():
+                    problem = 'The issue date cannot be after the item came back.'
+                if problem:
+                    flash(problem)
+                    return redirect(url_for('loans', edit=str(loan['_id'])))
+                condition_out = (request.form.get('condition_out') or '').strip()
+                if condition_out not in LOAN_CONDITIONS:
+                    condition_out = loan.get('condition_out') or 'Good'
+                # Keep the time of day of the original entry when only the
+                # date is unchanged, so an untouched date is not a change.
+                old_issued = loan.get('issued_date')
+                if old_issued and old_issued.date() == issued.date():
+                    issued = old_issued
+                old_due = loan.get('due_date')
+                if old_due and old_due.date() == due.date():
+                    due = old_due
+                wanted = {
+                    'patient_name': patient,
+                    'patient_contact': (request.form.get('patient_contact') or '').strip(),
+                    'issued_date': issued,
+                    'due_date': due,
+                    'condition_out': condition_out,
+                    'note': (request.form.get('note') or '').strip(),
+                }
+                changes = {k: v for k, v in wanted.items()
+                           if (loan.get(k) or '') != (v or '')}
+                if not changes:
+                    flash('Nothing was changed.', 'partial')
+                    return redirect(url_for('loans'))
+                now = datetime.utcnow()
+                trail = {'at': now, 'by': current_user,
+                         'changes': {k: {'from': loan.get(k), 'to': v}
+                                     for k, v in changes.items()}}
+                loans_col.update_one({'_id': loan['_id']},
+                                     {'$set': changes,
+                                      '$push': {'corrections': trail}})
+                said = '; '.join(
+                    f"{LOAN_FIELD_LABELS[k]} {_loan_show(loan.get(k))} -> {_loan_show(v)}"
+                    for k, v in changes.items())
+                write_audit_entry('UPDATE', 'loan', loan['loan_ref'], f'corrected: {said}')
+                # A pair lent together shares a patient and dates. Fixing the
+                # name on one crutch and not the other would leave the same
+                # patient under two spellings. Condition and note stay per item.
+                also = []
+                if request.form.get('whole_issue') and loan.get('issue_ref'):
+                    shared = ('patient_name', 'patient_contact', 'issued_date', 'due_date')
+                    for sib in loans_col.find({'issue_ref': loan['issue_ref'],
+                                               '_id': {'$ne': loan['_id']}}):
+                        sib_changes = {k: changes[k] for k in shared
+                                       if k in changes and (sib.get(k) or '') != (changes[k] or '')}
+                        sret = sib.get('returned_date')
+                        if ('issued_date' in sib_changes and sret
+                                and issued.date() > sret.date()):
+                            continue
+                        if not sib_changes:
+                            continue
+                        loans_col.update_one({'_id': sib['_id']}, {
+                            '$set': sib_changes,
+                            '$push': {'corrections': {
+                                'at': now, 'by': current_user,
+                                'changes': {k: {'from': sib.get(k), 'to': v}
+                                            for k, v in sib_changes.items()}}}})
+                        write_audit_entry('UPDATE', 'loan', sib['loan_ref'], 'corrected: ' + '; '.join(
+                            f"{LOAN_FIELD_LABELS[k]} {_loan_show(sib.get(k))} -> {_loan_show(v)}"
+                            for k, v in sib_changes.items()) + f" (with {loan['loan_ref']})")
+                        also.append(sib['item_code'])
+                tail = f" Also corrected on {', '.join(also)}." if also else ''
+                flash(f"Loan {loan['loan_ref']} corrected: {said}.{tail}", 'success')
+                return redirect(url_for('loans'))
+
+            if action == 'delete_loan':
+                # For a loan that should never have been entered. The audit
+                # entry carries everything the row held, because once it is
+                # gone that entry is the only record it existed.
+                if not is_admin:
+                    flash('Access denied. Only admins can delete a loan.')
+                    return redirect(url_for('loans'))
+                loan = _loan_by_id(loans_col, request.form.get('loan_id'))
+                if not loan:
+                    flash('That loan was not found.')
+                    return redirect(url_for('loans'))
+                loans_col.delete_one({'_id': loan['_id']})
+                freed = ''
+                if loan.get('status') == LOAN_STATUS_LOST:
+                    # Writing it off marked the item Lost. If the write-off
+                    # itself was the mistake, the item is back on the shelf.
+                    items.update_one({'item_code': loan['item_code'],
+                                      'status': 'Lost'},
+                                     {'$set': {'status': 'Available'}})
+                    freed = f" {loan['item_code']} is back to Available."
+                elif loan.get('status') == LOAN_STATUS_OUT:
+                    freed = f" {loan['item_code']} is free to lend again."
+                write_audit_entry(
+                    'DELETE', 'loan', loan['loan_ref'],
+                    f"deleted {loan.get('status', '')} loan of {loan['item_code']} to "
+                    f"{loan.get('patient_name', '')}, issued "
+                    f"{_loan_show(loan.get('issued_date'))} by {loan.get('issued_by', '')}, "
+                    f"due {_loan_show(loan.get('due_date'))}"
+                    + (f", returned {_loan_show(loan.get('returned_date'))}"
+                       if loan.get('returned_date') else ''))
+                flash(f"Loan {loan['loan_ref']} deleted.{freed}", 'success')
+                return redirect(url_for('loans'))
+
             flash('Unknown action.')
             return redirect(url_for('loans'))
 
         # ---- GET ----------------------------------------------------------
         q = (request.args.get('q') or '').strip()
         status_filter = (request.args.get('status') or '').strip()
+
+        edit_loan = None
+        if is_admin and request.args.get('edit'):
+            doc = _loan_by_id(loans_col, request.args.get('edit'))
+            if doc:
+                edit_loan = {
+                    'id': str(doc['_id']),
+                    'loan_ref': doc.get('loan_ref', ''),
+                    'item_code': doc.get('item_code', ''),
+                    'status': doc.get('status', ''),
+                    'patient_name': doc.get('patient_name', ''),
+                    'patient_contact': doc.get('patient_contact', ''),
+                    'issued_date': (doc['issued_date'].strftime('%Y-%m-%d')
+                                    if doc.get('issued_date') else ''),
+                    'due_date': (doc['due_date'].strftime('%Y-%m-%d')
+                                 if doc.get('due_date') else ''),
+                    'condition_out': doc.get('condition_out') or 'Good',
+                    'note': doc.get('note', ''),
+                    # The other items lent in the same issue - a crutch pair.
+                    'siblings': [d['item_code'] for d in loans_col.find(
+                        {'issue_ref': doc['issue_ref'], '_id': {'$ne': doc['_id']}})
+                        ] if doc.get('issue_ref') else [],
+                }
 
         rows = _loan_rows(items, loans_col, today)
         out_rows = []
@@ -5753,7 +6042,10 @@ def loans() -> ResponseReturnValue:
         history = []
         for doc in loans_col.find(query).sort('issued_date', -1).limit(300):
             ret = doc.get('returned_date')
+            fixes = doc.get('corrections') or []
             history.append({
+                'id': str(doc['_id']),
+                'corrected_by': fixes[-1].get('by') if fixes else None,
                 'loan_ref': doc.get('loan_ref', ''),
                 'item_code': doc.get('item_code', ''),
                 'patient_name': doc.get('patient_name', ''),
@@ -5798,6 +6090,7 @@ def loans() -> ResponseReturnValue:
             activity=_loan_activity(loans_col),
             tiles=tiles,
             q=q, status_filter=status_filter,
+            edit_loan=edit_loan,
         )
     except Exception as e:
         app.logger.error(f'loans failed: {e}')
@@ -7902,7 +8195,7 @@ REGISTER_CSV = {
         ('user', 'Recorded by')]),
     'loans': ('Equipment Loans', [
         ('loan_ref', 'Ref'), ('item_code', 'Item'), ('item_type', 'Type'),
-        ('patient_name', 'Patient'), ('patient_id', 'Patient ID'),
+        ('patient_name', 'Patient'),
         ('patient_contact', 'Contact'), ('issued_date', 'Issued'),
         ('due_date', 'Due back'), ('returned_date', 'Returned'),
         ('days', 'Days out'), ('status', 'Status'),
