@@ -380,7 +380,9 @@ print('\n--- 13. Activity by month ---')
 reset()
 login()
 add_item('Crutches')
-issue('CR-001', issued=-3, due=11)
+# Issued today, so it is in this month whatever day the suite runs. Three
+# days back fell in last month on the 1st to 3rd and failed the check.
+issue('CR-001', issued=0, due=14)
 give_back('CR-001')
 rows = A._loan_activity(loans)
 check('six months are reported', len(rows) == 6, str(len(rows)))

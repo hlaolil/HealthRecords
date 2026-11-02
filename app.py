@@ -2899,6 +2899,13 @@ def reports() -> ResponseReturnValue:
             end_date    = request.values.get('end_date')
             search      = request.values.get('search')
 
+            if report_type == 'inventory' and not start_date:
+                # The form fills this in, but a report opened without dates
+                # still gets the three months its order figures need.
+                today_local = local_now().date()
+                start_date = _months_back(today_local, INVENTORY_DEFAULT_MONTHS).strftime('%Y-%m-%d')
+                end_date = end_date or today_local.strftime('%Y-%m-%d')
+
             if report_type:
                 try:
                     if start_date:
@@ -3748,6 +3755,7 @@ def reports() -> ResponseReturnValue:
             start_date=start_date, end_date=end_date,
             default_start=local_now().replace(day=1).strftime('%Y-%m-%d'),
             default_end=local_now().strftime('%Y-%m-%d'),
+            inventory_start=_months_back(local_now().date(), INVENTORY_DEFAULT_MONTHS).strftime('%Y-%m-%d'),
             total_transactions=total_transactions,
             nav_links=get_nav_links(), message=message,
             message_class=message_class, current_user=session['user']['name'],
@@ -3762,6 +3770,7 @@ def reports() -> ResponseReturnValue:
             current_user=session.get('user', {}).get('name', ''),
             default_start=local_now().replace(day=1).strftime('%Y-%m-%d'),
             default_end=local_now().strftime('%Y-%m-%d'),
+            inventory_start=_months_back(local_now().date(), INVENTORY_DEFAULT_MONTHS).strftime('%Y-%m-%d'),
             controlled_register=[], order_request=None, monthly=None,
             category='pharmaceutical', category_label=CATEGORY_LABELS['pharmaceutical'],
             writeoffs=[], writeoff_totals={'item_count': 0, 'units': 0, 'value': 0.0, 'by_med': []},
@@ -4047,6 +4056,26 @@ def _requested_page() -> int:
         return max(1, int(request.values.get('page', 1)))
     except (TypeError, ValueError):
         return 1
+
+
+# How far back a page looks when nobody has chosen dates. The key register is
+# read for patterns across the year - who keeps the key, how often weekends
+# run late - and the inventory report needs three months of issues before its
+# average monthly consumption, and so the amount to order, means anything.
+KEY_REGISTER_DEFAULT_MONTHS = 12
+INVENTORY_DEFAULT_MONTHS = 3
+
+
+def _months_back(d: date, months: int) -> date:
+    """The same day of the month, `months` earlier.
+
+    Clamped to the month's last day, so 31 May less three months is
+    28 or 29 February rather than an error.
+    """
+    y, m = divmod(d.year * 12 + (d.month - 1) - months, 12)
+    m += 1
+    last = (date(y + (m == 12), m % 12 + 1, 1) - timedelta(days=1)).day
+    return date(y, m, min(d.day, last))
 
 
 def _default_window(start_date: str | None, end_date: str | None, search: str | None) -> tuple[str | None, str | None, bool]:
@@ -6845,7 +6874,8 @@ def key_register() -> ResponseReturnValue:
         try:
             start = datetime.strptime(raw_start, '%Y-%m-%d')
         except ValueError:
-            start = datetime(today.year, today.month, 1)
+            back = _months_back(today, KEY_REGISTER_DEFAULT_MONTHS)
+            start = datetime(back.year, back.month, back.day)
         try:
             end = datetime.strptime(raw_end, '%Y-%m-%d')
         except ValueError:

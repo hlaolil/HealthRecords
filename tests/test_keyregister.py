@@ -980,6 +980,28 @@ check('and her name is not on it', NURSE_ASSISTANT not in _sel, _sel[:200])
 check('while the pharmacist is', PHARMACIST in _sel)
 unpin()
 
+print('\n--- Default range: a year ---')
+# Asked for: "Key register must default at a year range".
+from datetime import date as _date
+login()
+_today = A.local_now().date()
+_kp = c.get('/key-register').data.decode()
+_want = A._months_back(_today, 12).strftime('%Y-%m-%d')
+check('with no dates chosen the register starts a year back',
+      f'name="start_date" type="date" value="{_want}"' in _kp,
+      _re.findall(r'name="start_date"[^>]*>', _kp)[:1].__str__() if '_re' in dir() else '')
+check('and ends today', f'to {_today:%Y-%m-%d}</h2>' in _kp)
+_kp2 = c.get('/key-register?start_date=2026-01-05&end_date=2026-02-01').data.decode()
+check('dates you choose are still used as given',
+      'value="2026-01-05"' in _kp2 and '2026-01-05 to 2026-02-01' in _kp2)
+check('months back keeps the day of the month', A._months_back(_date(2026, 11, 2), 12) == _date(2025, 11, 2))
+check('a 29 February a year on lands on the 28th', A._months_back(_date(2029, 2, 28), 12) == _date(2028, 2, 28)
+      and A._months_back(_date(2025, 2, 28), 12) == _date(2024, 2, 28))
+check('and 31 May less three months is the end of February',
+      A._months_back(_date(2026, 5, 31), 3) == _date(2026, 2, 28)
+      and A._months_back(_date(2028, 5, 31), 3) == _date(2028, 2, 29))
+check('across a year end', A._months_back(_date(2026, 1, 15), 3) == _date(2025, 10, 15))
+
 print(f"\n=========  {len(PASS)} passed, {len(FAIL)} failed  =========")
 if FAIL:
     for f in FAIL:

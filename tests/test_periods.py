@@ -225,6 +225,24 @@ check('visits per patient shows a dash', prow(b, 'Visits per patient') == '-')
 check('the dashboard handles an empty period',
       c.get('/dashboard').status_code == 200)
 
+print('\n--- The inventory report looks back three months ---')
+# Asked for: "inventory must default at 3 months".
+login()
+_today = A.local_now().date()
+_three = A._months_back(_today, 3).strftime('%Y-%m-%d')
+_rp = c.get('/reports').data.decode()
+check('the form knows the three-month start for the inventory report',
+      f'inventory = "{_three}"' in _rp, str([l for l in _rp.splitlines() if 'inventory =' in l]))
+check('other reports still start at the first of the month',
+      f'value="{_today.replace(day=1):%Y-%m-%d}"' in _rp)
+_ir = c.post('/reports', data={'report_type': 'inventory', 'category': 'both'}).data.decode()
+check('an inventory report asked for without dates covers three months',
+      f'Inventory Report for {_three} to {_today:%Y-%m-%d}' in _ir,
+      str(_re.findall(r'Inventory Report for [^<]*', _ir)[:1]) if '_re' in dir() else '')
+_ir2 = c.post('/reports', data={'report_type': 'inventory', 'category': 'both',
+                                'start_date': '2026-01-01', 'end_date': '2026-01-31'}).data.decode()
+check('dates given are used as given', 'Inventory Report for 2026-01-01 to 2026-01-31' in _ir2)
+
 print(f'\n=========  {len(PASS)} passed, {len(FAIL)} failed  =========')
 if FAIL:
     for f in FAIL:

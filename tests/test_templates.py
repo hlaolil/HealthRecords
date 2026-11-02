@@ -58,8 +58,13 @@ check('and nothing renders a string instead of a file',
 check('the stylesheet is not in app.py either',
       not re.search(r'^CSS_STYLE\s*=', APP, re.M),
       'it is only mentioned now, in the comment explaining where it went')
+# Measured by the markup itself, not the length of the file. A line count
+# failed the day the loan corrections were added, which are Python; what
+# this check is for is pages creeping back in, which this catches.
+_markup = re.findall(r'^\s*<(?:div|table|tr|td|th|form|p|h[1-6]|style|script|input'
+                     r'|select|label|span|ul|li|button)\b', APP, re.M)
 check('app.py is the application again, not a page of HTML',
-      len(APP.split('\n')) < 9000, f'{len(APP.split(chr(10))):,} lines')
+      len(_markup) < 40, f'{len(_markup)} lines of markup')
 check('there are seventeen pages', len(PAGES) == 17, str(len(PAGES)))
 
 print('\n--- 2. Every template Jinja can actually compile ---')

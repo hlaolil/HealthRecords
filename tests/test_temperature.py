@@ -307,8 +307,13 @@ _DIM = A._month_bounds(BASE.year, BASE.month)[2]
 check('each day of this month is split into morning and afternoon',
       svg.count('>m</text>') == _DIM and svg.count('>a</text>') == _DIM,
       f"m={svg.count('>m</text>')} a={svg.count('>a</text>')} days={_DIM}")
+# Asked of a February, which is always short. Asking it of last month failed
+# whenever last month had 31 days, because then nothing is greyed.
+_fb = view(month=f'{TODAY.year - 1}-02')
+_fsvg = _fb[_fb.index('<svg'):_fb.index('</svg>') + 6] if '<svg' in _fb else ''
 check('a short month still prints all 31 day columns, surplus ones greyed',
-      '>31</text>' in svg and ('#999999' in svg or '#bbbbbb' in svg or '#f2f2f2' in svg))
+      '>31</text>' in _fsvg and ('#999999' in _fsvg or '#bbbbbb' in _fsvg or '#f2f2f2' in _fsvg))
+check('every month prints a column 31', '>31</text>' in svg)
 check('the header explains the m and a columns',
       'M – Morning' in svg and 'A – Afternoon' in svg)
 
