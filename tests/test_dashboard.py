@@ -127,12 +127,12 @@ amc = cells[AMC]
 # window is 6 months, last is current (MTD, zero). completed = 5 months:
 # months_back 5,4,3,2,1 -> 0, 0, 100, 200, 300  => mean 120
 # completed months in the window = 5 -> (0+0+100+200+300)/5 = 120
-check('AMC = 120, i.e. averaged over completed months only', amc == '120.0', amc)
+check('AMC = 120, i.e. averaged over completed months only', amc == '120', amc)
 dispense('Paracetamol, 500 mg', 999, 0)   # big spike this month
 body2 = client.get('/dashboard?months=6&limit=0').data.decode()
 cells2 = row_cells(body2, 'Paracetamol, 500 mg')
 check('current-month activity is shown in its column', cells2[5] == '999', cells2[5])
-check('but does NOT change AMC', cells2[AMC] == '120.0', cells2[AMC])
+check('but does NOT change AMC', cells2[AMC] == '120', cells2[AMC])
 
 # =====================================================================
 print('\n--- 4. Months of stock and urgency colouring ---')
@@ -153,7 +153,7 @@ for name, mos, cls in [('Low Item, 10 mg', '0.5', 'expired'),
                        ('Mid Item, 10 mg', '2.5', 'normal'),
                        ('Fine Item, 10 mg', '15.0', 'normal')]:
     c = row_cells(body, name)
-    check(f'{name}: AMC is 100', c[AMC] == '100.0', c[AMC])
+    check(f'{name}: AMC is 100', c[AMC] == '100', c[AMC])
     check(f'{name}: MOS = {mos}', c[MOS] == mos, f'{c[MOS]} (row {c})')
     mm = _re.search(r'<tr class="([a-z-]+)">\s*<td>' + _re.escape(name), body)
     check(f'{name}: row colour is {cls}', mm and mm.group(1) == cls, mm.group(1) if mm else '?')
@@ -445,6 +445,32 @@ check('non-admin sees visits and patients',
 check('non-admin sees no adjustment rows',
       not measure_row(ubody, 'Items adjusted at stock take')
       and not measure_row(ubody, 'Value of adjustments'))
+
+print('\n--- Counted the same way as the inventory report and the order request ---')
+# Asked for: "make the dashboard count the same things as the other two".
+reset(); login('admin')
+add_med('Ward Item, 10 mg', 50)
+# Completed months 1..5 back: 60 dispensed and 30 issued to a ward each month -
+# except the last, when the item ran out: only 45 could be dispensed and 15
+# more were asked for and not supplied. Demand was the same 90 throughout.
+for b in range(1, 6):
+    dispense('Ward Item, 10 mg', 45 if b == 1 else 60, b)
+    txs.insert_one({'type': 'internal_issue', 'med_name': 'Ward Item, 10 mg', 'quantity': 30,
+                    'user': 'u', 'timestamp': month_start(b)})
+txs.insert_one({'type': 'unmet_demand', 'med_name': 'Ward Item, 10 mg', 'shortfall': 15,
+                'user': 'u', 'timestamp': month_start(1)})
+cw = row_cells(client.get('/dashboard?months=6&limit=0').data.decode(), 'Ward Item, 10 mg')
+check('the monthly figures include issues to departments',
+      cw[:5] == ['90', '90', '90', '90', '75'], str(cw[:5]))
+# (90*4 + 75 + 15) / 5 = 90
+check('AMC adds unmet demand back: (435 + 15) / 5 = 90', cw[AMC] == '90', cw[AMC])
+check('suggested order is 3 x 90 - 50 = 220, as the inventory report would say',
+      cw[ORDER] == '220', cw[ORDER])
+check('fill rate counts issues as demand met: 435 / 450 = 97%', cw[FILL] == '97%', cw[FILL])
+check('the month that ran short does not read as a fall in demand',
+      cw[TREND] == 'steady', cw[TREND])
+check('the page says what the monthly figures count',
+      'dispensed to patients plus' in client.get('/dashboard').data.decode())
 
 print(f'\n=========  {len(PASS)} passed, {len(FAIL)} failed  =========')
 if FAIL:

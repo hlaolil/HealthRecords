@@ -2463,6 +2463,24 @@ def _demand_by_med(transactions: Collection, time_filter: Query,
 _ZERO_DEMAND = {'shortfall': 0, 'events': 0}
 
 
+def _demand_by_month(transactions: Collection, since: datetime) -> dict[str, dict[tuple[int, int], float]]:
+    """med_name -> (year, month) -> units asked for and not supplied.
+
+    The dashboard averages month by month, so it needs unmet demand by month
+    too, not one total for the window. Unmet-demand records are few, so they
+    are read directly rather than aggregated.
+    """
+    out: dict[str, dict[tuple[int, int], float]] = {}
+    for t in transactions.find({'type': 'unmet_demand', 'timestamp': {'$gte': since}},
+                               {'_id': 0, 'med_name': 1, 'shortfall': 1, 'timestamp': 1}):
+        ts = t.get('timestamp')
+        if not isinstance(ts, datetime):
+            continue
+        b = out.setdefault(t.get('med_name') or '', {})
+        b[(ts.year, ts.month)] = b.get((ts.year, ts.month), 0) + (t.get('shortfall', 0) or 0)
+    return out
+
+
 ACTIVE_ONLY = {'archived': {'$ne': True}}
 
 # NEW (Categories): items are either pharmaceuticals or medical supplies. This is
@@ -3007,6 +3025,15 @@ def reports() -> ResponseReturnValue:
                         demand = _demand_by_med(
                             transactions, {'$gte': start_dt, '$lte': end_dt},
                             [m['name'] for m in meds] if search else None)
+                        # Everything that moved AFTER the period. The stored
+                        # balance is today's; a report for January has to take
+                        # February onwards back off it, or January's closing
+                        # balance is really today's, its beginning balance is
+                        # worked back from the wrong figure, and the row is
+                        # flagged as records missing when nothing is.
+                        later = _movement_by_med(
+                            transactions, {'$gt': end_dt, '$lte': datetime.now(timezone.utc)},
+                            [m['name'] for m in meds] if search else None)
 
                         def _tidy(v):
                             return int(v) if isinstance(v, float) and v.is_integer() else round(v, 2)
@@ -3032,7 +3059,16 @@ def reports() -> ResponseReturnValue:
                             # demand, so they are tracked separately.
                             issued            = mv['issued']
                             damaged           = mv['damaged']
-                            current_balance   = med.get('balance', 0)
+                            # The balance at the end of the period: today's,
+                            # with everything since unwound, as Stock on Hand
+                            # does. For a period ending today nothing is later
+                            # and this is the stored balance unchanged.
+                            lt = later.get(med_name, _ZERO_MOVEMENT)
+                            current_balance   = (med.get('balance', 0) - lt['received']
+                                                 + lt['dispensed'] + lt['issued']
+                                                 - lt['adjusted'] - lt['expired']
+                                                 - lt['damaged'])
+                            current_balance   = int(current_balance) if float(current_balance).is_integer() else round(current_balance, 2)
                             beginning_balance = max(0, current_balance - received + dispensed
                                                     + issued - adjustment - expired - damaged)
                             # Consumption is everything issued out of the store,
@@ -7051,12 +7087,20 @@ def dashboard() -> ResponseReturnValue:
                   'val_adjusted': [0.0] * n_m}
         activity = _activity_by_month(db['transactions'], window_start)
         demand = _demand_by_med(db['transactions'], {'$gte': window_start})
+        demand_month = _demand_by_month(db['transactions'], window_start)
         clinical = _clinical_by_month(db['transactions'], window_start, months)
 
         for med in all_meds:
             name    = med.get('name', '')
             by_month = movement.get(name, {})
-            monthly  = [by_month.get(ym, {}).get('dispensed', 0) for ym in months]
+            # Consumption, counted as the inventory report and the order
+            # request count it: dispensed to patients plus issued to
+            # departments. Counting dispensing alone made every item the wards
+            # draw on look slower-moving here than on the other two pages.
+            def used(ym: tuple[int, int]) -> float:
+                b = by_month.get(ym, {})
+                return b.get('dispensed', 0) + b.get('issued', 0)
+            monthly  = [used(ym) for ym in months]
             for i, ym in enumerate(months):
                 b = by_month.get(ym, {})
                 # Valued at the medication's CURRENT unit price — transactions
@@ -7067,8 +7111,13 @@ def dashboard() -> ResponseReturnValue:
                 totals['val_received'][i]  += b.get('received', 0) * unit
                 totals['val_adjusted'][i]  += b.get('adjusted', 0) * unit
 
-            complete = [by_month.get(ym, {}).get('dispensed', 0) for ym in amc_months]
-            amc      = sum(complete) / len(complete) if complete else 0.0
+            # Demand for each completed month: what was used plus what was
+            # asked for and could not be supplied - the Adjusted AMC basis.
+            # A whole number, rounded half up, as the inventory report has it.
+            unmet_by = demand_month.get(name, {})
+            complete = [used(ym) + unmet_by.get(ym, 0) for ym in amc_months]
+            amc      = (float(int(sum(complete) / len(complete) + 0.5))
+                        if complete else 0.0)
             balance  = med.get('balance', 0) or 0
             price    = med.get('price', 0) or 0
 
@@ -7086,7 +7135,7 @@ def dashboard() -> ResponseReturnValue:
                 status, mos_label = 'normal', f'{mos:.1f}'
 
             # Trend: last completed month against AMC.
-            last_complete = by_month.get(amc_months[-1], {}).get('dispensed', 0) if amc_months else 0
+            last_complete = complete[-1] if complete else 0
             if amc <= 0:
                 trend_label = '-'
             else:
@@ -7114,7 +7163,7 @@ def dashboard() -> ResponseReturnValue:
                 'med_name': name, 'monthly': monthly, 'unmet': unmet_units,
                 'fill_rate': (round(sum(monthly) / (sum(monthly) + unmet_units) * 100)
                               if (sum(monthly) + unmet_units) else None),
-                'amc': round(amc, 1), 'amc_raw': amc,
+                'amc': int(amc), 'amc_raw': amc,
                 'trend_label': trend_label,
                 'trend_abs': abs((last_complete - amc) / amc) if amc > 0 else -1,
                 'pattern': pattern, 'balance': balance,

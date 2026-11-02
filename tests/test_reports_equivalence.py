@@ -86,8 +86,17 @@ for name in names:
 def expected_inventory(name):
     """Naive independent recomputation straight from the raw documents."""
     d = r = a = 0
+    ld = lr = la = 0   # after the period
     for tx in txs.find({'med_name': name}):
         ts = tx['timestamp']
+        if ts > END:
+            if tx['type'] == 'dispense':
+                ld += tx['quantity']
+            elif tx['type'] == 'receive':
+                lr += tx['quantity']
+            else:
+                la += tx['quantity']
+            continue
         if not (START <= ts <= END):
             continue
         if tx['type'] == 'dispense':
@@ -96,7 +105,10 @@ def expected_inventory(name):
             r += tx['quantity']
         else:
             a += tx['quantity']
-    cur = meds.find_one({'name': name})['balance']
+    # The stored balance is today's. The balance at the end of May is today's
+    # with everything after May undone. Leaving it out compared May's figures
+    # against today's shelf - the bug this used to agree with.
+    cur = meds.find_one({'name': name})['balance'] - lr + ld - la
     beg = max(0, cur - r + d - a)
     days = (END.date() - START.date()).days + 1
     # Issued is everything that left: dispensed, less the net of stock-take
@@ -246,6 +258,7 @@ def count_queries(fn):
     return sum(calls.values())
 
 
+_inv_counts = []
 for n in (10, 100, 320):
     reset()
     for i in range(n):
@@ -259,8 +272,13 @@ for n in (10, 100, 320):
     soh = count_queries(lambda: client.post('/reports', data={
         'report_type': 'stock_on_hand', 'end_date': '2026-05-31'}))
     print(f'   {n:>3} medications -> inventory: {inv} queries, stock on hand: {soh} queries')
-    check(f'inventory stays flat at {n} medications (was {2 * n + 1})', inv <= 5, str(inv))
+    # 7: the period's movement, unmet demand, and the movement since the
+    # period (to give the balance as it stood then), plus the item list.
+    _inv_counts.append(inv)
+    check(f'inventory stays flat at {n} medications (was {2 * n + 1})', inv <= 7, str(inv))
     check(f'stock on hand stays flat at {n} medications (was {2 * n + 1})', soh <= 5, str(soh))
+check('the inventory count is the same at every size',
+      len(set(_inv_counts)) == 1, str(_inv_counts))
 
 # =====================================================================
 print('\n--- 7. Search still narrows correctly after the rewrite ---')

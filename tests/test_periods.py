@@ -243,6 +243,42 @@ _ir2 = c.post('/reports', data={'report_type': 'inventory', 'category': 'both',
                                 'start_date': '2026-01-01', 'end_date': '2026-01-31'}).data.decode()
 check('dates given are used as given', 'Inventory Report for 2026-01-01 to 2026-01-31' in _ir2)
 
+print('\n--- An inventory report for a past period ---')
+# The stored balance is today's. A report for an earlier period has to take
+# everything since off it, or its balances are today's and its warning blames
+# records that are not missing.
+reset(); login()
+from datetime import datetime as _dt
+def _tx(t, q, when):
+    db['transactions'].insert_one({'type': t, 'med_name': 'Testamol', 'quantity': q,
+        'timestamp': when, 'date': when.strftime('%Y-%m-%d'), 'user': 'x'})
+_tx('opening_balance', 200, _dt(2025, 12, 31, 8))
+_tx('receive', 300, _dt(2026, 1, 10, 9))
+_tx('dispense', 100, _dt(2026, 1, 20, 9))
+_tx('dispense', 250, _dt(2026, 5, 5, 9))
+_tx('internal_issue', 50, _dt(2026, 9, 5, 9))
+db['medications'].insert_one({'name': 'Testamol', 'balance': 100,
+                              'category': 'pharmaceutical', 'price': 1})
+from test_support import inventory_rows as _rows
+_jan = c.post('/reports', data={'report_type': 'inventory', 'category': 'both',
+              'start_date': '2026-01-01', 'end_date': '2026-01-31'}).data.decode()
+_r = _rows(_jan).get('Testamol') or {}
+check('January begins with the 200 on the shelf then', _r.get('Beginning Balance') == '200', str(_r))
+check('and ends with the 400 on the shelf then, not today\'s 100',
+      _r.get('Current Balance') == '400', str(_r))
+check('the movements in January are unchanged',
+      _r.get('Received') == '300' and _r.get('Issued') == '100', str(_r))
+check('the AMC is January\'s: 100 / 31 x 30 = 97', _r.get('Adjusted AMC') == '97', str(_r))
+check('the order is against January\'s shelf: 3 x 97 < 400, so 0',
+      _r.get('Amount to Order') == '0', str(_r))
+check('the row is not flagged as unexplained', '&#9888;' not in _jan.split('Testamol')[1][:200])
+check('the page says the balances are as they stood then',
+      'Balances are as they stood at the end of 2026-01-31' in _jan)
+_now = c.post('/reports', data={'report_type': 'inventory', 'category': 'both'}).data.decode()
+check('a report to today still uses today\'s shelf',
+      (_rows(_now).get('Testamol') or {}).get('Current Balance') == '100')
+check('and carries no such note', 'Balances are as they stood' not in _now)
+
 print(f'\n=========  {len(PASS)} passed, {len(FAIL)} failed  =========')
 if FAIL:
     for f in FAIL:
