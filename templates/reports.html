@@ -32,7 +32,24 @@
         <option value="monthly_report">Period Report (day / week / month / quarter / year)</option>
         <option value="duplicate_visits">Possible Double-Dispensing (to check)</option>
     </select><br>
-    <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" type="date" value="{{ start_date or default_start }}"><br>
+    <label>Start Date (YYYY-MM-DD, if applicable):</label><input name="start_date" id="report-start" type="date" value="{{ start_date or default_start }}"><br>
+<script>
+// The inventory report looks back three months by default; every other
+// report starts at the first of the month. Only a date nobody has touched is
+// swapped, so a date you chose yourself stays put when you change report.
+document.addEventListener('DOMContentLoaded', function () {
+    var start = document.getElementById('report-start');
+    var type = start && start.form.querySelector('select[name=report_type]');
+    if (!type) return;
+    var month = {{ default_start|tojson }}, inventory = {{ inventory_start|tojson }};
+    function fit() {
+        if (start.value !== month && start.value !== inventory) return;
+        start.value = type.value === 'inventory' ? inventory : month;
+    }
+    type.addEventListener('change', fit);
+    fit();
+});
+</script>
     <label>End Date (YYYY-MM-DD, if applicable):</label><input name="end_date" type="date" value="{{ end_date or default_end }}"><br>
     <label>Category:</label>
     <select name="category">
@@ -201,6 +218,11 @@ recorded in the audit log.</p>
     </div>
 </form>
 <h2>Inventory Report for {{ start_date }} to {{ end_date }}</h2>
+{% if end_date and end_date < default_end %}
+<p style="font-size:13px;">Balances are as they stood at the end of {{ end_date }}:
+everything received or issued since has been taken back off, so this is the
+shelf as it was then, and Amount to Order is what that shelf needed.</p>
+{% endif %}
 <p><strong>{{ category_label }}</strong></p>
 <p>Each row reconciles: <strong>Beginning + Received &minus; Issued = Current
 Balance</strong>.</p>
