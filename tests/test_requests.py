@@ -358,11 +358,33 @@ def topup(have, note=''):
 
 
 n = reqs.count_documents({})
-r = topup({'Adrenalin 1 mg': 1})
-check('a top-up with lines not counted is not sent', reqs.count_documents({}) == n
-      and 'not counted' in banner(r.data.decode()), banner(r.data.decode())[:200])
+r = topup({})
+check('a top-up with nothing counted is not sent', reqs.count_documents({}) == n
+      and 'nothing was counted' in banner(r.data.decode()), banner(r.data.decode())[:200])
 r = topup({'*': 'x'})
 check('a count in words is refused', reqs.count_documents({}) == n)
+# Asked for: "it should allow me to post even a few of the items".
+r = topup({'Adrenalin 1 mg': 1, 'Atropine': 5})
+d = last_req()
+check('a few items counted is enough to send a top-up',
+      reqs.count_documents({}) == n + 1
+      and [(l['med_name'], l['requested']) for l in d['lines']] == [('Adrenaline 1mg/ml inj', 9)],
+      str(d['lines']))
+check('the lines left blank are not requested', len(d['lines']) == 1)
+# 37, not 38: warfarin's standard is 0, so it is never owed and never "not counted"
+check('the request says how much of the list was counted',
+      '(2 of 37 items counted)' in d['note'], d['note'])
+check('only the counts given are kept', d['topup_counts'] == {'Adrenalin 1 mg': 1, 'Atropine': 5})
+check('the trolley is told the rest were left out',
+      '35 items not counted this time were left out' in banner(r.data.decode()), banner(r.data.decode()))
+c.post('/requests', data={'action': 'cancel', 'request_id': str(d['_id'])})
+n = reqs.count_documents({})
+r = topup({'Atropine': 5})
+check('a partial count with nothing short sends nothing, and says so',
+      reqs.count_documents({}) == n
+      and 'Every item counted is at standard' in banner(r.data.decode()), banner(r.data.decode()))
+r = topup({'Adrenalin 1 mg': 1, 'Atropine': 'three'})
+check('a word in one counted box still stops the request', reqs.count_documents({}) == n)
 # November's sheet: adrenalin 1, atropine 3, hydrocortisone 1, lignocaine 2,
 # water for injection 0; everything else at its standard
 counts = {r2['item']: r2['required'] for r2 in rows}
@@ -488,8 +510,8 @@ def staff_topup(dept, have):
     return c.post('/requests', data=data)
 
 
-r = staff_topup('Emergency Trolley', {'Adrenalin 1 mg': 0})
-check('a check with lines not counted is not sent, and comes back to the same list',
+r = staff_topup('Emergency Trolley', {'Adrenalin 1 mg': 'x'})
+check('a check that cannot be read is not sent, and comes back to the same list',
       r.status_code == 302 and 'topup=Emergency' in r.headers['Location']
       and r.headers['Location'].endswith('#topup'), r.headers.get('Location'))
 full = {r2['item']: r2['required'] for r2 in std.find({'department': 'Emergency Trolley'})}

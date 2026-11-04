@@ -119,9 +119,10 @@ document.addEventListener('DOMContentLoaded', function () {
 {% endmacro %}
 
 {% macro topup_form(standard, dept, fixed) %}
-<p class="req-hint">Count what is there now and enter it for every line (0 if
-there are none). The request is worked out for you: whatever brings each item
-back up to what {{ dept }} should hold.</p>
+<p class="req-hint">Enter what is there now for the items you have counted
+(0 if there are none). Leave the rest blank &mdash; they are left out this time.
+The request is worked out for you: whatever brings each counted item back up to
+what {{ dept }} should hold.</p>
 <form method="POST" action="{{ url_for('department_requests') }}" class="dispense-form" id="topup-form">
     <input type="hidden" name="action" value="topup">
     {% if not fixed %}<input type="hidden" name="department" value="{{ dept }}">{% endif %}
@@ -159,13 +160,12 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     form.addEventListener('input', work);
     form.addEventListener('submit', function (e) {
-        var empty = [].filter.call(form.querySelectorAll('tbody tr'), function (tr) {
-            return tr.dataset.required !== '0' && tr.querySelector('input').value.trim() === '';
+        var counted = [].some.call(form.querySelectorAll('tbody input'), function (x) {
+            return x.value.trim() !== '';
         });
-        if (empty.length) {
+        if (!counted) {
             e.preventDefault();
-            empty[0].querySelector('input').focus();
-            alert(empty.length + ' line(s) not counted yet. Enter 0 where there are none.');
+            alert('Enter what is there for at least one item.');
         }
     });
     work();

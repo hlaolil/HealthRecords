@@ -5433,24 +5433,33 @@ def department_requests() -> ResponseReturnValue:
                         continue
                     tlines.append({'med_name': med, 'requested': need, 'given': None,
                                   'unmet': None, 'standard_item': r['item']})
-                # Every line is counted, or nothing is sent: a box left empty
-                # by mistake would otherwise read as "nothing needed".
-                if tproblems or uncounted:
-                    bits = tproblems[:]
-                    if uncounted:
-                        bits.append('not counted: ' + ', '.join(uncounted)
-                                    + ' (enter 0 if there are none)')
-                    flash('The top-up was not sent: ' + '; '.join(bits) + '.')
+                # A blank box is a line not counted this time, and is left out
+                # - a busy shift can top up the few items it has checked. Only
+                # a box with something unreadable in it stops the request,
+                # and so does a form with nothing counted at all.
+                if not counts and not tproblems:
+                    tproblems.append('nothing was counted - enter what is there '
+                                     'for at least one item')
+                if tproblems:
+                    flash('The top-up was not sent: ' + '; '.join(tproblems) + '.')
                     return redirect(url_for('department_requests',
                                             topup=None if dept_user else dept,
                                             _anchor='topup'))
+                skipped = (f' {len(uncounted)} item{"" if len(uncounted) == 1 else "s"} '
+                           f'not counted this time {"was" if len(uncounted) == 1 else "were"} left out.'
+                           if uncounted else '')
                 if not tlines:
-                    msg = f'{dept} is at its standard list - nothing to top up.'
+                    msg = (f'Every item counted is at standard - nothing to top up.{skipped}'
+                           if uncounted else
+                           f'{dept} is at its standard list - nothing to top up.')
                     if not_stocked:
                         msg += ' Short but not on the pharmacy list: ' + ', '.join(not_stocked) + '.'
                     flash(msg, 'success' if not not_stocked else 'partial')
-                    return redirect(url_for('department_requests'))
-                note = 'Top-up to standard list'
+                    return redirect(url_for('department_requests',
+                                            topup=None if dept_user else dept))
+                note = ('Top-up to standard list' if not uncounted else
+                        f'Top-up to standard list ({len(counts)} of '
+                        f'{len(counts) + len(uncounted)} items counted)')
                 extra_note = (request.form.get('note') or '').strip()
                 if extra_note:
                     note += f' - {extra_note}'
@@ -5460,8 +5469,8 @@ def department_requests() -> ResponseReturnValue:
                                     {'kind': 'topup', 'topup_counts': counts})
                 flash(f'Top-up {ref} sent to the pharmacy: {len(tlines)} '
                       f'item{"" if len(tlines) == 1 else "s"} to bring {dept} up to standard.'
-                      + (f' Not on the pharmacy list: {", ".join(not_stocked)}.' if not_stocked else ''),
-                      'success')
+                      + (f' Not on the pharmacy list: {", ".join(not_stocked)}.' if not_stocked else '')
+                      + skipped, 'success')
                 return redirect(url_for('department_requests'))
 
             doc = None
