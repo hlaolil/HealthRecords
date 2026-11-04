@@ -40,6 +40,9 @@
   .req-badge.In.progress { background: #d6e9ff; color: #0b4a8b; }
   .req-done td { color: #666; background: #f4f6f8 !important; }
   .req-now { width: 22px; height: 22px; min-height: 0; margin: 0; }
+  .req-tickall { display: block; margin: 4px 0 0; padding: 3px 6px; font-size: 11px;
+                 font-weight: normal; background: #fff !important; color: #0056b3 !important;
+                 border-radius: 3px; white-space: nowrap; min-height: 0; }
   .req-badge.Served { background: #d4edda; color: #155724; }
   .req-badge.Part.served { background: #ffe5b4; color: #7a4b00; }
   .req-badge.Not.supplied, .req-badge.Declined { background: #f8d7da; color: #721c24; }
@@ -335,12 +338,14 @@ and the count shows beside Requests on every page.</p>{% endif %}
     {% else %}
     <form method="POST" action="{{ url_for('department_requests') }}"
           class="req-serve-form"
-          onsubmit="return confirm({{ ('Issue the ticked items to ' ~ r.department ~ '? Stock comes off the shelf now.')|tojson }});">
+          data-confirm="Issue the ticked items to {{ r.department }}? Stock comes off the shelf now.">
         <input type="hidden" name="action" value="serve">
         <input type="hidden" name="request_id" value="{{ r.id }}">
         <input type="hidden" name="pick" value="1">
         <div class="table-scroll"><table>
-            <tr><th>Now</th><th>Item</th><th>Asked</th><th>On hand</th><th>Give</th></tr>
+            <tr><th>Now <button type="button" class="req-tickall"
+                    onclick="var b=this.closest('form').querySelectorAll('.req-now'),on=[].some.call(b,function(x){return !x.checked});b.forEach(function(x){x.checked=on});this.textContent=on?'Untick all':'Tick all';">Tick all</button></th>
+                <th>Item</th><th>Asked</th><th>On hand</th><th>Give</th></tr>
             {% for l in r.lines %}
             {% if l.given is not none %}
             <tr class="req-done">
@@ -351,7 +356,7 @@ and the count shows beside Requests on every page.</p>{% endif %}
             </tr>
             {% else %}
             <tr class="{% if l.on_hand < l.requested %}req-none{% endif %}">
-                <td><input type="checkbox" name="now__{{ l.i }}" value="1" checked class="req-now"
+                <td><input type="checkbox" name="now__{{ l.i }}" value="1" class="req-now"
                            aria-label="Serve {{ l.med_name }} now"></td>
                 <td>{{ l.med_name }}</td>
                 <td>{{ l.requested }}</td>
@@ -362,8 +367,8 @@ and the count shows beside Requests on every page.</p>{% endif %}
             {% endif %}
             {% endfor %}
         </table></div>
-        <p class="req-hint"><strong>Untick an item to leave it for later</strong> &mdash; the
-        request stays here until every item is dealt with. Give is filled in with what you
+        <p class="req-hint"><strong>Tick the items you are serving now</strong> (or Tick all);
+        the rest wait here for later, and the request stays until every item is dealt with. Give is filled in with what you
         can supply. Anything short because the shelf is empty is recorded as unmet demand,
         so the next order covers it. Giving less than you have is your call and is not
         counted as unmet.</p>
@@ -427,6 +432,22 @@ count what is there, and send. It goes into the queue above like any request.</p
 })();
 </script>
 {% endif %}
+
+<script>
+// Serving: something must be ticked, and issuing is confirmed. Kept out of
+// the onsubmit attribute, where a quoted department name broke the handler
+// and the form went through with no question asked.
+document.addEventListener('submit', function (e) {
+    var f = e.target;
+    if (!f.classList || !f.classList.contains('req-serve-form')) return;
+    if (!f.querySelector('.req-now:checked')) {
+        e.preventDefault();
+        alert('Tick the items you are serving now.');
+        return;
+    }
+    if (!confirm(f.dataset.confirm)) e.preventDefault();
+});
+</script>
 
 <details style="margin: 6px 0 18px;">
     <summary style="cursor:pointer;font-weight:bold;">Post a request for a department (phoned or brought in)</summary>
