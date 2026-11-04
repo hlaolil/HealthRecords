@@ -5441,7 +5441,9 @@ def department_requests() -> ResponseReturnValue:
                         bits.append('not counted: ' + ', '.join(uncounted)
                                     + ' (enter 0 if there are none)')
                     flash('The top-up was not sent: ' + '; '.join(bits) + '.')
-                    return redirect(url_for('department_requests', _anchor='topup'))
+                    return redirect(url_for('department_requests',
+                                            topup=None if dept_user else dept,
+                                            _anchor='topup'))
                 if not tlines:
                     msg = f'{dept} is at its standard list - nothing to top up.'
                     if not_stocked:
@@ -5637,9 +5639,25 @@ def department_requests() -> ResponseReturnValue:
             hq['department'] = dept_filter
         history = [_request_row(d) for d in
                    reqs.find(hq).sort('requested_at', -1).limit(100)]
+        # The count form, for a check done under a staff login. Seeding the
+        # trolley list here too means it is there the first time anyone opens
+        # this page, whichever login they use.
+        for seeded in STANDARD_SEEDS:
+            _standard_list(db, seeded)
+        topup_lists = sorted(d for d in db['dept_standards'].distinct('department')
+                             if d in REQUEST_DEPARTMENTS)
+        topup_dept = (request.args.get('topup') or '').strip()
+        if topup_dept not in topup_lists:
+            topup_dept = ('Emergency Trolley' if 'Emergency Trolley' in topup_lists
+                          else (topup_lists[0] if topup_lists else ''))
+        topup_standard = ([{'id': str(r['_id']), 'item': r['item'],
+                            'required': r.get('required', 0) or 0,
+                            'linked': bool(r.get('med_name') and r['med_name'] in names)}
+                           for r in _standard_list(db, topup_dept)] if topup_dept else [])
         return render_template(
             'requests.html', nav_links=get_nav_links(),
             message=message, message_class=message_class,
+            topup_lists=topup_lists, topup_dept=topup_dept, topup_standard=topup_standard,
             dept_user=False, my_dept='', med_names=names,
             mine=[], pending=pending, history=history,
             departments=REQUEST_DEPARTMENTS, dept_filter=dept_filter,

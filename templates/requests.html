@@ -4,6 +4,7 @@
 {% block page_styles %}
 <style>
   .req-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
+  #topup { scroll-margin-top: 150px; }   /* clear the sticky menu */
   .req-card { background: #fff; border-radius: 8px; padding: 12px 14px; margin: 0 0 16px;
               box-shadow: 0 2px 4px rgba(0,0,0,0.1); scroll-margin-top: 150px; }
   .req-card h3 { margin: 0 0 4px; font-size: 17px; }
@@ -117,16 +118,13 @@ document.addEventListener('DOMContentLoaded', function () {
 </table></div>
 {% endmacro %}
 
-{% if dept_user %}
-{# ================= what a department sees ================= #}
-{% set standard = standard|default([]) %}
-{% if standard %}
-<h2 id="topup">Top Up to Standard &mdash; {{ my_dept }}</h2>
+{% macro topup_form(standard, dept, fixed) %}
 <p class="req-hint">Count what is there now and enter it for every line (0 if
 there are none). The request is worked out for you: whatever brings each item
-back up to what the {{ my_dept|lower }} should hold.</p>
+back up to what {{ dept }} should hold.</p>
 <form method="POST" action="{{ url_for('department_requests') }}" class="dispense-form" id="topup-form">
     <input type="hidden" name="action" value="topup">
+    {% if not fixed %}<input type="hidden" name="department" value="{{ dept }}">{% endif %}
     <div class="table-scroll"><table class="req-topup">
         <thead><tr><th>Item</th><th>Should hold</th><th>There now</th><th>To request</th></tr></thead>
         <tbody>
@@ -173,6 +171,14 @@ document.addEventListener('DOMContentLoaded', function () {
     work();
 });
 </script>
+{% endmacro %}
+
+{% if dept_user %}
+{# ================= what a department sees ================= #}
+{% set standard = standard|default([]) %}
+{% if standard %}
+<h2 id="topup">Top Up to Standard &mdash; {{ my_dept }}</h2>
+{{ topup_form(standard, my_dept, true) }}
 {% endif %}
 
 <h2>{% if standard %}Anything Else{% else %}New Request{% endif %} &mdash; {{ my_dept }}</h2>
@@ -210,6 +216,7 @@ need. The pharmacy sees it straight away, and this page shows what was given.</p
 <p class="req-hint" style="text-align:right;"><a href="{{ url_for('standard_lists') }}">Standard lists
 (what the emergency trolley should hold) &rarr;</a></p>
 {% endif %}
+{% if topup_lists %}<p class="req-hint"><a href="#topup">Top up the {{ topup_dept or topup_lists[0] }} to standard &darr;</a></p>{% endif %}
 <h2>Waiting &mdash; {{ pending|length }}</h2>
 {% if not pending %}<p class="req-hint">Nothing waiting. New requests appear here,
 and the count shows beside Requests on every page.</p>{% endif %}
@@ -268,6 +275,24 @@ and the count shows beside Requests on every page.</p>{% endif %}
     {% endif %}
 </div>
 {% endfor %}
+
+{% if topup_lists %}
+<h2 id="topup">Top Up to Standard{% if topup_dept %} &mdash; {{ topup_dept }}{% endif %}</h2>
+<p class="req-hint">For a check done under your own login: choose the department,
+count what is there, and send. It goes into the queue above like any request.</p>
+<form method="GET" action="{{ url_for('department_requests') }}" class="filter-form">
+    <div class="filter-section">
+        <div>
+            <label>Department:</label>
+            <select name="topup" onchange="this.form.submit()">
+                {% for d in topup_lists %}<option value="{{ d }}" {% if d == topup_dept %}selected{% endif %}>{{ d }}</option>{% endfor %}
+            </select>
+        </div>
+        <div><label>&nbsp;</label><button type="submit">Open List</button></div>
+    </div>
+</form>
+{% if topup_standard %}{{ topup_form(topup_standard, topup_dept, false) }}{% endif %}
+{% endif %}
 
 <details style="margin: 6px 0 18px;">
     <summary style="cursor:pointer;font-weight:bold;">Post a request for a department (phoned or brought in)</summary>

@@ -459,6 +459,59 @@ check('opening the page again never re-seeds over an edit',
 check('a department login cannot open the standard lists',
       c.get('/requests/standard').status_code == 302)
 
+print('\n--- 13. A nurse does the trolley check under her own login ---')
+# Asked for: "add the count form to the staff Requests page".
+as_user('Sr. Kutoane', 'employee')
+page = c.get('/requests').data.decode()
+check('the staff Requests page has the count form',
+      'Top Up to Standard' in page and 'id="topup-form"' in page and 'There now' in page)
+check('it opens on the Emergency Trolley',
+      'Top Up to Standard &mdash; Emergency Trolley' in page)
+check('with a link to it from the top of the page', 'href="#topup"' in page)
+check('the department choice lists every department with a list',
+      '<option value="Emergency Trolley" selected>' in page and '<option value="PHC"' in page)
+check('and it sends the department with the counts',
+      'name="department" value="Emergency Trolley"' in page)
+page = c.get('/requests?topup=PHC').data.decode()
+check('choosing another department opens its list', 'Top Up to Standard &mdash; PHC' in page
+      and 'name="department" value="PHC"' in page)
+check('a department with no list is not offered',
+      '<option value="Lab"' not in page.split('id="topup"')[1].split('</form>')[0])
+
+
+def staff_topup(dept, have):
+    data = {'action': 'topup', 'department': dept, 'note': ''}
+    for r2 in std.find({'department': dept}):
+        v = have.get(r2['item'], have.get('*'))
+        if v is not None:
+            data[f"have__{r2['_id']}"] = str(v)
+    return c.post('/requests', data=data)
+
+
+r = staff_topup('Emergency Trolley', {'Adrenalin 1 mg': 0})
+check('a check with lines not counted is not sent, and comes back to the same list',
+      r.status_code == 302 and 'topup=Emergency' in r.headers['Location']
+      and r.headers['Location'].endswith('#topup'), r.headers.get('Location'))
+full = {r2['item']: r2['required'] for r2 in std.find({'department': 'Emergency Trolley'})}
+full['Adrenalin 1 mg'] = 2
+n = reqs.count_documents({})
+staff_topup('Emergency Trolley', full)
+d = last_req()
+check('a counted check sends the top-up for the trolley',
+      reqs.count_documents({}) == n + 1 and d['department'] == 'Emergency Trolley'
+      and d.get('kind') == 'topup')
+check('under the nurse\'s own name', d['requested_by'] == 'Sr. Kutoane')
+check('asking for the difference', {l['med_name']: l['requested'] for l in d['lines']}
+      == {'Adrenaline 1mg/ml inj': 4}, str(d['lines']))
+page = c.get('/requests').data.decode()
+check('and it waits in the queue to be served', f'id="{d["ref"]}"' in page)
+r = staff_topup('Doctor Consultation', {'*': 0})
+check('a department with no list cannot be topped up',
+      reqs.count_documents({}) == n + 1)
+as_ward('Emergency Trolley', 'Sr. Kutoane')
+check('the trolley account still has its own form',
+      'Top Up to Standard &mdash; Emergency Trolley' in c.get('/requests').data.decode())
+
 print(f"\n=========  {len(PASS)} passed, {len(FAIL)} failed  =========")
 if FAIL:
     for f in FAIL:
