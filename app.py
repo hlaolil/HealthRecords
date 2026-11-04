@@ -5173,6 +5173,171 @@ TROLLEY_STANDARD_SEED: list[tuple[str, int, list[str], str]] = [
     ('Ambubag', 1, [], 'equipment, not supplied from the pharmacy list'),
 ]
 STANDARD_SEEDS = {'Emergency Trolley': TROLLEY_STANDARD_SEED}
+# Items on a standard list that have no expiry date to record.
+NO_EXPIRY_ITEMS = {'Ambubag'}
+# How close an expiry has to be before the watch list shows it, and before
+# it turns red. Ninety days is time to order a replacement; thirty is not.
+EXPIRY_WATCH_DAYS, EXPIRY_URGENT_DAYS = 90, 30
+
+
+# The trolley's own spreadsheet spells some items differently from the list.
+CHECKLIST_ALIASES = {
+    'Etomidate': ['atomidate'],
+    'Methylprednisolone 40 mg': ['methlprednisolone', 'methylpred'],
+    'Sodium bicarbonate': ['na bicarbonate', 'nabicarbonate', 'sodium bicarb'],
+    'Paracetamol IV (Pafalgan)': ['pafalgan', 'perfalgan'],
+    'Lignocaine 400 mg': ['lignocaine 400', 'lignocaine (topical)'],
+}
+CHECKLIST_MAX_BYTES = 5 * 1024 * 1024
+MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
+               'august', 'september', 'october', 'november', 'december']
+
+
+def _ck_key(s: str) -> str:
+    return re.sub(r'[^a-z0-9]', '', (s or '').lower())
+
+
+def _checklist_match(label: str, rows: Docs) -> Doc | None:
+    """The standard-list line a spreadsheet label is, or None.
+
+    Matched on the first seven letters, which is enough to tell dexamethasone
+    from dextrose and hydralazine from hydrocortisone, plus the spellings the
+    trolley's sheet uses for a few items.
+    """
+    key = _ck_key(label)
+    if len(key) < 4:
+        return None
+    hits = []
+    for r in rows:
+        names = [r['item']] + CHECKLIST_ALIASES.get(r['item'], [])
+        if any(key[:7] == _ck_key(n)[:7] for n in names):
+            hits.append(r)
+    if len(hits) > 1:
+        # "Lignocaine 400" and "Lignocaine (topical)": the number decides
+        exact = [r for r in hits if any(_ck_key(n) and key.startswith(_ck_key(n)[:len(key)])
+                                        for n in [r['item']] + CHECKLIST_ALIASES.get(r['item'], []))]
+        hits = exact or hits
+    return hits[0] if len(hits) == 1 else None
+
+
+def _checklist_head(ws: Any) -> tuple[int, int] | None:
+    """(row, column) of the EMERGENCY DRUGS heading, looked for near the top
+    left - April's sheet has it one column in from the others."""
+    for r in range(1, 4):
+        for c_ in range(1, 4):
+            try:
+                v = str(ws.cell(r, c_).value or '').strip().upper()
+            except Exception:
+                return None
+            if v.startswith('EMERGENCY DRUGS'):
+                return r, c_
+    return None
+
+
+def _checklist_sheets(wb: Any) -> list[str]:
+    """The drug sheets in a checklist workbook: the ones headed EMERGENCY DRUGS."""
+    out = []
+    for ws in wb.worksheets:
+        at = _checklist_head(ws)
+        if at and ws.max_row > at[0]:
+            out.append(ws.title)
+    return out
+
+
+def _checklist_date(v: Any) -> tuple[str | None, str | None]:
+    """(ISO date, problem) from an expiry cell as people actually fill them."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None, None
+    if isinstance(v, datetime):
+        return v.date().strftime('%Y-%m-%d'), None
+    if isinstance(v, date):
+        return v.strftime('%Y-%m-%d'), None
+    text = str(v).strip()
+    for fmt in ('%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%d.%m.%Y', '%m/%Y', '%b %Y', '%B %Y'):
+        try:
+            d = datetime.strptime(text, fmt).date()
+            return d.strftime('%Y-%m-%d'), None
+        except ValueError:
+            continue
+    return None, f'"{text}" is not a date'
+
+
+def _read_checklist(data: bytes, sheet: str | None, rows: Docs) -> Doc:
+    """Read one month of the trolley checklist against the standard list.
+
+    Takes the QTY and EXPIRY DATE columns - what the nurse wrote as the count
+    for the month - and leaves the day-by-day ticks alone.
+    """
+    import io
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=False)
+    sheets = _checklist_sheets(wb)
+    if not sheets:
+        raise ValueError('no sheet headed EMERGENCY DRUGS was found in that file')
+    if not sheet or sheet not in sheets:
+        month = MONTH_NAMES[local_now().month - 1]
+        sheet = next((t for t in sheets if t.lower().startswith(month[:3])), sheets[-1])
+    ws = wb[sheet]
+    hrow, hcol = _checklist_head(ws) or (1, 1)
+    lcol = hcol - 1                                   # 0-based, as in the rows
+    head = [str(c.value or '').strip().upper() for c in ws[hrow]]
+    qcol = next((i for i, h in enumerate(head) if h in ('QTY', 'QUANTITY')), lcol + 1)
+    ecol = next((i for i, h in enumerate(head) if h.startswith('EXPIRY')), lcol + 2)
+    values: dict[str, Doc] = {}
+    unmatched, notes = [], []
+    for row in ws.iter_rows(min_row=hrow + 1, values_only=True):
+        label = ' '.join(str(row[lcol] if len(row) > lcol and row[lcol] is not None else '').split())
+        if not label:
+            continue
+        r = _checklist_match(label, rows)
+        if not r:
+            unmatched.append(label)
+            continue
+        qv = row[qcol] if len(row) > qcol else None
+        have: int | None = None
+        if isinstance(qv, (int, float)) and not isinstance(qv, bool) and qv >= 0:
+            have = int(qv)
+        elif isinstance(qv, str) and qv.strip().isdigit():
+            have = int(qv.strip())
+        elif qv not in (None, ''):
+            notes.append(f'{r["item"]}: quantity "{qv}" left blank')
+        exp, bad = _checklist_date(row[ecol] if len(row) > ecol else None)
+        if bad:
+            notes.append(f'{r["item"]}: expiry {bad}, so it is left for you to enter')
+        if have is None:
+            if qv in (None, ''):
+                notes.append(f'{r["item"]}: no quantity on the sheet, left blank')
+            continue
+        if have > 0 and not exp and not bad and _std_expires(r):
+            notes.append(f'{r["item"]}: no expiry on the sheet, enter it')
+        values[str(r['_id'])] = {'have': have, 'expiry': exp or ''}
+    return {'sheet': sheet, 'sheets': sheets, 'values': values,
+            'unmatched': unmatched, 'notes': notes}
+
+
+def _std_expires(r: Doc) -> bool:
+    return bool(r.get('expires', r.get('item') not in NO_EXPIRY_ITEMS))
+
+
+def _expiry_watch(db: Database, dept: str, today: date) -> Docs:
+    """Items on the department's list whose last recorded expiry is near or past."""
+    out = []
+    for r in db['dept_standards'].find({'department': dept}).sort('order', 1):
+        exp = r.get('last_expiry')
+        if not exp or not r.get('last_have'):
+            continue
+        try:
+            d = datetime.strptime(exp, '%Y-%m-%d').date()
+        except ValueError:
+            continue
+        left = (d - today).days
+        if left > EXPIRY_WATCH_DAYS:
+            continue
+        out.append({'item': r['item'], 'have': r.get('last_have'), 'expiry': d,
+                    'days': left, 'urgent': left <= EXPIRY_URGENT_DAYS, 'expired': left < 0,
+                    'checked_at': r.get('last_checked_at'), 'checked_by': r.get('last_checked_by')})
+    out.sort(key=lambda x: x['days'])
+    return out
 
 
 def _suggest_med(words: list[str], names: list[str]) -> list[str]:
@@ -5207,6 +5372,23 @@ def _standard_list(db: Database, dept: str) -> Docs:
                             'required': qty, 'med_name': found[0] if len(found) == 1 else None,
                             'words': words, 'note': note})
     return list(col.find({'department': dept}).sort('order', 1))
+
+
+def _topup_rows(db: Database, dept: str, names: list[str], login: Any) -> tuple[Docs, Doc | None]:
+    """The count form's lines, filled from an imported checklist if there is one."""
+    draft = db['topup_drafts'].find_one({'login': login, 'department': dept})
+    vals = (draft or {}).get('values') or {}
+    out = []
+    for r in _standard_list(db, dept):
+        v = vals.get(str(r['_id'])) or {}
+        out.append({'id': str(r['_id']), 'item': r['item'],
+                    'required': r.get('required', 0) or 0,
+                    'linked': bool(r.get('med_name') and r['med_name'] in names),
+                    'expires': _std_expires(r),
+                    'prefill_have': '' if v.get('have') is None else v['have'],
+                    'last_expiry': (v.get('expiry') if draft and str(r['_id']) in vals
+                                    else r.get('last_expiry')) or ''})
+    return out, draft
 
 
 def _save_request(reqs: Collection, dept: str, user: Doc, lines: Docs,
@@ -5389,6 +5571,54 @@ def department_requests() -> ResponseReturnValue:
                       f'item{"" if len(lines) == 1 else "s"}.', 'success')
                 return redirect(url_for('department_requests'))
 
+            if action == 'import_checklist':
+                # Fills the count form from the department's own spreadsheet
+                # for checking. Nothing is sent: the counts go into the form,
+                # and the request is made only when someone presses Send.
+                dept = my_dept if dept_user else (request.form.get('department') or '').strip()
+                back = url_for('department_requests', topup=None if dept_user else dept,
+                               _anchor='topup')
+                standard = _standard_list(db, dept) if dept in REQUEST_DEPARTMENTS else []
+                upload = request.files.get('checklist')
+                if not standard:
+                    flash('Choose a department with a standard list first.')
+                    return redirect(url_for('department_requests'))
+                if not upload or not upload.filename:
+                    flash('Choose the checklist spreadsheet to read.')
+                    return redirect(back)
+                if not upload.filename.lower().endswith(('.xlsx', '.xlsm')):
+                    flash('That is not an Excel workbook (.xlsx). Save the checklist as .xlsx and try again.')
+                    return redirect(back)
+                data = upload.read(CHECKLIST_MAX_BYTES + 1)
+                if len(data) > CHECKLIST_MAX_BYTES:
+                    flash('That file is too large to be the checklist.')
+                    return redirect(back)
+                try:
+                    found = _read_checklist(data, (request.form.get('sheet') or '').strip() or None,
+                                            standard)
+                except Exception as e:
+                    app.logger.warning(f'checklist import failed: {e}')
+                    flash(f'The checklist could not be read: {e}.' if isinstance(e, ValueError)
+                          else 'The checklist could not be read. Check it is the trolley '
+                               'checklist saved as .xlsx.')
+                    return redirect(back)
+                db['topup_drafts'].delete_many({'login': user.get('login'), 'department': dept})
+                db['topup_drafts'].insert_one({
+                    'login': user.get('login'), 'department': dept,
+                    'values': found['values'], 'sheet': found['sheet'],
+                    'sheets': found['sheets'], 'notes': found['notes'],
+                    'unmatched': found['unmatched'], 'created_at': datetime.utcnow()})
+                msg = (f"Filled from \"{found['sheet']}\": {len(found['values'])} of "
+                       f"{len(standard)} items. Nothing has been sent - check the counts "
+                       f"and dates below, then press Send Top-up Request.")
+                if found['notes']:
+                    msg += ' Check: ' + '; '.join(found['notes']) + '.'
+                if found['unmatched']:
+                    msg += (' On the sheet but not on the list, left out: '
+                            + ', '.join(found['unmatched']) + '.')
+                flash(msg, 'partial' if found['notes'] or found['unmatched'] else 'success')
+                return redirect(back)
+
             if action == 'topup':
                 dept = my_dept if dept_user else (request.form.get('department') or '').strip()
                 if dept not in REQUEST_DEPARTMENTS:
@@ -5404,6 +5634,10 @@ def department_requests() -> ResponseReturnValue:
                 tproblems: list[str] = []
                 uncounted: list[str] = []
                 not_stocked: list[str] = []
+                expired_on: list[str] = []
+                expiries: dict[str, str] = {}
+                checked: list[tuple[Any, int, str | None]] = []
+                today_local = local_now().date()
                 for r in standard:
                     raw = (request.form.get(f"have__{r['_id']}") or '').strip()
                     if raw == '':
@@ -5417,8 +5651,40 @@ def department_requests() -> ResponseReturnValue:
                     except ValueError:
                         tproblems.append(f"{r['item']}: enter how many are there as a whole number")
                         continue
+                    # The earliest expiry of what is there. Needed for any
+                    # line with stock on it, so the pharmacy can see what is
+                    # about to go out of date before it does.
+                    raw_exp = (request.form.get(f"expiry__{r['_id']}") or '').strip()
+                    exp_iso = None
+                    if have > 0 and _std_expires(r):
+                        if not raw_exp:
+                            tproblems.append(f"{r['item']}: enter the earliest expiry date")
+                            continue
+                        try:
+                            exp_d = datetime.strptime(raw_exp, '%Y-%m-%d').date()
+                        except ValueError:
+                            tproblems.append(f"{r['item']}: the expiry date is not a date")
+                            continue
+                        # A date picker cannot mistype, but it can land on the
+                        # wrong year; ten years either way is never right here.
+                        if abs((exp_d - today_local).days) > 3653:
+                            tproblems.append(f"{r['item']}: {exp_d:%d %b %Y} looks like the wrong year")
+                            continue
+                        exp_iso = exp_d.strftime('%Y-%m-%d')
+                        if exp_d < today_local:
+                            # Expired stock is not stock. It is asked for again
+                            # in full, and the trolley is told to take it off.
+                            expired_on.append(f"{r['item']} ({exp_d:%d %b %Y})")
+                            have_usable = 0
+                        else:
+                            have_usable = have
+                    else:
+                        have_usable = have
                     counts[r['item']] = have
-                    need = max(0, (r.get('required') or 0) - have)
+                    if exp_iso:
+                        expiries[r['item']] = exp_iso
+                    checked.append((r['_id'], have, exp_iso))
+                    need = max(0, (r.get('required') or 0) - have_usable)
                     if not need:
                         continue
                     med = r.get('med_name')
@@ -5445,6 +5711,15 @@ def department_requests() -> ResponseReturnValue:
                     return redirect(url_for('department_requests',
                                             topup=None if dept_user else dept,
                                             _anchor='topup'))
+                # What the check found, kept on the list itself, so the expiry
+                # watch is current even when nothing needed topping up.
+                stamp = datetime.utcnow()
+                for rid, have_n, exp_iso in checked:
+                    db['dept_standards'].update_one({'_id': rid}, {'$set': {
+                        'last_have': have_n, 'last_expiry': exp_iso,
+                        'last_checked_at': stamp, 'last_checked_by': me}})
+                expired_msg = (' Expired, take off the trolley: ' + ', '.join(expired_on) + '.'
+                               if expired_on else '')
                 skipped = (f' {len(uncounted)} item{"" if len(uncounted) == 1 else "s"} '
                            f'not counted this time {"was" if len(uncounted) == 1 else "were"} left out.'
                            if uncounted else '')
@@ -5452,6 +5727,8 @@ def department_requests() -> ResponseReturnValue:
                     msg = (f'Every item counted is at standard - nothing to top up.{skipped}'
                            if uncounted else
                            f'{dept} is at its standard list - nothing to top up.')
+                    msg += ' The count and expiry dates are recorded.' + expired_msg
+                    db['topup_drafts'].delete_many({'login': user.get('login'), 'department': dept})
                     if not_stocked:
                         msg += ' Short but not on the pharmacy list: ' + ', '.join(not_stocked) + '.'
                     flash(msg, 'success' if not not_stocked else 'partial')
@@ -5465,12 +5742,16 @@ def department_requests() -> ResponseReturnValue:
                     note += f' - {extra_note}'
                 if not_stocked:
                     note += '. Also short, not on the pharmacy list: ' + ', '.join(not_stocked)
+                if expired_on:
+                    note += '. Expired on the trolley, replaced in full: ' + ', '.join(expired_on)
+                db['topup_drafts'].delete_many({'login': user.get('login'), 'department': dept})
                 ref = _save_request(reqs, dept, user, tlines, note,
-                                    {'kind': 'topup', 'topup_counts': counts})
+                                    {'kind': 'topup', 'topup_counts': counts,
+                                     'topup_expiry': expiries, 'topup_expired': expired_on})
                 flash(f'Top-up {ref} sent to the pharmacy: {len(tlines)} '
                       f'item{"" if len(tlines) == 1 else "s"} to bring {dept} up to standard.'
                       + (f' Not on the pharmacy list: {", ".join(not_stocked)}.' if not_stocked else '')
-                      + skipped, 'success')
+                      + expired_msg + skipped, 'partial' if expired_on else 'success')
                 return redirect(url_for('department_requests'))
 
             doc = None
@@ -5623,14 +5904,12 @@ def department_requests() -> ResponseReturnValue:
         if dept_user:
             mine = [_request_row(d) for d in
                     reqs.find({'department': my_dept}).sort('requested_at', -1).limit(60)]
-            standard = [{'id': str(r['_id']), 'item': r['item'],
-                         'required': r.get('required', 0) or 0,
-                         'linked': bool(r.get('med_name') and r['med_name'] in names)}
-                        for r in _standard_list(db, my_dept)]
+            standard, draft = _topup_rows(db, my_dept, names, user.get('login'))
+            watch = {my_dept: _expiry_watch(db, my_dept, local_now().date())} if standard else {}
             return render_template(
                 'requests.html', nav_links=get_nav_links(),
                 message=message, message_class=message_class,
-                standard=standard,
+                standard=standard, watch=watch, watch_days=EXPIRY_WATCH_DAYS, draft=draft,
                 dept_user=True, my_dept=my_dept, med_names=names,
                 mine=mine, pending=[], history=[], departments=REQUEST_DEPARTMENTS,
                 waited=_waited, max_lines=REQ_MAX_LINES)
@@ -5659,14 +5938,15 @@ def department_requests() -> ResponseReturnValue:
         if topup_dept not in topup_lists:
             topup_dept = ('Emergency Trolley' if 'Emergency Trolley' in topup_lists
                           else (topup_lists[0] if topup_lists else ''))
-        topup_standard = ([{'id': str(r['_id']), 'item': r['item'],
-                            'required': r.get('required', 0) or 0,
-                            'linked': bool(r.get('med_name') and r['med_name'] in names)}
-                           for r in _standard_list(db, topup_dept)] if topup_dept else [])
+        topup_standard, draft = (_topup_rows(db, topup_dept, names, user.get('login'))
+                                 if topup_dept else ([], None))
+        today_l = local_now().date()
+        watch = {d: w for d in topup_lists if (w := _expiry_watch(db, d, today_l))}
         return render_template(
             'requests.html', nav_links=get_nav_links(),
             message=message, message_class=message_class,
             topup_lists=topup_lists, topup_dept=topup_dept, topup_standard=topup_standard,
+            watch=watch, watch_days=EXPIRY_WATCH_DAYS, draft=draft,
             dept_user=False, my_dept='', med_names=names,
             mine=[], pending=pending, history=history,
             departments=REQUEST_DEPARTMENTS, dept_filter=dept_filter,

@@ -5,6 +5,21 @@
 <style>
   .req-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
   #topup { scroll-margin-top: 150px; }   /* clear the sticky menu */
+  /* The count and the date have to stay usable on a phone; the table
+     scrolls sideways rather than squeezing the boxes to nothing. */
+  .req-topup input[name^=have__] { width: 4.5em; min-width: 4.5em; margin: 0; }
+  .req-topup input.exp { width: 10.5em; min-width: 10.5em; margin: 0; }
+  .req-topup td small { color: #856404; }
+  .req-import { background: #f1f6fc; border: 1px dashed #8fb3dc; border-radius: 8px;
+                padding: 10px 12px; margin: 0 0 12px; box-shadow: none; max-width: none; }
+  .req-import-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+  .req-import-row input[type=file] { flex: 1 1 14em; margin: 0; }
+  .req-import-row select, .req-import-row button { width: auto; margin: 0; }
+  /* The item name stays in view while the row scrolls to its date box. */
+  .req-topup td:first-child, .req-topup th:first-child {
+      position: sticky; left: 0; z-index: 1; min-width: 8em; max-width: 11em; }
+  .req-topup td:first-child { background: #fff; box-shadow: 2px 0 3px rgba(0,0,0,.08); }
+  .req-topup th:first-child { background: #0056b3; }
   .req-card { background: #fff; border-radius: 8px; padding: 12px 14px; margin: 0 0 16px;
               box-shadow: 0 2px 4px rgba(0,0,0,0.1); scroll-margin-top: 150px; }
   .req-card h3 { margin: 0 0 4px; font-size: 17px; }
@@ -118,22 +133,69 @@ document.addEventListener('DOMContentLoaded', function () {
 </table></div>
 {% endmacro %}
 
+{% macro expiry_watch(dept, rows) %}
+<h3 style="margin-bottom:4px;">Expiring Soon &mdash; {{ dept }}</h3>
+<p class="req-hint">From the last count: anything on the {{ dept|lower }} that
+expires within {{ watch_days }} days, soonest first.</p>
+<div class="table-scroll"><table>
+    <tr><th>Item</th><th>On it</th><th>Expires</th><th>Days left</th><th>Last checked</th></tr>
+    {% for w in rows %}
+    <tr class="{% if w.urgent %}expired{% else %}close-to-expire{% endif %}">
+        <td>{{ w.item }}</td><td>{{ w.have }}</td>
+        <td>{{ w.expiry.strftime('%d %b %Y') }}</td>
+        <td><strong>{% if w.expired %}expired {{ -w.days }} day{{ '' if w.days == -1 else 's' }} ago{% else %}{{ w.days }}{% endif %}</strong></td>
+        <td>{{ w.checked_at|local('%d %b %H:%M') }}{% if w.checked_by %} by {{ w.checked_by }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+</table></div>
+{% endmacro %}
+
+{% macro checklist_import(dept, fixed, draft) %}
+<form method="POST" action="{{ url_for('department_requests') }}" enctype="multipart/form-data"
+      class="req-import">
+    <input type="hidden" name="action" value="import_checklist">
+    {% if not fixed %}<input type="hidden" name="department" value="{{ dept }}">{% endif %}
+    <strong>Already filled in the checklist spreadsheet?</strong>
+    <span class="req-hint" style="margin:0;">Upload it and the boxes below are filled from
+    the month's QTY and EXPIRY DATE columns, for you to check before sending.</span>
+    <div class="req-import-row">
+        <input type="file" name="checklist" accept=".xlsx,.xlsm" required>
+        {% if draft and draft.sheets %}
+        <select name="sheet">
+            {% for t in draft.sheets %}<option value="{{ t }}" {% if t == draft.sheet %}selected{% endif %}>{{ t }}</option>{% endfor %}
+        </select>
+        {% endif %}
+        <button type="submit">Fill from Checklist</button>
+    </div>
+</form>
+{% if draft %}
+<p class="message partial" style="margin-top:8px;">Filled from &ldquo;{{ draft.sheet }}&rdquo;.
+Nothing has been sent yet &mdash; check the counts and dates, then press
+<strong>Send Top-up Request</strong>.
+{% if draft.notes %}<br><strong>Check:</strong> {{ draft.notes|join('; ') }}.{% endif %}
+{% if draft.unmatched %}<br>On the sheet but not on the list, left out: {{ draft.unmatched|join(', ') }}.{% endif %}</p>
+{% endif %}
+{% endmacro %}
+
 {% macro topup_form(standard, dept, fixed) %}
 <p class="req-hint">Enter what is there now for the items you have counted
-(0 if there are none). Leave the rest blank &mdash; they are left out this time.
-The request is worked out for you: whatever brings each counted item back up to
-what {{ dept }} should hold.</p>
+(0 if there are none), with the <strong>earliest expiry date</strong> among them.
+Leave the rest blank &mdash; they are left out this time. The request is worked
+out for you: whatever brings each counted item back up to what {{ dept }}
+should hold. The expiry shown is the one recorded last time &mdash; change it
+if the stock has changed. Anything already expired is asked for again in full.</p>
 <form method="POST" action="{{ url_for('department_requests') }}" class="dispense-form" id="topup-form">
     <input type="hidden" name="action" value="topup">
     {% if not fixed %}<input type="hidden" name="department" value="{{ dept }}">{% endif %}
     <div class="table-scroll"><table class="req-topup">
-        <thead><tr><th>Item</th><th>Should hold</th><th>There now</th><th>To request</th></tr></thead>
+        <thead><tr><th>Item</th><th>Should hold</th><th>There now</th><th>Earliest expiry</th><th>To request</th></tr></thead>
         <tbody>
         {% for r in standard %}
         <tr data-required="{{ r.required }}">
-            <td>{{ r.item }}{% if not r.linked and r.required %}<br><small style="color:#856404;">not on the pharmacy list &mdash; the pharmacy will be told it is short</small>{% endif %}</td>
+            <td>{{ r.item }}{% if not r.linked and r.required %}<br><small>not on pharmacy list</small>{% endif %}</td>
             <td>{{ r.required }}</td>
-            <td><input name="have__{{ r.id }}" type="number" min="0" step="1" inputmode="numeric"></td>
+            <td><input name="have__{{ r.id }}" type="number" min="0" step="1" inputmode="numeric" value="{{ r.prefill_have }}"></td>
+            <td>{% if r.expires %}<input name="expiry__{{ r.id }}" type="date" value="{{ r.last_expiry }}" class="exp">{% else %}<small>no expiry</small>{% endif %}</td>
             <td class="need">&ndash;</td>
         </tr>
         {% endfor %}
@@ -148,11 +210,16 @@ document.addEventListener('DOMContentLoaded', function () {
     var form = document.getElementById('topup-form');
     if (!form) return;
     function work() {
+        var today = new Date().toISOString().slice(0, 10);
         form.querySelectorAll('tbody tr').forEach(function (tr) {
             var box = tr.querySelector('input'), cell = tr.querySelector('.need');
+            var exp = tr.querySelector('input.exp');
             var req = parseInt(tr.dataset.required, 10) || 0;
+            if (exp) exp.required = box.value.trim() !== '' && parseInt(box.value, 10) > 0;
             if (box.value.trim() === '') { cell.textContent = '\u2013'; cell.style.fontWeight = ''; return; }
-            var need = Math.max(0, req - (parseInt(box.value, 10) || 0));
+            var have = parseInt(box.value, 10) || 0;
+            if (exp && exp.value && exp.value < today) have = 0;   // expired is not stock
+            var need = Math.max(0, req - have);
             cell.textContent = need;
             cell.style.fontWeight = need ? 'bold' : '';
             cell.style.color = need ? '#721c24' : '';
@@ -160,7 +227,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     form.addEventListener('input', work);
     form.addEventListener('submit', function (e) {
-        var counted = [].some.call(form.querySelectorAll('tbody input'), function (x) {
+        var counted = [].some.call(form.querySelectorAll('tbody input[name^=have__]'), function (x) {
             return x.value.trim() !== '';
         });
         if (!counted) {
@@ -178,7 +245,9 @@ document.addEventListener('DOMContentLoaded', function () {
 {% set standard = standard|default([]) %}
 {% if standard %}
 <h2 id="topup">Top Up to Standard &mdash; {{ my_dept }}</h2>
+{{ checklist_import(my_dept, true, draft) }}
 {{ topup_form(standard, my_dept, true) }}
+{% for d, rows in (watch|default({})).items() %}{{ expiry_watch(d, rows) }}{% endfor %}
 {% endif %}
 
 <h2>{% if standard %}Anything Else{% else %}New Request{% endif %} &mdash; {{ my_dept }}</h2>
@@ -217,6 +286,7 @@ need. The pharmacy sees it straight away, and this page shows what was given.</p
 (what the emergency trolley should hold) &rarr;</a></p>
 {% endif %}
 {% if topup_lists %}<p class="req-hint"><a href="#topup">Top up the {{ topup_dept or topup_lists[0] }} to standard &darr;</a></p>{% endif %}
+{% for d, rows in (watch|default({})).items() %}{{ expiry_watch(d, rows) }}{% endfor %}
 <h2>Waiting &mdash; {{ pending|length }}</h2>
 {% if not pending %}<p class="req-hint">Nothing waiting. New requests appear here,
 and the count shows beside Requests on every page.</p>{% endif %}
@@ -291,7 +361,8 @@ count what is there, and send. It goes into the queue above like any request.</p
         <div><label>&nbsp;</label><button type="submit">Open List</button></div>
     </div>
 </form>
-{% if topup_standard %}{{ topup_form(topup_standard, topup_dept, false) }}{% endif %}
+{% if topup_standard %}{{ checklist_import(topup_dept, false, draft) }}
+{{ topup_form(topup_standard, topup_dept, false) }}{% endif %}
 {% endif %}
 
 <details style="margin: 6px 0 18px;">

@@ -345,15 +345,22 @@ check('the estimate quantities are as seeded',
       by['Adrenalin 1 mg']['required'] == 10 and by['Ambubag']['required'] == 1
       and by['Warfarin']['required'] == 0)
 check('the trolley is told which lines are not on the pharmacy list',
-      'not on the pharmacy list' in page)
+      'not on pharmacy list' in page)
 
 
-def topup(have, note=''):
+FAR = (datetime.utcnow() + timedelta(days=700)).strftime('%Y-%m-%d')
+
+
+def topup(have, note='', expiry=None):
+    """Post a trolley count. Every counted line gets a far-off expiry unless
+    `expiry` names one; pass expiry={item: ''} to leave one out."""
+    expiry = expiry or {}
     data = {'action': 'topup', 'note': note}
     for r in std.find({'department': 'Emergency Trolley'}):
         v = have.get(r['item'], have.get('*'))
         if v is not None:
             data[f"have__{r['_id']}"] = str(v)
+            data[f"expiry__{r['_id']}"] = expiry.get(r['item'], FAR)
     return c.post('/requests', data=data, follow_redirects=True)
 
 
@@ -507,6 +514,7 @@ def staff_topup(dept, have):
         v = have.get(r2['item'], have.get('*'))
         if v is not None:
             data[f"have__{r2['_id']}"] = str(v)
+            data[f"expiry__{r2['_id']}"] = FAR
     return c.post('/requests', data=data)
 
 
@@ -533,6 +541,206 @@ check('a department with no list cannot be topped up',
 as_ward('Emergency Trolley', 'Sr. Kutoane')
 check('the trolley account still has its own form',
       'Top Up to Standard &mdash; Emergency Trolley' in c.get('/requests').data.decode())
+
+print('\n--- 14. Expiry dates with the count ---')
+# Asked for: "make the requester enter expiry dates with the quantities so I
+# can see when their items are about to expire".
+as_ward('Emergency Trolley', 'Sr. Kutoane')
+page = c.get('/requests').data.decode()
+check('the count form has an earliest-expiry box per line',
+      'Earliest expiry' in page and page.count('name="expiry__') == len(A.TROLLEY_STANDARD_SEED) - 1)
+check('the Ambubag needs none', 'no expiry' in page)
+n = reqs.count_documents({})
+r = topup({'Adrenalin 1 mg': 3}, expiry={'Adrenalin 1 mg': ''})
+check('a line with stock and no expiry is refused',
+      reqs.count_documents({}) == n and 'enter the earliest expiry date' in banner(r.data.decode()))
+r = topup({'Adrenalin 1 mg': 3}, expiry={'Adrenalin 1 mg': '2062-01-01'})
+check('a date in the wrong decade is refused', 'looks like the wrong year' in banner(r.data.decode()))
+r = topup({'Adrenalin 1 mg': 0}, expiry={'Adrenalin 1 mg': ''})
+check('a line with none there needs no expiry', reqs.count_documents({}) == n + 1)
+c.post('/requests', data={'action': 'cancel', 'request_id': str(last_req()['_id'])})
+r = topup({'Ambubag': 1}, expiry={'Ambubag': ''})
+check('nor does an item without an expiry', 'nothing to top up' in banner(r.data.decode()))
+
+soon = (A.local_now().date() + timedelta(days=26)).strftime('%Y-%m-%d')
+later = (A.local_now().date() + timedelta(days=80)).strftime('%Y-%m-%d')
+gone = (A.local_now().date() - timedelta(days=3)).strftime('%Y-%m-%d')
+n = reqs.count_documents({})
+r = topup({'Adrenalin 1 mg': 6, 'Atropine': 5, 'Hydrocortisone 100 mg': 2, 'Water for injection': 10},
+          expiry={'Adrenalin 1 mg': soon, 'Atropine': later, 'Hydrocortisone 100 mg': gone})
+d = last_req()
+got = {l['med_name']: l['requested'] for l in d['lines']}
+check('the expiry dates are kept with the request',
+      d['topup_expiry']['Adrenalin 1 mg'] == soon and d['topup_expiry']['Atropine'] == later)
+check('expired stock is not counted as there: hydrocortisone is asked for in full',
+      got.get('Hydrocortisone 100mg inj') == 5, str(got))
+check('stock in date is counted as usual: adrenalin 6 of 6', 'Adrenaline 1mg/ml inj' not in got, str(got))
+check('the request notes what has expired',
+      'Expired on the trolley' in d['note'] and 'Hydrocortisone 100 mg' in d['note'], d['note'])
+check('and the trolley is told to take it off', 'take off the trolley' in banner(r.data.decode()))
+row = std.find_one({'department': 'Emergency Trolley', 'item': 'Adrenalin 1 mg'})
+check('the list keeps the last count, expiry and who checked',
+      row['last_have'] == 6 and row['last_expiry'] == soon and row['last_checked_by'] == 'Sr. Kutoane')
+page = c.get('/requests').data.decode()
+check('next time, the form shows the expiry recorded last time',
+      f'name="expiry__{row["_id"]}" type="date" value="{soon}"' in page)
+
+as_user()
+page = c.get('/requests').data.decode()
+watch = page.split('Expiring Soon')[1].split('</table>')[0] if 'Expiring Soon' in page else ''
+check('the pharmacy sees an Expiring Soon list for the trolley', 'Emergency Trolley' in watch)
+check('it holds what expires within 90 days',
+      'Adrenalin 1 mg' in watch and 'Atropine' in watch and 'Hydrocortisone 100 mg' in watch)
+check('and not what is further off', 'Water for injection' not in watch)
+check('soonest first: the expired one, then adrenalin, then atropine',
+      watch.index('Hydrocortisone') < watch.index('Adrenalin') < watch.index('Atropine'))
+check('it says how many days are left', '>26<' in watch and 'expired 3 days ago' in watch)
+check('anything within 30 days is red', watch.count('class="expired"') == 2, str(watch.count('class="expired"')))
+check('the trolley sees the same list', 'Expiring Soon' in (as_ward('Emergency Trolley', 'Sr. Kutoane')
+      or c.get('/requests').data.decode()))
+r = topup({'Water for injection': 10})
+check('a check with nothing short is still recorded',
+      std.find_one({'item': 'Water for injection', 'department': 'Emergency Trolley'})['last_checked_by']
+      == 'Sr. Kutoane' and 'recorded' in banner(r.data.decode()))
+
+print('\n--- 15. Filling the count from the trolley checklist spreadsheet ---')
+# Asked for: "generate a request from the November data they have already
+# sent so we don't make them repeat that task". Built here rather than taken
+# from the real file, which names staff and does not belong in a public repo;
+# laid out the same way, with the same slips in it.
+import io, openpyxl
+from datetime import datetime as _dt
+
+
+def checklist(month_sheets):
+    wb = openpyxl.Workbook()
+    wb.active.title = 'EMERGENCY DRUGS &EQUIPMENT'
+    for title, rows in month_sheets.items():
+        ws = wb.create_sheet(title)
+        ws.append(['EMERGENCY DRUGS', 'QTY', 'EXPIRY DATE'] + list(range(1, 32)) + ['DATE', 'SIGNATURE'])
+        for r in rows:
+            ws.append(list(r) + [r[1]] * 4)
+    wb.create_sheet('November')            # the BP machine sheet, not drugs
+    wb['November'].append(['DATE', 'BP CHECK'])
+    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
+nov = [('ADRENALIN 1mg', 1, _dt(2026, 11, 30)), ('ATROPINE', 3, _dt(2027, 4, 30)),
+       ('AMIODARONE', 0, None), ('ATOMIDATE', 0, None),
+       ('DEXAMETHASONE', 4, '31/06/2027'), ('FUROSEMIDE 10mg', None, None),
+       ('HYDROCORTISONE 100mg', 1, _dt(2027, 12, 30)), ('LIGNOCAINE  400mg', 2, _dt(2027, 11, 30)),
+       ('METHLPREDNISOLONE 40 mg', 1, _dt(2027, 5, 31)), ('NA BICARBONATE', 0, None),
+       ('PAFALGAN', 0, None), ('WATER FOR INJECTION', 0, None), ('AMBUBAG', 1, None),
+       ('GLUCAGON 1mg', 1, _dt(2027, 1, 1))]
+octo = [('ADRENALIN 1mg', 3, _dt(2026, 11, 30))]
+data = checklist({'OCTOBER 26': octo, 'NOVEMBER 26': nov})
+std.delete_many({'department': 'Emergency Trolley'})
+as_ward('Emergency Trolley', 'Sr. Kutoane')
+page = c.get('/requests').data.decode()
+n_before = reqs.count_documents({})
+check('the count form offers to fill from the checklist', 'Fill from Checklist' in page)
+r = c.post('/requests', data={'action': 'import_checklist',
+                              'checklist': (io.BytesIO(data), 'trolley.xlsx')},
+           content_type='multipart/form-data', follow_redirects=True)
+import html as _html
+html = r.data.decode()
+msg = _html.unescape(banner(html))
+ids = {x['item']: str(x['_id']) for x in std.find({'department': 'Emergency Trolley'})}
+
+
+def box(item):
+    m2 = _re.search(r'name="have__' + ids[item] + r'"[^>]*value="([^"]*)"', html)
+    return m2.group(1) if m2 else None
+
+
+def exp(item):
+    m2 = _re.search(r'name="expiry__' + ids[item] + r'" type="date" value="([^"]*)"', html)
+    return m2.group(1) if m2 else None
+
+
+check("it reads this month's drug sheet, not the BP sheet or October",
+      'Filled from "NOVEMBER 26"' in msg, msg[:120])
+check('the counts go into the boxes', box('Adrenalin 1 mg') == '1' and box('Atropine') == '3'
+      and box('Amiodarone') == '0' and box('Hydrocortisone 100 mg') == '1')
+check('with their expiry dates', exp('Adrenalin 1 mg') == '2026-11-30' and exp('Atropine') == '2027-04-30')
+check("the sheet's own spellings are recognised",
+      box('Etomidate') == '0' and box('Methylprednisolone 40 mg') == '1'
+      and box('Sodium bicarbonate') == '0' and box('Paracetamol IV (Pafalgan)') == '0'
+      and box('Lignocaine 400 mg') == '2')
+check('an item with no quantity on the sheet is left blank', box('Furosemide 10 mg') == '')
+check('items not on the sheet are left blank', box('Naloxone') == '')
+check('a date that does not exist is left for you, and you are told',
+      exp('Dexamethasone') == '' and '"31/06/2027" is not a date' in msg, msg)
+check('an item on the sheet but not on the list is named', 'GLUCAGON 1mg' in msg)
+check('nothing is sent by filling', reqs.count_documents({}) == n_before
+      and 'Nothing has been sent' in msg)
+check('the page says it was filled from the sheet', 'Filled from &ldquo;NOVEMBER 26&rdquo;' in html)
+check('and repeats what to check beside the form',
+      'Dexamethasone: expiry' in html.split('id="topup-form"')[0].split('Filled from &ldquo;')[-1])
+check('and offers the other months', '<option value="OCTOBER 26"' in html)
+r = c.post('/requests', data={'action': 'import_checklist', 'sheet': 'OCTOBER 26',
+                              'checklist': (io.BytesIO(data), 'trolley.xlsx')},
+           content_type='multipart/form-data', follow_redirects=True)
+html = r.data.decode()
+check('another month can be chosen', box('Adrenalin 1 mg') == '3' and box('Atropine') == '')
+
+# send November as filled, with the dexamethasone date put right
+c.post('/requests', data={'action': 'import_checklist',
+                          'checklist': (io.BytesIO(data), 'trolley.xlsx')},
+       content_type='multipart/form-data')
+html = c.get('/requests').data.decode()
+form = {'action': 'topup', 'note': ''}
+for m2 in _re.finditer(r'name="(have__\w+)"[^>]*value="([^"]*)"', html):
+    form[m2.group(1)] = m2.group(2)
+for m2 in _re.finditer(r'name="(expiry__\w+)" type="date" value="([^"]*)"', html):
+    form[m2.group(1)] = m2.group(2)
+r = c.post('/requests', data=form, follow_redirects=True)
+check('sent with one date missing, it is refused for that line',
+      'Dexamethasone: enter the earliest expiry date' in banner(r.data.decode()))
+form[f"expiry__{ids['Dexamethasone']}"] = '2027-06-30'
+n = reqs.count_documents({})
+r = c.post('/requests', data=form, follow_redirects=True)
+d = last_req()
+check('with it put right, the November top-up is sent', reqs.count_documents({}) == n + 1
+      and d.get('kind') == 'topup', banner(r.data.decode()))
+got = {l['standard_item']: l['requested'] for l in d['lines']}
+check('asking for what November was short of',
+      got.get('Adrenalin 1 mg') == 9 and got.get('Atropine') == 2 and got.get('Hydrocortisone 100 mg') == 4
+      and got.get('Lignocaine 400 mg') == 1 and got.get('Water for injection') == 10, str(got))
+check('once sent, the filled values are cleared',
+      db['topup_drafts'].count_documents({'department': 'Emergency Trolley'}) == 0)
+r = c.post('/requests', data={'action': 'import_checklist',
+                              'checklist': (io.BytesIO(b'not excel'), 'notes.txt')},
+           content_type='multipart/form-data', follow_redirects=True)
+check('a file that is not a workbook is turned away', 'not an Excel workbook' in banner(r.data.decode()))
+r = c.post('/requests', data={'action': 'import_checklist',
+                              'checklist': (io.BytesIO(b'PK\x03\x04 broken'), 'bad.xlsx')},
+           content_type='multipart/form-data', follow_redirects=True)
+check('a broken workbook is turned away politely', 'could not be read' in banner(r.data.decode()))
+as_user()
+r = c.post('/requests', data={'action': 'import_checklist', 'department': 'Emergency Trolley',
+                              'checklist': (io.BytesIO(data), 'trolley.xlsx')},
+           content_type='multipart/form-data', follow_redirects=True)
+html = r.data.decode()
+check('staff can fill the trolley form from the checklist too',
+      'Filled from &ldquo;NOVEMBER 26&rdquo;' in html and box('Adrenalin 1 mg') == '1')
+check("and it is the staff member's own draft, not the trolley's",
+      db['topup_drafts'].count_documents({'department': 'Emergency Trolley'}) == 1)
+
+print('\n--- 16. A month laid out one column in ---')
+wb = openpyxl.Workbook(); ws = wb.active; ws.title = 'APRIL 26'
+ws.append([None, 'EMERGENCY DRUGS', 'QTY', 'EXPIRY DATE'])
+ws.append([None, 'ADRENALIN 1mg', 5, _dt(2026, 7, 31)])
+ws.append([None, 'ATROPINE', 2, '30/04/2027'])
+buf = io.BytesIO(); wb.save(buf)
+as_ward('Emergency Trolley', 'Sr. Kutoane')
+r = c.post('/requests', data={'action': 'import_checklist',
+                              'checklist': (io.BytesIO(buf.getvalue()), 'april.xlsx')},
+           content_type='multipart/form-data', follow_redirects=True)
+html = r.data.decode()
+check('a sheet whose heading starts in column B is still read',
+      box('Adrenalin 1 mg') == '5' and box('Atropine') == '2' and exp('Atropine') == '2027-04-30',
+      _html.unescape(banner(html))[:200])
 
 print(f"\n=========  {len(PASS)} passed, {len(FAIL)} failed  =========")
 if FAIL:
