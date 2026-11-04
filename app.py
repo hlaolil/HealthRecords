@@ -5942,6 +5942,12 @@ def department_requests() -> ResponseReturnValue:
             message=message, message_class=message_class,
             topup_lists=topup_lists, topup_dept=topup_dept, topup_standard=topup_standard,
             watch=watch, watch_days=EXPIRY_WATCH_DAYS, draft=draft,
+            # Open when someone asked for it: a department chosen, a checklist
+            # just read, or a count sent back to be put right.
+            topup_open=bool(request.args.get('topup') or draft),
+            stock={m['name']: _num(m.get('balance', 0) or 0)
+                   for m in medications.find({'name': {'$in': names}},
+                                             {'_id': 0, 'name': 1, 'balance': 1})},
             dept_user=False, my_dept='', med_names=names,
             mine=[], pending=pending, history=history,
             departments=REQUEST_DEPARTMENTS, dept_filter=dept_filter,

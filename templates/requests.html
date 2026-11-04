@@ -5,6 +5,16 @@
 <style>
   .req-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
   #topup { scroll-margin-top: 150px; }   /* clear the sticky menu */
+  .req-fold { margin: 6px 0 18px; }
+  .req-fold > summary { cursor: pointer; list-style: none; display: flex; align-items: baseline;
+                        gap: 12px; flex-wrap: wrap; }
+  .req-fold > summary::-webkit-details-marker { display: none; }
+  .req-fold > summary h2 { margin: 12px 0 6px; }
+  .req-fold > summary h2::before { content: '\25B6\00A0'; font-size: 0.7em; color: #0056b3; }
+  .req-fold[open] > summary h2::before { content: '\25BC\00A0'; }
+  .req-fold > summary .req-fold-hint::after { content: 'tap to open'; font-size: 13px; color: #555; }
+  .req-fold[open] > summary .req-fold-hint::after { content: 'tap to close'; }
+  .req-onhand { white-space: nowrap; }
   /* The count and the date have to stay usable on a phone; the table
      scrolls sideways rather than squeezing the boxes to nothing. */
   .req-topup input[name^=have__] { width: 4.5em; min-width: 4.5em; margin: 0; }
@@ -56,7 +66,7 @@
 
 <datalist id="req_meds">{% for n in med_names %}<option value="{{ n }}">{% endfor %}</datalist>
 
-{% macro request_form(fixed_dept) %}
+{% macro request_form(fixed_dept, stock=None) %}
 <form method="POST" action="{{ url_for('department_requests') }}" class="dispense-form" id="req-form">
     <input type="hidden" name="action" value="post">
     {% if not fixed_dept %}
@@ -71,12 +81,13 @@
     </div>
     {% endif %}
     <div class="table-scroll"><table class="req-lines">
-        <thead><tr><th>Item (choose from the list)</th><th>Quantity</th></tr></thead>
+        <thead><tr><th>Item (choose from the list)</th><th>Quantity</th>{% if stock is not none %}<th>On hand</th>{% endif %}</tr></thead>
         <tbody id="req-rows">
         {% for i in range(5) %}
             <tr>
                 <td><input name="med_name" list="req_meds" autocomplete="off"></td>
                 <td><input name="quantity" type="number" min="1" step="1"></td>
+                {% if stock is not none %}<td class="req-onhand">&ndash;</td>{% endif %}
             </tr>
         {% endfor %}
         </tbody>
@@ -93,10 +104,28 @@
 document.addEventListener('DOMContentLoaded', function () {
     var rows = document.getElementById('req-rows'), add = document.getElementById('req-add');
     if (!rows || !add) return;
+    {% if stock is not none %}
+    // The pharmacy's balance beside each item as it is typed, so the request
+    // can be pitched at what can actually be given.
+    var STOCK = {{ stock|tojson }};
+    function showStock(tr) {
+        var cell = tr.querySelector('.req-onhand');
+        if (!cell) return;
+        var n = tr.querySelector('[name=med_name]').value.trim();
+        var q = parseInt(tr.querySelector('[name=quantity]').value, 10) || 0;
+        if (!n) { cell.textContent = '\u2013'; cell.className = 'req-onhand'; return; }
+        if (!(n in STOCK)) { cell.textContent = 'not on list'; cell.className = 'req-onhand req-short'; return; }
+        cell.textContent = STOCK[n];
+        cell.className = 'req-onhand' + (STOCK[n] < q || STOCK[n] <= 0 ? ' req-short' : '');
+    }
+    rows.addEventListener('input', function (e) { showStock(e.target.closest('tr')); });
+    rows.addEventListener('change', function (e) { showStock(e.target.closest('tr')); });
+    {% endif %}
     add.addEventListener('click', function () {
         if (rows.children.length >= {{ max_lines }}) { add.disabled = true; return; }
         var r = rows.children[0].cloneNode(true);
         r.querySelectorAll('input').forEach(function (x) { x.value = ''; });
+        r.querySelectorAll('.req-onhand').forEach(function (x) { x.textContent = '\u2013'; x.className = 'req-onhand'; });
         rows.appendChild(r);
         r.querySelector('input').focus();
         if (rows.children.length >= {{ max_lines }}) add.disabled = true;
@@ -347,7 +376,9 @@ and the count shows beside Requests on every page.</p>{% endif %}
 {% endfor %}
 
 {% if topup_lists %}
-<h2 id="topup">Top Up to Standard{% if topup_dept %} &mdash; {{ topup_dept }}{% endif %}</h2>
+<details id="topup" class="req-fold" {% if topup_open %}open{% endif %}>
+<summary><h2>Top Up to Standard{% if topup_dept %} &mdash; {{ topup_dept }}{% endif %}</h2>
+    <span class="req-fold-hint"></span></summary>
 <p class="req-hint">For a check done under your own login: choose the department,
 count what is there, and send. It goes into the queue above like any request.</p>
 <form method="GET" action="{{ url_for('department_requests') }}" class="filter-form">
@@ -363,11 +394,24 @@ count what is there, and send. It goes into the queue above like any request.</p
 </form>
 {% if topup_standard %}{{ checklist_import(topup_dept, false, draft) }}
 {{ topup_form(topup_standard, topup_dept, false) }}{% endif %}
+<p style="text-align:right;margin-top:6px;"><button type="button" onclick="this.closest('details').open = false; this.closest('details').scrollIntoView();">Close List</button></p>
+</details>
+<script>
+// The link at the top of the page opens the list as well as jumping to it.
+(function () {
+    var d = document.getElementById('topup');
+    function openIfAsked() { if (location.hash === '#topup') d.open = true; }
+    window.addEventListener('hashchange', openIfAsked); openIfAsked();
+    document.querySelectorAll('a[href="#topup"]').forEach(function (a) {
+        a.addEventListener('click', function () { d.open = true; });
+    });
+})();
+</script>
 {% endif %}
 
 <details style="margin: 6px 0 18px;">
     <summary style="cursor:pointer;font-weight:bold;">Post a request for a department (phoned or brought in)</summary>
-    {{ request_form(false) }}
+    {{ request_form(false, stock if stock is defined else none) }}
 </details>
 
 <h2>Dealt With</h2>

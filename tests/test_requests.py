@@ -744,6 +744,35 @@ check('a sheet whose heading starts in column B is still read',
       box('Adrenalin 1 mg') == '5' and box('Atropine') == '2' and exp('Atropine') == '2027-04-30',
       _html.unescape(banner(html))[:200])
 
+print('\n--- 17. Stock beside the form for a department, and a list that folds ---')
+# Asked for: "the Post a request for a department form, so you can see your
+# stock while typing", and "we can open a list, can we close it also?"
+as_user()
+db['topup_drafts'].delete_many({})
+page = c.get('/requests').data.decode()
+form_html = page.split('Post a request for a department')[1]
+check('the staff request form has an On hand column', '<th>On hand</th>' in form_html
+      and form_html.count('class="req-onhand"') == 5)
+stock_js = _re.search(r'var STOCK = (\{.*?\});', page)
+import json as _json
+st = _json.loads(stock_js.group(1)) if stock_js else {}
+check('with every item and its balance', st.get('Gauze swabs') == bal('Gauze swabs')
+      and st.get('Paracetamol tabs, 500 mg') == bal('Paracetamol tabs, 500 mg'), str(list(st.items())[:3]))
+as_ward('Lab', 'Lab Tech')
+dpage = c.get('/requests').data.decode()
+check('a department form shows no stock', 'var STOCK' not in dpage and 'req-onhand' not in dpage.split('<form')[1])
+as_user()
+check('the trolley list is folded away by default',
+      '<details id="topup" class="req-fold" >' in page)
+check('it can be closed again from the bottom', 'Close List' in page)
+page = c.get('/requests?topup=Emergency+Trolley').data.decode()
+check('choosing a department opens it', '<details id="topup" class="req-fold" open>' in page)
+c.post('/requests', data={'action': 'import_checklist', 'department': 'Emergency Trolley',
+                          'checklist': (io.BytesIO(data), 'trolley.xlsx')},
+       content_type='multipart/form-data')
+page = c.get('/requests').data.decode()
+check('a checklist just read keeps it open', '<details id="topup" class="req-fold" open>' in page)
+
 print(f"\n=========  {len(PASS)} passed, {len(FAIL)} failed  =========")
 if FAIL:
     for f in FAIL:
