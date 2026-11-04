@@ -457,7 +457,7 @@ more often something runs out, the less it appears to be used.</p>
             <td>{{ u.med_name }}</td><td>{{ u.requested }}</td><td>{{ u.given }}</td>
             <td><strong>{{ u.shortfall }}</strong></td>
             <td>R{{ "%.2f"|format(u.shortfall_value) }}</td>
-            <td>{{ u.patient }}</td><td>{{ u.prescriber or '-' }}</td><td>{{ u.user }}</td>
+            <td>{{ u.patient or ((u.department ~ ' (request)') if u.department else '-') }}</td><td>{{ u.prescriber or '-' }}</td><td>{{ u.user }}</td>
         </tr>
     {% else %}
         <tr><td colspan="9">Every request in this period was filled in full.</td></tr>

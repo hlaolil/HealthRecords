@@ -1,0 +1,309 @@
+{% extends "base.html" %}
+{% block title %}Requests &middot; NMC Pharmacy{% endblock %}
+{% block heading %}Department Requests{% endblock %}
+{% block page_styles %}
+<style>
+  .req-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
+  .req-card { background: #fff; border-radius: 8px; padding: 12px 14px; margin: 0 0 16px;
+              box-shadow: 0 2px 4px rgba(0,0,0,0.1); scroll-margin-top: 150px; }
+  .req-card h3 { margin: 0 0 4px; font-size: 17px; }
+  .req-meta { font-size: 13px; color: #555; margin: 0 0 8px; }
+  .req-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px;
+               font-weight: bold; background: #e9ecef; color: #333; white-space: nowrap; }
+  .req-badge.Pending, .req-badge.Serving { background: #fff3cd; color: #856404; }
+  .req-badge.Served { background: #d4edda; color: #155724; }
+  .req-badge.Part.served { background: #ffe5b4; color: #7a4b00; }
+  .req-badge.Not.supplied, .req-badge.Declined { background: #f8d7da; color: #721c24; }
+  .req-badge.Cancelled { background: #e9ecef; color: #666; }
+  .req-short { color: #721c24; font-weight: bold; }
+  .req-none td.onhand { color: #721c24; font-weight: bold; }
+  /* the page's forms are full-width cards; inside a request card they are not */
+  .req-card form { margin: 0; padding: 0; background: none; box-shadow: none; max-width: none; }
+  .req-card table { margin: 6px 0 10px; }
+  .req-card input[type=number] { width: 7em; margin: 0; }
+  .req-serve { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-end; }
+  .req-serve > div { flex: 1 1 14em; }
+  .req-serve label { display: block; font-size: 13px; margin-bottom: 2px; }
+  .req-serve input { width: 100%; margin: 0; }
+  .req-serve button { margin: 0; }
+  .req-decline { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .req-decline input { flex: 1 1 14em; margin: 0; }
+  .req-decline button { background: #dc3545 !important; margin: 0; }
+  .req-lines input[name=med_name] { width: 100%; min-width: 12em; }
+  .req-lines input[name=quantity] { width: 7em; }
+  .req-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+</style>
+{% endblock %}
+{% block content %}{% if message %}
+    <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+
+<datalist id="req_meds">{% for n in med_names %}<option value="{{ n }}">{% endfor %}</datalist>
+
+{% macro request_form(fixed_dept) %}
+<form method="POST" action="{{ url_for('department_requests') }}" class="dispense-form" id="req-form">
+    <input type="hidden" name="action" value="post">
+    {% if not fixed_dept %}
+    <div class="common-section">
+        <div>
+            <label>Department:</label>
+            <select name="department" required>
+                <option value="">-- Select Department --</option>
+                {% for d in departments %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
+            </select>
+        </div>
+    </div>
+    {% endif %}
+    <div class="table-scroll"><table class="req-lines">
+        <thead><tr><th>Item (choose from the list)</th><th>Quantity</th></tr></thead>
+        <tbody id="req-rows">
+        {% for i in range(5) %}
+            <tr>
+                <td><input name="med_name" list="req_meds" autocomplete="off"></td>
+                <td><input name="quantity" type="number" min="1" step="1"></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    <div class="req-actions">
+        <button type="button" id="req-add">+ Another item</button>
+        <span class="req-hint" style="margin:0;">Up to {{ max_lines }} items on one request.</span>
+    </div>
+    <label style="margin-top:10px;">Note for the pharmacy (optional):</label>
+    <input name="note" type="text" maxlength="200" placeholder="e.g. for the weekend, urgent, patient on the ward">
+    <div class="form-buttons"><input type="submit" value="Send Request"></div>
+</form>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    var rows = document.getElementById('req-rows'), add = document.getElementById('req-add');
+    if (!rows || !add) return;
+    add.addEventListener('click', function () {
+        if (rows.children.length >= {{ max_lines }}) { add.disabled = true; return; }
+        var r = rows.children[0].cloneNode(true);
+        r.querySelectorAll('input').forEach(function (x) { x.value = ''; });
+        rows.appendChild(r);
+        r.querySelector('input').focus();
+        if (rows.children.length >= {{ max_lines }}) add.disabled = true;
+    });
+    // A quantity with no item, or an item with no quantity, is almost always
+    // a slip. Say so here rather than after the page comes back.
+    document.getElementById('req-form').addEventListener('submit', function (e) {
+        var any = false, bad = [];
+        rows.querySelectorAll('tr').forEach(function (tr) {
+            var n = tr.querySelector('[name=med_name]').value.trim();
+            var q = tr.querySelector('[name=quantity]').value.trim();
+            if (n || q) any = true;
+            if (n && !q) bad.push(n + ' has no quantity');
+            if (q && !n) bad.push('a quantity of ' + q + ' has no item');
+        });
+        if (!any) bad.push('add at least one item');
+        if (bad.length) { e.preventDefault(); alert('Please check: ' + bad.join('; ') + '.'); }
+    });
+});
+</script>
+{% endmacro %}
+
+{% macro lines_table(r) %}
+<div class="table-scroll"><table>
+    <tr><th>Item</th><th>Asked</th><th>Given</th><th>Short</th></tr>
+    {% for l in r.lines %}
+    <tr>
+        <td>{{ l.med_name }}</td>
+        <td>{{ l.requested }}</td>
+        <td>{{ l.given if l.given is not none else '&ndash;'|safe }}</td>
+        <td>{% if l.given is none %}&ndash;{% elif l.given < l.requested %}<span class="req-short">{{ l.requested - l.given }}</span>{% else %}0{% endif %}</td>
+    </tr>
+    {% endfor %}
+</table></div>
+{% endmacro %}
+
+{% if dept_user %}
+{# ================= what a department sees ================= #}
+{% set standard = standard|default([]) %}
+{% if standard %}
+<h2 id="topup">Top Up to Standard &mdash; {{ my_dept }}</h2>
+<p class="req-hint">Count what is there now and enter it for every line (0 if
+there are none). The request is worked out for you: whatever brings each item
+back up to what the {{ my_dept|lower }} should hold.</p>
+<form method="POST" action="{{ url_for('department_requests') }}" class="dispense-form" id="topup-form">
+    <input type="hidden" name="action" value="topup">
+    <div class="table-scroll"><table class="req-topup">
+        <thead><tr><th>Item</th><th>Should hold</th><th>There now</th><th>To request</th></tr></thead>
+        <tbody>
+        {% for r in standard %}
+        <tr data-required="{{ r.required }}">
+            <td>{{ r.item }}{% if not r.linked and r.required %}<br><small style="color:#856404;">not on the pharmacy list &mdash; the pharmacy will be told it is short</small>{% endif %}</td>
+            <td>{{ r.required }}</td>
+            <td><input name="have__{{ r.id }}" type="number" min="0" step="1" inputmode="numeric"></td>
+            <td class="need">&ndash;</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    <label style="margin-top:10px;">Note for the pharmacy (optional):</label>
+    <input name="note" type="text" maxlength="200" placeholder="e.g. adrenalin used on a resuscitation last night">
+    <div class="form-buttons"><input type="submit" value="Send Top-up Request"></div>
+</form>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    var form = document.getElementById('topup-form');
+    if (!form) return;
+    function work() {
+        form.querySelectorAll('tbody tr').forEach(function (tr) {
+            var box = tr.querySelector('input'), cell = tr.querySelector('.need');
+            var req = parseInt(tr.dataset.required, 10) || 0;
+            if (box.value.trim() === '') { cell.textContent = '\u2013'; cell.style.fontWeight = ''; return; }
+            var need = Math.max(0, req - (parseInt(box.value, 10) || 0));
+            cell.textContent = need;
+            cell.style.fontWeight = need ? 'bold' : '';
+            cell.style.color = need ? '#721c24' : '';
+        });
+    }
+    form.addEventListener('input', work);
+    form.addEventListener('submit', function (e) {
+        var empty = [].filter.call(form.querySelectorAll('tbody tr'), function (tr) {
+            return tr.dataset.required !== '0' && tr.querySelector('input').value.trim() === '';
+        });
+        if (empty.length) {
+            e.preventDefault();
+            empty[0].querySelector('input').focus();
+            alert(empty.length + ' line(s) not counted yet. Enter 0 where there are none.');
+        }
+    });
+    work();
+});
+</script>
+{% endif %}
+
+<h2>{% if standard %}Anything Else{% else %}New Request{% endif %} &mdash; {{ my_dept }}</h2>
+<p class="req-hint">Choose each item from the suggestions and enter how many you
+need. The pharmacy sees it straight away, and this page shows what was given.</p>
+{{ request_form(true) }}
+
+<h2>Your Requests</h2>
+{% for r in mine %}
+<div class="req-card" id="{{ r.ref }}">
+    <h3>{{ r.ref }} <span class="req-badge {{ r.status }}">{{ r.status }}</span></h3>
+    <p class="req-meta">Sent {{ r.requested_at|local }}
+        by {{ r.requested_by }}{% if r.note %} &middot; &ldquo;{{ r.note }}&rdquo;{% endif %}
+        {% if r.status in ['Served', 'Part served', 'Not supplied'] %}<br>Served by {{ r.served_by }}{% if r.received_by %}, collected by {{ r.received_by }}{% endif %}{% endif %}
+        {% if r.status == 'Declined' %}<br>Declined by {{ r.served_by }}: {{ r.reason }}{% endif %}
+        {% if r.status in ['Served', 'Part served', 'Not supplied'] and r.reason %}<br>Pharmacy note: {{ r.reason }}{% endif %}
+    </p>
+    {{ lines_table(r) }}
+    {% if r.status == 'Pending' %}
+    <form method="POST" action="{{ url_for('department_requests') }}"
+          onsubmit="return confirm('Cancel this request?');" style="margin-top:4px;">
+        <input type="hidden" name="action" value="cancel">
+        <input type="hidden" name="request_id" value="{{ r.id }}">
+        <button type="submit">Cancel Request</button>
+    </form>
+    {% endif %}
+</div>
+{% else %}
+<p class="req-hint">No requests yet.</p>
+{% endfor %}
+
+{% else %}
+{# ================= what the pharmacy sees ================= #}
+{% if session.user.role == 'admin' %}
+<p class="req-hint" style="text-align:right;"><a href="{{ url_for('standard_lists') }}">Standard lists
+(what the emergency trolley should hold) &rarr;</a></p>
+{% endif %}
+<h2>Waiting &mdash; {{ pending|length }}</h2>
+{% if not pending %}<p class="req-hint">Nothing waiting. New requests appear here,
+and the count shows beside Requests on every page.</p>{% endif %}
+{% for r in pending %}
+<div class="req-card" id="{{ r.ref }}">
+    <h3>{{ r.department }} &mdash; {{ r.ref }} <span class="req-badge {{ r.status }}">{{ r.status }}</span></h3>
+    <p class="req-meta">Asked by {{ r.requested_by }},
+        {{ r.requested_at|local }}
+        &middot; waiting {{ waited(r.waiting) }}
+        {% if r.note %}<br>Note: &ldquo;{{ r.note }}&rdquo;{% endif %}</p>
+    {% if r.status == 'Serving' %}
+    <p class="message partial">This request was being served by {{ r.served_by }} and did
+    not finish. Check Internal Issues for {{ r.ref }} before doing anything with it.</p>
+    {% else %}
+    <form method="POST" action="{{ url_for('department_requests') }}"
+          onsubmit="return confirm({{ ('Issue this to ' ~ r.department ~ '? Stock comes off the shelf now.')|tojson }});">
+        <input type="hidden" name="action" value="serve">
+        <input type="hidden" name="request_id" value="{{ r.id }}">
+        <div class="table-scroll"><table>
+            <tr><th>Item</th><th>Asked</th><th>On hand</th><th>Give</th></tr>
+            {% for l in r.lines %}
+            <tr class="{% if l.on_hand < l.requested %}req-none{% endif %}">
+                <td>{{ l.med_name }}</td>
+                <td>{{ l.requested }}</td>
+                <td class="onhand">{{ l.on_hand }}</td>
+                <td><input type="number" name="give__{{ l.i }}" value="{{ l.suggest }}"
+                           min="0" max="{{ [l.requested, l.on_hand]|min }}" step="1"></td>
+            </tr>
+            {% endfor %}
+        </table></div>
+        <p class="req-hint">Give is filled in with what you can supply. Anything short
+        because the shelf is empty is recorded as unmet demand, so the next order
+        covers it. Giving less than you have is your call and is not counted as unmet.</p>
+        <div class="req-serve">
+            <div>
+                <label>Collected by (from {{ r.department }}):</label>
+                <input name="received_by" type="text" list="req_receivers_{{ loop.index }}"
+                       value="{{ r.requested_by }}" required>
+                <datalist id="req_receivers_{{ loop.index }}">
+                    {% for p in past_receivers %}<option value="{{ p }}">{% endfor %}
+                </datalist>
+            </div>
+            <div>
+                <label>Note to the department (optional):</label>
+                <input name="serve_note" type="text" maxlength="200">
+            </div>
+            <div style="flex:0 0 auto;"><button type="submit">Serve</button></div>
+        </div>
+    </form>
+    <form method="POST" action="{{ url_for('department_requests') }}" class="req-decline">
+        <input type="hidden" name="action" value="decline">
+        <input type="hidden" name="request_id" value="{{ r.id }}">
+        <input name="reason" type="text" maxlength="200" placeholder="Reason, if declining the whole request" required>
+        <button type="submit">Decline</button>
+    </form>
+    {% endif %}
+</div>
+{% endfor %}
+
+<details style="margin: 6px 0 18px;">
+    <summary style="cursor:pointer;font-weight:bold;">Post a request for a department (phoned or brought in)</summary>
+    {{ request_form(false) }}
+</details>
+
+<h2>Dealt With</h2>
+<form method="GET" action="{{ url_for('department_requests') }}" class="filter-form">
+    <div class="filter-section">
+        <div>
+            <label>Department:</label>
+            <select name="department">
+                <option value="">All</option>
+                {% for d in departments %}<option value="{{ d }}" {% if d == dept_filter %}selected{% endif %}>{{ d }}</option>{% endfor %}
+            </select>
+        </div>
+        <div><label>&nbsp;</label><button type="submit">Filter</button></div>
+    </div>
+</form>
+<div class="table-scroll"><table>
+    <tr><th>Ref</th><th>Asked</th><th>Department</th><th>By</th><th>Status</th>
+        <th>Items (given / asked)</th><th>Served By</th><th>Collected By</th></tr>
+    {% for r in history %}
+    <tr>
+        <td>{{ r.ref }}</td>
+        <td>{{ r.requested_at|local }}</td>
+        <td>{{ r.department }}</td>
+        <td>{{ r.requested_by }}</td>
+        <td><span class="req-badge {{ r.status }}">{{ r.status }}</span>{% if r.reason and r.status == 'Declined' %}<br><small>{{ r.reason }}</small>{% endif %}</td>
+        <td>{% for l in r.lines %}{{ l.med_name }} {% if l.given is not none %}{{ l.given }}/{% endif %}{{ l.requested }}{% if l.given is not none and l.given < l.requested %} <span class="req-short">&#9660;</span>{% endif %}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+        <td>{{ r.served_by or '-' }}</td>
+        <td>{{ r.received_by or '-' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8">Nothing yet.</td></tr>
+    {% endfor %}
+</table></div>
+{% endif %}
+{% endblock %}

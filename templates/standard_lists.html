@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Standard Lists &middot; NMC Pharmacy{% endblock %}
+{% block heading %}Standard Lists{% endblock %}
+{% block page_styles %}
+<style>
+  .std-hint { font-size: 13px; color: #555; margin: 4px 0 14px; }
+  .std-table input[type=number] { width: 6em; margin: 0; }
+  .std-table input[list] { width: 100%; min-width: 14em; margin: 0; }
+  .std-table small { color: #666; display: block; margin-top: 2px; }
+  .std-unlinked { background: #fff3cd !important; }
+  .std-remove { display: inline; margin: 0; padding: 0; background: none; box-shadow: none; }
+  .std-remove button { padding: 6px 10px; font-size: 13px; margin: 0; background: #dc3545 !important; }
+</style>
+{% endblock %}
+{% block content %}{% if message %}
+    <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
+{% endif %}
+<p class="std-hint"><a href="{{ url_for('department_requests') }}">&larr; Back to requests</a></p>
+
+<form method="GET" action="{{ url_for('standard_lists') }}" class="filter-form">
+    <div class="filter-section">
+        <div>
+            <label>Department:</label>
+            <select name="department">
+                {% for d in departments %}<option value="{{ d }}" {% if d == dept %}selected{% endif %}>{{ d }}{% if d in lists %} (has a list){% endif %}</option>{% endfor %}
+            </select>
+        </div>
+        <div><label>&nbsp;</label><button type="submit">Open</button></div>
+    </div>
+</form>
+
+<h2>{{ dept }} &mdash; {{ rows|length }} item{{ '' if rows|length == 1 else 's' }}</h2>
+<p class="std-hint"><strong>Should hold</strong> is what {{ dept }} keeps. When
+they top up, they count what is there and the request is the difference.
+<strong>Pharmacy item</strong> is the line in your medication list it is issued
+from &mdash; it was linked automatically only where exactly one item matched.
+{% if unlinked %}<br><strong>{{ unlinked }} line(s) are not linked yet</strong>
+(yellow): until they are, a shortfall on them is sent as a note rather than as
+an item you can serve.{% endif %}
+{% if dept == 'Emergency Trolley' %}<br>The starting quantities are estimates,
+from the most each item held on the trolley's 2026 checklist and what an adult
+emergency trolley usually carries. Set them to your own standard.{% endif %}</p>
+
+<datalist id="std_meds">{% for n in med_names %}<option value="{{ n }}">{% endfor %}</datalist>
+
+{% if rows %}
+<form method="POST" action="{{ url_for('standard_lists') }}" class="dispense-form" style="max-width:none;">
+    <input type="hidden" name="action" value="save">
+    <input type="hidden" name="department" value="{{ dept }}">
+    <div class="table-scroll"><table class="std-table">
+        <thead><tr><th>Item</th><th>Should hold</th><th>Pharmacy item</th></tr></thead>
+        <tbody>
+        {% for r in rows %}
+        <tr class="{% if not r.med_name and r.required %}std-unlinked{% endif %}">
+            <td>{{ r.item }}{% if r.note %}<small>{{ r.note }}</small>{% endif %}</td>
+            <td><input type="number" name="required__{{ r.id }}" value="{{ r.required }}" min="0" step="1"></td>
+            <td><input name="med__{{ r.id }}" list="std_meds" value="{{ r.med_name }}" autocomplete="off"
+                       placeholder="choose from your medication list">
+                {% if r.suggest %}<small>possible: {{ r.suggest|join(' &middot; '|safe) }}</small>{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    <div class="form-buttons"><input type="submit" value="Save List"></div>
+</form>
+{% endif %}
+
+<h3>Add an item</h3>
+<form method="POST" action="{{ url_for('standard_lists') }}" class="dispense-form">
+    <input type="hidden" name="action" value="add">
+    <input type="hidden" name="department" value="{{ dept }}">
+    <div class="common-section">
+        <div><label>Item:</label><input name="item" type="text" maxlength="60" required></div>
+        <div><label>Should hold:</label><input name="required" type="number" min="0" step="1" required></div>
+        <div><label>Pharmacy item:</label><input name="med_name" list="std_meds" autocomplete="off"></div>
+    </div>
+    <div class="form-buttons"><input type="submit" value="Add to List"></div>
+</form>
+
+{% if rows %}
+<details style="margin-top:14px;">
+    <summary style="cursor:pointer;">Remove an item from the list</summary>
+    <div class="table-scroll"><table>
+        {% for r in rows %}
+        <tr><td>{{ r.item }}</td><td>
+            <form method="POST" action="{{ url_for('standard_lists') }}" class="std-remove"
+                  onsubmit='return confirm({{ ("Remove " ~ r.item ~ " from the " ~ dept ~ " list?")|tojson }});'>
+                <input type="hidden" name="action" value="remove">
+                <input type="hidden" name="department" value="{{ dept }}">
+                <input type="hidden" name="row_id" value="{{ r.id }}">
+                <button type="submit">Remove</button>
+            </form></td></tr>
+        {% endfor %}
+    </table></div>
+</details>
+{% endif %}
+{% endblock %}

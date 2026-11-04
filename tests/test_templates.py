@@ -65,7 +65,7 @@ _markup = re.findall(r'^\s*<(?:div|table|tr|td|th|form|p|h[1-6]|style|script|inp
                      r'|select|label|span|ul|li|button)\b', APP, re.M)
 check('app.py is the application again, not a page of HTML',
       len(_markup) < 40, f'{len(_markup)} lines of markup')
-check('there are seventeen pages', len(PAGES) == 17, str(len(PAGES)))
+check('there are nineteen pages', len(PAGES) == 19, str(len(PAGES)))
 
 print('\n--- 2. Every template Jinja can actually compile ---')
 # A template that does not parse is a 500 on whichever page uses it, and

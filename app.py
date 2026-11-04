@@ -218,6 +218,18 @@ PHARMACY_UTC_OFFSET_HOURS = float(os.environ.get('PHARMACY_UTC_OFFSET', '2'))
 PHARMACY_TZ = timezone(timedelta(hours=PHARMACY_UTC_OFFSET_HOURS))
 
 
+def to_local(dt: datetime | None, fmt: str = '%Y-%m-%d %H:%M') -> str:
+    """A stored (UTC) datetime as the pharmacy clock shows it, for display."""
+    if not isinstance(dt, datetime):
+        return ''
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return (dt + timedelta(hours=PHARMACY_UTC_OFFSET_HOURS)).strftime(fmt)
+
+
+app.jinja_env.filters['local'] = to_local
+
+
 def local_now() -> datetime:
     """Wall-clock time at the pharmacy, naive, to match stored datetimes."""
     return datetime.now(timezone.utc).astimezone(PHARMACY_TZ).replace(tzinfo=None)
@@ -1110,11 +1122,24 @@ def get_nav_links() -> str:
         # NEW (Equipment loans): the lending desk is counter work, so everyone
         # reaches it; the asset register is an admin decision.
         loan_items_link = '<a href="/loan-items">Equipment Register</a> | ' if is_admin else ''
+        if user.get('role') == 'department':
+            dept = escape(user.get('department', ''))
+            return f"""
+        <p class="nav-links nav-short"><strong>{dept}:</strong>
+            <a href="/requests">Requests</a> |
+            <span>Welcome, {name}! <a href="/logout">Logout</a></span>
+        </p>
+        """ + SESSION_GUARD_JS.replace('__TIMEOUT__', str(SESSION_TIMEOUT_MINUTES))
+        # Waiting requests show on every page, so a department is not left
+        # waiting because nobody happened to open the requests page.
+        waiting = _pending_request_count()
+        req_label = f'Requests <strong>({waiting})</strong>' if waiting else 'Requests'
         return f"""
         <p class="nav-links"><strong>Navigate:</strong>
             <a href="/dashboard">Dashboard</a> |
             <a href="/dispense">Dispensing</a> |
             <a href="/receive">Receiving</a> |
+            <a href="/requests">{req_label}</a> |
             <a href="/internal-issue">Internal Issues</a> |
             <a href="/temperature">Temperature</a> |
             <a href="/loans">Loans</a> |
@@ -1231,15 +1256,20 @@ def login() -> ResponseReturnValue:
                     'name': user_doc.get('name', username),
                     'role': user_doc.get('role', 'employee')
                 }
+                if user_doc.get('role') == 'department':
+                    session['user']['department'] = user_doc.get('department', '')
                 session.permanent = True
                 session['last_active'] = datetime.now(timezone.utc).isoformat()
                 # Keep the store key register in step with who is on duty.
                 # Guarded here as well as inside: this is the login path, and
                 # no change to the key register should ever be able to lock
                 # everybody out of the app.
+                # A department login is not someone on duty in the pharmacy,
+                # so it never takes or hands over the store key.
                 try:
-                    _key_on_login(session['user']['name'],
-                                  session['user'].get('role') == 'admin')
+                    if session['user'].get('role') != 'department':
+                        _key_on_login(session['user']['name'],
+                                      session['user'].get('role') == 'admin')
                 except Exception as e:
                     app.logger.warning(f'key register login hook failed: {e}')
 
@@ -1248,6 +1278,8 @@ def login() -> ResponseReturnValue:
                     flash('Your password has expired and must be changed before continuing.', 'error')
                     return redirect('/change-expired-password')
 
+                if session['user'].get('role') == 'department':
+                    return redirect('/requests')
                 return redirect('/dispense')
             else:
                 session['error'] = 'Invalid username or password.'
@@ -1335,6 +1367,12 @@ def register() -> ResponseReturnValue:
             if not username or not password or not name or not role:
                 session['error'] = 'All fields are required.'
                 return redirect('/register')
+            department = (request.form.get('department') or '').strip()
+            if role == 'department' and department not in REQUEST_DEPARTMENTS:
+                session['error'] = 'Choose which department this account requests for.'
+                return redirect('/register')
+            if role != 'department':
+                department = ''
             try:
                 client = get_mongo_client()
                 db = client['pharmacy_db']
@@ -1367,6 +1405,7 @@ def register() -> ResponseReturnValue:
                             'password_hash': generate_password_hash(password),
                             'name': name,
                             'role': role,
+                            'department': department,
                             'account_created_at': now,
                             'password_set_at': now,
                         }}
@@ -1403,6 +1442,7 @@ def register() -> ResponseReturnValue:
                     'password_hash': password_hash,
                     'name': name,
                     'role': role,
+                    'department': department,
                     'account_created_at': now,
                     'password_set_at': now,
                 })
@@ -1418,7 +1458,8 @@ def register() -> ResponseReturnValue:
     if 'admin_access' not in session:
         return render_template('register_password.html', error=error)
     else:
-        return render_template('register.html', error=error, message=message)
+        return render_template('register.html', error=error, message=message,
+                               departments=REQUEST_DEPARTMENTS)
 
 
 @app.route('/logout', methods=['GET'])
@@ -4994,6 +5035,630 @@ def _temperature_chart(readings: Iterable[Doc], year: int, month: int, location:
 
     o.append('</svg>')
     return '\n'.join(o)
+
+
+# ---------------------------------------------------------------------------
+# Department requests. A department posts what it needs from its own login;
+# the pharmacy serves it from the queue. Serving IS the internal issue - the
+# same transactions the Internal Issues page writes - so nothing is entered
+# twice, and what could not be supplied for want of stock is recorded as
+# unmet demand, exactly as a short dispense is, so the next order covers it.
+#
+# A department account sees this page and nothing else: no dispensing, no
+# patients, no stock figures beyond what it asked for and what it was given.
+# ---------------------------------------------------------------------------
+REQ_PENDING = 'Pending'
+REQ_SERVED, REQ_PART, REQ_NONE = 'Served', 'Part served', 'Not supplied'
+REQ_DECLINED, REQ_CANCELLED = 'Declined', 'Cancelled'
+REQ_MAX_LINES = 30
+# Pages a department login may reach. Everything else sends it back to its
+# requests, so a typed address cannot open the dispensing register.
+DEPARTMENT_ENDPOINTS = {'department_requests', 'logout', 'login', 'change_expired_password',
+                        'static', 'api_session_ping', 'session_ping',
+                        'get_medication_options'}
+REQUEST_DEPARTMENTS = [d for d in DEPARTMENTS if d != 'Other']
+
+
+def _is_department(user: Doc | None = None) -> bool:
+    u = user if user is not None else (session.get('user') or {})
+    return u.get('role') == 'department'
+
+
+@app.before_request
+def keep_departments_to_requests() -> ResponseReturnValue | None:
+    if 'user' not in session or not _is_department():
+        return None
+    if request.endpoint in DEPARTMENT_ENDPOINTS:
+        return None
+    return redirect(url_for('department_requests'))
+
+
+def _pending_request_count() -> int:
+    try:
+        return get_mongo_client()['pharmacy_db']['dept_requests'].count_documents(
+            {'status': REQ_PENDING})
+    except Exception:
+        return 0
+
+
+def _request_row(doc: Doc, balances: dict[str, float] | None = None) -> Doc:
+    lines = []
+    for i, ln in enumerate(doc.get('lines') or []):
+        row = dict(ln)
+        row['i'] = i
+        if balances is not None:
+            on_hand = balances.get(ln.get('med_name', ''), 0) or 0
+            row['on_hand'] = _num(on_hand)
+            row['suggest'] = _num(max(0, min(ln.get('requested', 0) or 0, on_hand)))
+        lines.append(row)
+    return {
+        'id': str(doc['_id']), 'ref': doc.get('ref', ''),
+        'department': doc.get('department', ''),
+        'requested_by': doc.get('requested_by', ''),
+        'requested_at': doc.get('requested_at'),
+        'note': doc.get('note', ''), 'status': doc.get('status', ''),
+        'served_by': doc.get('served_by'), 'served_at': doc.get('served_at'),
+        'received_by': doc.get('received_by'),
+        'reason': doc.get('decline_reason') or doc.get('serve_note') or '',
+        'lines': lines,
+        'waiting': ((datetime.utcnow() - doc['requested_at'])
+                    if doc.get('requested_at') else None),
+    }
+
+
+def _num(v: Any) -> Any:
+    return int(v) if isinstance(v, float) and v.is_integer() else v
+
+
+def _waited(td: timedelta | None) -> str:
+    if td is None:
+        return ''
+    mins = int(td.total_seconds() // 60)
+    if mins < 60:
+        return f'{mins} min'
+    if mins < 60 * 24:
+        return f'{mins // 60} h {mins % 60:02d} min'
+    return f'{mins // (60 * 24)} day(s)'
+
+
+# ---------------------------------------------------------------------------
+# Standard lists. A department that keeps a fixed set of stock - the
+# emergency trolley above all - is topped up to that set rather than asking
+# item by item: it says what is there, and the request is the difference.
+#
+# The trolley quantities below are a starting estimate, made from the most
+# each item held on the trolley's own 2026 checklist and from what an adult
+# emergency trolley usually carries. They are seeded once and edited on the
+# Standard Lists page from then on; nothing here overwrites an edit.
+# (item, should hold, words that find it in the pharmacy list, note)
+# ---------------------------------------------------------------------------
+TROLLEY_STANDARD_SEED: list[tuple[str, int, list[str], str]] = [
+    ('Adrenalin 1 mg', 10, ['adrenalin', 'epinephrine'], ''),
+    ('Atropine', 5, ['atropine'], ''),
+    ('Amiodarone', 6, ['amiodarone'], ''),
+    ('Aminophylline 250 mg', 2, ['aminophyl'], ''),
+    ('Etomidate', 2, ['etomidate', 'atomidate'], 'listed on the checklist as "Atomidate"'),
+    ('Antivenom 10 ml', 4, ['antivenom', 'anti-venom', 'antivenin'], ''),
+    ('Charcoal 50 g', 1, ['charcoal'], ''),
+    ('Cimetidine', 2, ['cimetidine'], ''),
+    ('Dexamethasone', 4, ['dexamethasone'], ''),
+    ('Diazepam 10 mg', 5, ['diazepam'], ''),
+    ('Digoxin (tabs)', 10, ['digoxin'], ''),
+    ('Dopamine', 5, ['dopamine'], ''),
+    ('Ergometrine 0.2 mg', 2, ['ergometrine'], ''),
+    ('Furosemide 10 mg', 4, ['furosemide', 'frusemide'], ''),
+    ('Dextrose 50% 20 ml', 2, ['dextrose 50', '50% dextrose', 'glucose 50'], ''),
+    ('Heparin sodium', 2, ['heparin'], ''),
+    ('Hydralazine 20 mg', 2, ['hydralazine'], ''),
+    ('Hydrocortisone 100 mg', 5, ['hydrocortisone'], ''),
+    ('Isosorbide 5 mg (tabs)', 10, ['isosorbide'], ''),
+    ('Lignocaine 400 mg', 3, ['lignocaine 2', 'lidocaine 2', 'lignocaine inj', 'lidocaine inj'], ''),
+    ('Lorazepam', 2, ['lorazepam'], ''),
+    ('Magnesium sulphate', 5, ['magnesium sulph', 'magnesium sulf'], ''),
+    ('Methylprednisolone 40 mg', 2, ['methylprednisolone', 'solu-medrol'], ''),
+    ('Midazolam', 6, ['midazolam'], ''),
+    ('Sodium bicarbonate', 2, ['bicarbonate'], ''),
+    ('Naloxone', 4, ['naloxone'], ''),
+    ('Paracetamol IV (Pafalgan)', 2, ['pafalgan', 'perfalgan', 'paracetamol inf', 'paracetamol iv'], ''),
+    ('Phenytoin inj', 4, ['phenytoin'], ''),
+    ('Promethazine inj', 6, ['promethazine'], ''),
+    ('Oxytocin', 4, ['oxytocin'], ''),
+    ('Suxamethonium chloride', 2, ['suxamethonium'], ''),
+    ('Salbutamol inhaler', 1, ['salbutamol inh', 'salbutamol mdi', 'asthavent'], ''),
+    ('Rocuronium bromide 50 mg', 2, ['rocuronium'], ''),
+    ('Venteze solution 20 ml', 1, ['venteze', 'salbutamol neb', 'salbutamol resp', 'salbutamol sol'], ''),
+    ('Xylocaine spray', 1, ['xylocaine', 'lignocaine spray', 'lidocaine spray'], ''),
+    ('Water for injection', 10, ['water for inj'], ''),
+    ('Warfarin', 0, ['warfarin'], 'not an emergency drug; set to 0 until you decide it belongs'),
+    ('Ambubag', 1, [], 'equipment, not supplied from the pharmacy list'),
+]
+STANDARD_SEEDS = {'Emergency Trolley': TROLLEY_STANDARD_SEED}
+
+
+def _suggest_med(words: list[str], names: list[str]) -> list[str]:
+    """Pharmacy items matching any of these searches.
+
+    Each search matches when every word of it appears somewhere in the name,
+    in any order: "lignocaine spray" finds "Lignocaine 10% spray", which a
+    plain substring test missed.
+    """
+    out = []
+    for n in names:
+        low = n.lower()
+        if any(all(t in low for t in w.split()) for w in words if w.split()):
+            out.append(n)
+    return out
+
+
+def _standard_list(db: Database, dept: str) -> Docs:
+    """The department's standard list, seeded on first use.
+
+    A link to a pharmacy item is made automatically only when exactly one
+    item matches; anything ambiguous is left for the pharmacist to choose,
+    because topping a trolley up with the wrong strength is worse than not
+    topping it up at all.
+    """
+    col = db['dept_standards']
+    if not col.find_one({'department': dept}) and dept in STANDARD_SEEDS:
+        names = _medication_names()
+        for i, (item, qty, words, note) in enumerate(STANDARD_SEEDS[dept]):
+            found = _suggest_med(words, names)
+            col.insert_one({'department': dept, 'order': i, 'item': item,
+                            'required': qty, 'med_name': found[0] if len(found) == 1 else None,
+                            'words': words, 'note': note})
+    return list(col.find({'department': dept}).sort('order', 1))
+
+
+def _save_request(reqs: Collection, dept: str, user: Doc, lines: Docs,
+                  note: str, extra: Doc | None = None) -> str:
+    now = datetime.utcnow()
+    ref = f"REQ-{now:%Y%m%d}-{uuid4().hex[:4].upper()}"
+    reqs.insert_one({
+        'ref': ref, 'department': dept, 'requested_by': user.get('name', ''),
+        'requested_login': user.get('login'), 'requested_at': now,
+        'note': note[:300], 'status': REQ_PENDING, 'lines': lines, **(extra or {}),
+    })
+    write_audit_entry('CREATE', 'dept_request', ref,
+                      f'{dept} requested {len(lines)} item(s): '
+                      + ', '.join(f"{l['med_name']} x{l['requested']}" for l in lines))
+    return ref
+
+
+@app.route('/requests/standard', methods=['GET', 'POST'])
+@login_required
+def standard_lists() -> ResponseReturnValue:
+    """Admin: what each department with a standard list should hold."""
+    if session['user'].get('role') != 'admin':
+        flash('Access denied. Only admins can change a standard list.')
+        return redirect(url_for('department_requests'))
+    message_class, message = _flashed_banner()
+    dept = (request.values.get('department') or 'Emergency Trolley').strip()
+    if dept not in REQUEST_DEPARTMENTS:
+        dept = 'Emergency Trolley'
+    db = get_mongo_client()['pharmacy_db']
+    col = db['dept_standards']
+    names = _medication_names()
+    rows = _standard_list(db, dept)
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'save':
+            problems, changes = [], []
+            for r in rows:
+                rid = str(r['_id'])
+                raw = (request.form.get(f'required__{rid}') or '').strip()
+                med = (request.form.get(f'med__{rid}') or '').strip() or None
+                try:
+                    req_q = int(raw)
+                    if req_q < 0:
+                        raise ValueError
+                except ValueError:
+                    problems.append(f"{r['item']}: should-hold must be a whole number")
+                    continue
+                if med and med not in names:
+                    problems.append(f'{r["item"]}: "{med}" is not on the pharmacy list')
+                    continue
+                if req_q != r.get('required') or med != r.get('med_name'):
+                    col.update_one({'_id': r['_id']}, {'$set': {'required': req_q, 'med_name': med}})
+                    changes.append(f"{r['item']} {r.get('required')}->{req_q}"
+                                   + (f' linked to {med}' if med != r.get('med_name') else ''))
+            if changes:
+                write_audit_entry('UPDATE', 'dept_standard', dept, '; '.join(changes))
+            msg = (f'{len(changes)} line(s) of the {dept} list updated.' if changes
+                   else 'Nothing was changed.')
+            if problems:
+                msg += ' Not saved: ' + '; '.join(problems) + '.'
+            flash(msg, 'partial' if problems or not changes else 'success')
+        elif action == 'add':
+            item = (request.form.get('item') or '').strip()
+            try:
+                qty = int(request.form.get('required') or '')
+            except ValueError:
+                qty = -1
+            med = (request.form.get('med_name') or '').strip() or None
+            if not item or qty < 0:
+                flash('Give the item a name and a whole-number quantity.')
+            elif med and med not in names:
+                flash(f'"{med}" is not on the pharmacy list.')
+            else:
+                last = col.find_one({'department': dept}, sort=[('order', -1)])
+                col.insert_one({'department': dept, 'order': (last or {}).get('order', -1) + 1,
+                                'item': item, 'required': qty, 'med_name': med,
+                                'words': [], 'note': ''})
+                write_audit_entry('CREATE', 'dept_standard', dept, f'added {item} x{qty}')
+                flash(f'{item} added to the {dept} list.', 'success')
+        elif action == 'remove':
+            try:
+                doc = col.find_one({'_id': ObjectId(request.form.get('row_id') or '')})
+            except (InvalidId, TypeError):
+                doc = None
+            if doc:
+                col.delete_one({'_id': doc['_id']})
+                write_audit_entry('DELETE', 'dept_standard', dept, f"removed {doc['item']}")
+                flash(f"{doc['item']} removed from the {dept} list.", 'success')
+        return redirect(url_for('standard_lists', department=dept))
+
+    shown = []
+    for r in rows:
+        shown.append({'id': str(r['_id']), 'item': r['item'], 'required': r.get('required', 0),
+                      'med_name': r.get('med_name') or '', 'note': r.get('note', ''),
+                      'suggest': ([] if r.get('med_name')
+                                  else _suggest_med(r.get('words') or [], names)[:6])})
+    lists = sorted(set(db['dept_standards'].distinct('department')) | set(STANDARD_SEEDS))
+    return render_template('standard_lists.html', nav_links=get_nav_links(),
+                           message=message, message_class=message_class,
+                           dept=dept, rows=shown, med_names=names,
+                           departments=REQUEST_DEPARTMENTS, lists=lists,
+                           unlinked=sum(1 for r in shown if not r['med_name'] and r['required']))
+
+
+@app.route('/requests', methods=['GET', 'POST'])
+@login_required
+def department_requests() -> ResponseReturnValue:
+    user = session['user']
+    me = user.get('name', '')
+    dept_user = _is_department(user)
+    my_dept = user.get('department') or ''
+    message_class, message = _flashed_banner()
+
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        reqs, medications, transactions = (db['dept_requests'], db['medications'],
+                                           db['transactions'])
+
+        if request.method == 'POST':
+            action = request.form.get('action')
+
+            if action == 'post':
+                if dept_user:
+                    dept = my_dept
+                else:
+                    # Staff may post for a department that phoned it in.
+                    dept = (request.form.get('department') or '').strip()
+                if dept not in REQUEST_DEPARTMENTS:
+                    flash('This account is not linked to a department. Ask the '
+                          'pharmacist to set it up again.' if dept_user
+                          else 'Choose the department the request is for.')
+                    return redirect(url_for('department_requests'))
+                names = request.form.getlist('med_name')
+                qtys = request.form.getlist('quantity')
+                lines, problems, seen = [], [], set()
+                for raw_name, raw_qty in zip(names, qtys):
+                    name, raw_qty = (raw_name or '').strip(), (raw_qty or '').strip()
+                    if not name and not raw_qty:
+                        continue
+                    if not name:
+                        problems.append(f'a quantity of {raw_qty} has no item')
+                        continue
+                    try:
+                        qty = int(raw_qty)
+                    except ValueError:
+                        problems.append(f'{name}: the quantity must be a whole number')
+                        continue
+                    if qty < 1:
+                        problems.append(f'{name}: the quantity must be at least 1')
+                        continue
+                    med = medications.find_one({'name': name}, {'_id': 0, 'name': 1})
+                    if not med:
+                        problems.append(f'"{name}" is not on the pharmacy list - '
+                                        f'choose it from the suggestions')
+                        continue
+                    if name in seen:
+                        problems.append(f'{name} is on the request twice - put the '
+                                        f'total on one line')
+                        continue
+                    seen.add(name)
+                    lines.append({'med_name': name, 'requested': qty,
+                                  'given': None, 'unmet': None})
+                # Nothing is posted until the whole request is right, so the
+                # pharmacy never serves half of something the ward meant
+                # differently.
+                if problems:
+                    flash('The request was not sent: ' + '; '.join(problems) + '.')
+                    return redirect(url_for('department_requests'))
+                if not lines:
+                    flash('Add at least one item to the request.')
+                    return redirect(url_for('department_requests'))
+                if len(lines) > REQ_MAX_LINES:
+                    flash(f'A request can hold up to {REQ_MAX_LINES} items. '
+                          f'Split it into two.')
+                    return redirect(url_for('department_requests'))
+                ref = _save_request(reqs, dept, user, lines,
+                                    (request.form.get('note') or '').strip()[:200])
+                flash(f'Request {ref} sent to the pharmacy with {len(lines)} '
+                      f'item{"" if len(lines) == 1 else "s"}.', 'success')
+                return redirect(url_for('department_requests'))
+
+            if action == 'topup':
+                dept = my_dept if dept_user else (request.form.get('department') or '').strip()
+                if dept not in REQUEST_DEPARTMENTS:
+                    flash('Choose the department to top up.')
+                    return redirect(url_for('department_requests'))
+                standard = _standard_list(db, dept)
+                if not standard:
+                    flash(f'{dept} has no standard list.')
+                    return redirect(url_for('department_requests'))
+                on_file = set(_medication_names())
+                tlines: list[dict[str, Any]] = []
+                counts: dict[str, int] = {}
+                tproblems: list[str] = []
+                uncounted: list[str] = []
+                not_stocked: list[str] = []
+                for r in standard:
+                    raw = (request.form.get(f"have__{r['_id']}") or '').strip()
+                    if raw == '':
+                        if r.get('required'):
+                            uncounted.append(r['item'])
+                        continue
+                    try:
+                        have = int(raw)
+                        if have < 0:
+                            raise ValueError
+                    except ValueError:
+                        tproblems.append(f"{r['item']}: enter how many are there as a whole number")
+                        continue
+                    counts[r['item']] = have
+                    need = max(0, (r.get('required') or 0) - have)
+                    if not need:
+                        continue
+                    med = r.get('med_name')
+                    if not med or med not in on_file:
+                        not_stocked.append(f"{r['item']} x{need}")
+                        continue
+                    if any(l['med_name'] == med for l in tlines):
+                        # two list tlines on one pharmacy item: add them up
+                        for l in tlines:
+                            if l['med_name'] == med:
+                                l['requested'] += need
+                        continue
+                    tlines.append({'med_name': med, 'requested': need, 'given': None,
+                                  'unmet': None, 'standard_item': r['item']})
+                # Every line is counted, or nothing is sent: a box left empty
+                # by mistake would otherwise read as "nothing needed".
+                if tproblems or uncounted:
+                    bits = tproblems[:]
+                    if uncounted:
+                        bits.append('not counted: ' + ', '.join(uncounted)
+                                    + ' (enter 0 if there are none)')
+                    flash('The top-up was not sent: ' + '; '.join(bits) + '.')
+                    return redirect(url_for('department_requests', _anchor='topup'))
+                if not tlines:
+                    msg = f'{dept} is at its standard list - nothing to top up.'
+                    if not_stocked:
+                        msg += ' Short but not on the pharmacy list: ' + ', '.join(not_stocked) + '.'
+                    flash(msg, 'success' if not not_stocked else 'partial')
+                    return redirect(url_for('department_requests'))
+                note = 'Top-up to standard list'
+                extra_note = (request.form.get('note') or '').strip()
+                if extra_note:
+                    note += f' - {extra_note}'
+                if not_stocked:
+                    note += '. Also short, not on the pharmacy list: ' + ', '.join(not_stocked)
+                ref = _save_request(reqs, dept, user, tlines, note,
+                                    {'kind': 'topup', 'topup_counts': counts})
+                flash(f'Top-up {ref} sent to the pharmacy: {len(tlines)} '
+                      f'item{"" if len(tlines) == 1 else "s"} to bring {dept} up to standard.'
+                      + (f' Not on the pharmacy list: {", ".join(not_stocked)}.' if not_stocked else ''),
+                      'success')
+                return redirect(url_for('department_requests'))
+
+            doc = None
+            try:
+                doc = reqs.find_one({'_id': ObjectId(request.form.get('request_id') or '')})
+            except (InvalidId, TypeError):
+                doc = None
+            if not doc:
+                flash('That request was not found.')
+                return redirect(url_for('department_requests'))
+
+            if action == 'cancel':
+                if dept_user and doc.get('department') != my_dept:
+                    flash('That request belongs to another department.')
+                    return redirect(url_for('department_requests'))
+                done = reqs.update_one({'_id': doc['_id'], 'status': REQ_PENDING},
+                                       {'$set': {'status': REQ_CANCELLED,
+                                                 'cancelled_by': me,
+                                                 'cancelled_at': datetime.utcnow()}})
+                if not done.modified_count:
+                    flash(f"{doc['ref']} has already been dealt with and cannot be "
+                          f"cancelled ({doc.get('status')}).")
+                    return redirect(url_for('department_requests'))
+                write_audit_entry('UPDATE', 'dept_request', doc['ref'], f'cancelled by {me}')
+                flash(f"Request {doc['ref']} cancelled.", 'success')
+                return redirect(url_for('department_requests'))
+
+            # Serving and declining are the pharmacy's to do.
+            if dept_user:
+                flash('Only the pharmacy can serve or decline a request.')
+                return redirect(url_for('department_requests'))
+
+            if action == 'decline':
+                reason = (request.form.get('reason') or '').strip()
+                if not reason:
+                    flash('Give the department a reason for declining.')
+                    return redirect(url_for('department_requests'))
+                done = reqs.update_one({'_id': doc['_id'], 'status': REQ_PENDING},
+                                       {'$set': {'status': REQ_DECLINED,
+                                                 'decline_reason': reason[:200],
+                                                 'served_by': me,
+                                                 'served_at': datetime.utcnow()}})
+                if not done.modified_count:
+                    flash(f"{doc['ref']} is no longer waiting ({doc.get('status')}).")
+                    return redirect(url_for('department_requests'))
+                write_audit_entry('UPDATE', 'dept_request', doc['ref'], f'declined by {me}: {reason}')
+                flash(f"Request {doc['ref']} from {doc['department']} declined.", 'partial')
+                return redirect(url_for('department_requests'))
+
+            if action == 'serve':
+                received_by = (request.form.get('received_by') or '').strip()
+                if not received_by:
+                    flash('Enter who from the department is collecting the stock.')
+                    return redirect(url_for('department_requests', _anchor=doc['ref']))
+                lines = doc.get('lines') or []
+                plan, problems = [], []
+                for i, ln in enumerate(lines):
+                    raw = (request.form.get(f'give__{i}') or '').strip()
+                    try:
+                        give = int(raw or '0')
+                    except ValueError:
+                        problems.append(f"{ln['med_name']}: give a whole number")
+                        continue
+                    asked = ln.get('requested', 0) or 0
+                    med = medications.find_one({'name': ln['med_name']})
+                    on_hand = (med.get('balance', 0) or 0) if med else 0
+                    if give < 0:
+                        problems.append(f"{ln['med_name']}: cannot give a negative amount")
+                    elif give > asked:
+                        problems.append(f"{ln['med_name']}: {give} is more than the "
+                                        f"{asked} asked for")
+                    elif give > on_hand:
+                        problems.append(f"{ln['med_name']}: only {_num(on_hand)} on hand")
+                    plan.append((i, ln, med, give, asked, on_hand))
+                # All lines are checked before any stock moves, so a typing
+                # error on line 5 does not leave lines 1 to 4 issued.
+                if problems:
+                    flash(f"Nothing was issued for {doc['ref']}: " + '; '.join(problems) + '.')
+                    return redirect(url_for('department_requests', _anchor=doc['ref']))
+                # Claim it first. Two people serving the same request from two
+                # screens would otherwise issue it twice.
+                claim = reqs.update_one({'_id': doc['_id'], 'status': REQ_PENDING},
+                                        {'$set': {'status': 'Serving', 'served_by': me}})
+                if not claim.modified_count:
+                    now_doc = reqs.find_one({'_id': doc['_id']}) or {}
+                    flash(f"{doc['ref']} is no longer waiting - it has just been "
+                          f"dealt with ({now_doc.get('status')}).")
+                    return redirect(url_for('department_requests'))
+                now = datetime.utcnow()
+                served_note = (request.form.get('serve_note') or '').strip()[:200]
+                new_lines, issued, short = [], [], []
+                for i, ln, med, give, asked, on_hand in plan:
+                    # The part that could not be given for want of stock.
+                    # Giving less than is on the shelf is the pharmacist's
+                    # decision, not missing stock, so it is not demand unmet.
+                    unmet = max(0, asked - on_hand) if give < asked else 0
+                    price = (med or {}).get('price', 0) or 0
+                    if give > 0 and med:
+                        medications.update_one({'name': ln['med_name']},
+                                               {'$inc': {'balance': -give}})
+                        transactions.insert_one({
+                            'type': 'internal_issue', 'issue_id': doc['ref'],
+                            'request_ref': doc['ref'],
+                            'med_name': ln['med_name'], 'quantity': give,
+                            'price': price, 'line_value': give * price,
+                            'department': doc['department'], 'issued_to': received_by,
+                            'note': f"request {doc['ref']}" + (f' - {served_note}' if served_note else ''),
+                            'batch': med.get('batch'), 'schedule': med.get('schedule'),
+                            'user': me, 'timestamp': now,
+                        })
+                        issued.append(f"{ln['med_name']} x{give}")
+                    if unmet > 0:
+                        transactions.insert_one({
+                            'type': 'unmet_demand', 'request_ref': doc['ref'],
+                            'med_name': ln['med_name'],
+                            'quantity': 0,          # never moves stock
+                            'requested': asked, 'given': give, 'shortfall': unmet,
+                            'price': price, 'shortfall_value': unmet * price,
+                            'patient': '', 'department': doc['department'],
+                            'date': local_now().strftime('%Y-%m-%d'),
+                            'user': me, 'timestamp': now,
+                        })
+                        short.append(f"{ln['med_name']} {unmet} short")
+                    new_lines.append({**ln, 'given': give, 'unmet': unmet})
+                total_asked = sum(l['requested'] for l in new_lines)
+                total_given = sum(l['given'] for l in new_lines)
+                status = (REQ_SERVED if all(l['given'] >= l['requested'] for l in new_lines)
+                          else REQ_NONE if total_given == 0 else REQ_PART)
+                reqs.update_one({'_id': doc['_id']}, {'$set': {
+                    'status': status, 'lines': new_lines, 'served_by': me,
+                    'served_at': now, 'received_by': received_by,
+                    'serve_note': served_note}})
+                write_audit_entry('UPDATE', 'dept_request', doc['ref'],
+                                  f"{status.lower()} by {me} to {doc['department']} "
+                                  f"({received_by}): "
+                                  + (', '.join(issued) or 'nothing issued')
+                                  + (f"; unmet: {', '.join(short)}" if short else ''))
+                msg = f"{doc['ref']} for {doc['department']}: {status.lower()}"
+                msg += f" ({total_given} of {total_asked} units)." 
+                if short:
+                    msg += ' Recorded as unmet demand: ' + '; '.join(short) + '.'
+                flash(msg, 'success' if status == REQ_SERVED else 'partial')
+                return redirect(url_for('department_requests'))
+
+            flash('Unknown action.')
+            return redirect(url_for('department_requests'))
+
+        # ---- GET ----------------------------------------------------------
+        names = _medication_names()
+        if dept_user:
+            mine = [_request_row(d) for d in
+                    reqs.find({'department': my_dept}).sort('requested_at', -1).limit(60)]
+            standard = [{'id': str(r['_id']), 'item': r['item'],
+                         'required': r.get('required', 0) or 0,
+                         'linked': bool(r.get('med_name') and r['med_name'] in names)}
+                        for r in _standard_list(db, my_dept)]
+            return render_template(
+                'requests.html', nav_links=get_nav_links(),
+                message=message, message_class=message_class,
+                standard=standard,
+                dept_user=True, my_dept=my_dept, med_names=names,
+                mine=mine, pending=[], history=[], departments=REQUEST_DEPARTMENTS,
+                waited=_waited, max_lines=REQ_MAX_LINES)
+
+        pending_docs = list(reqs.find({'status': {'$in': [REQ_PENDING, 'Serving']}})
+                            .sort('requested_at', 1))
+        wanted = sorted({ln.get('med_name', '') for d in pending_docs
+                         for ln in d.get('lines') or []})
+        balances = {m['name']: m.get('balance', 0) for m in
+                    medications.find({'name': {'$in': wanted}}, {'_id': 0, 'name': 1, 'balance': 1})}
+        pending = [_request_row(d, balances) for d in pending_docs]
+        dept_filter = (request.args.get('department') or '').strip()
+        hq: Query = {'status': {'$nin': [REQ_PENDING, 'Serving']}}
+        if dept_filter in REQUEST_DEPARTMENTS:
+            hq['department'] = dept_filter
+        history = [_request_row(d) for d in
+                   reqs.find(hq).sort('requested_at', -1).limit(100)]
+        return render_template(
+            'requests.html', nav_links=get_nav_links(),
+            message=message, message_class=message_class,
+            dept_user=False, my_dept='', med_names=names,
+            mine=[], pending=pending, history=history,
+            departments=REQUEST_DEPARTMENTS, dept_filter=dept_filter,
+            past_receivers=_past_receivers(db),
+            waited=_waited, max_lines=REQ_MAX_LINES)
+    except Exception as e:
+        app.logger.error(f'requests failed: {e}')
+        if request.method == 'POST':
+            flash('That could not be saved. Please try again.')
+            return redirect(url_for('department_requests'))
+        # Not a redirect: for a department login every other page leads
+        # back here, so redirecting on an error would loop.
+        return render_template(
+            'requests.html', nav_links=get_nav_links(),
+            message='Could not load the requests. Please try again in a moment.',
+            message_class='error', dept_user=dept_user, my_dept=my_dept,
+            med_names=[], mine=[], pending=[], history=[],
+            departments=REQUEST_DEPARTMENTS, dept_filter='', past_receivers=[],
+            waited=_waited, max_lines=REQ_MAX_LINES), 500
 
 
 @app.route('/temperature', methods=['GET', 'POST'])

@@ -15,7 +15,30 @@
             <option value="employee">Employee</option>
             <option value="viewer">Viewer (no patient names)</option>
             <option value="admin">Admin</option>
+            <option value="department">Department (requests only)</option>
         </select><br>
+        {# Only for a department account: which ward it posts requests for.
+           A department login sees its own requests and nothing else. #}
+        <div id="dept-pick" style="display:none;">
+            <label>Department:</label>
+            <select name="department">
+                <option value="">-- Select Department --</option>
+                {% for d in departments %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
+            </select><br>
+        </div>
+        <script>
+        (function () {
+            var role = document.querySelector('select[name=role]');
+            var box = document.getElementById('dept-pick');
+            var pick = box.querySelector('select');
+            function show() {
+                var on = role.value === 'department';
+                box.style.display = on ? '' : 'none';
+                pick.required = on;
+            }
+            role.addEventListener('change', show); show();
+        })();
+        </script>
         <input type="submit" value="Register">
     </form>
     <p><a href="/login">Already have an account? Login here.</a></p>
