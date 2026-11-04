@@ -551,9 +551,15 @@ check('the count form has an earliest-expiry box per line',
       'Earliest expiry' in page and page.count('name="expiry__') == len(A.TROLLEY_STANDARD_SEED) - 1)
 check('the Ambubag needs none', 'no expiry' in page)
 n = reqs.count_documents({})
+# Asked for: the date was made required and stopped a post - it is optional.
 r = topup({'Adrenalin 1 mg': 3}, expiry={'Adrenalin 1 mg': ''})
-check('a line with stock and no expiry is refused',
-      reqs.count_documents({}) == n and 'enter the earliest expiry date' in banner(r.data.decode()))
+check('a line with stock and no expiry is still sent',
+      reqs.count_documents({}) == n + 1 and last_req()['lines'][0]['requested'] == 3,   # standard 6, set in section 12
+      banner(r.data.decode()))
+check('with no date recorded for it',
+      std.find_one({'department': 'Emergency Trolley', 'item': 'Adrenalin 1 mg'})['last_expiry'] is None)
+c.post('/requests', data={'action': 'cancel', 'request_id': str(last_req()['_id'])})
+n = reqs.count_documents({})
 r = topup({'Adrenalin 1 mg': 3}, expiry={'Adrenalin 1 mg': '2062-01-01'})
 check('a date in the wrong decade is refused', 'looks like the wrong year' in banner(r.data.decode()))
 r = topup({'Adrenalin 1 mg': 0}, expiry={'Adrenalin 1 mg': ''})
@@ -694,15 +700,11 @@ for m2 in _re.finditer(r'name="(have__\w+)"[^>]*value="([^"]*)"', html):
     form[m2.group(1)] = m2.group(2)
 for m2 in _re.finditer(r'name="(expiry__\w+)" type="date" value="([^"]*)"', html):
     form[m2.group(1)] = m2.group(2)
-r = c.post('/requests', data=form, follow_redirects=True)
-check('sent with one date missing, it is refused for that line',
-      'Dexamethasone: enter the earliest expiry date' in banner(r.data.decode()))
-form[f"expiry__{ids['Dexamethasone']}"] = '2027-06-30'
 n = reqs.count_documents({})
 r = c.post('/requests', data=form, follow_redirects=True)
 d = last_req()
-check('with it put right, the November top-up is sent', reqs.count_documents({}) == n + 1
-      and d.get('kind') == 'topup', banner(r.data.decode()))
+check('the November top-up is sent as filled, the missing date and all',
+      reqs.count_documents({}) == n + 1 and d.get('kind') == 'topup', banner(r.data.decode()))
 got = {l['standard_item']: l['requested'] for l in d['lines']}
 check('asking for what November was short of',
       got.get('Adrenalin 1 mg') == 9 and got.get('Atropine') == 2 and got.get('Hydrocortisone 100 mg') == 4

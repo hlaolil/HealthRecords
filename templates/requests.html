@@ -179,7 +179,8 @@ Nothing has been sent yet &mdash; check the counts and dates, then press
 
 {% macro topup_form(standard, dept, fixed) %}
 <p class="req-hint">Enter what is there now for the items you have counted
-(0 if there are none), with the <strong>earliest expiry date</strong> among them.
+(0 if there are none), and the <strong>earliest expiry date</strong> among them if
+you have it &mdash; the date is optional, but only dated items show in Expiring Soon.
 Leave the rest blank &mdash; they are left out this time. The request is worked
 out for you: whatever brings each counted item back up to what {{ dept }}
 should hold. The expiry shown is the one recorded last time &mdash; change it
@@ -215,7 +216,6 @@ document.addEventListener('DOMContentLoaded', function () {
             var box = tr.querySelector('input'), cell = tr.querySelector('.need');
             var exp = tr.querySelector('input.exp');
             var req = parseInt(tr.dataset.required, 10) || 0;
-            if (exp) exp.required = box.value.trim() !== '' && parseInt(box.value, 10) > 0;
             if (box.value.trim() === '') { cell.textContent = '\u2013'; cell.style.fontWeight = ''; return; }
             var have = parseInt(box.value, 10) || 0;
             if (exp && exp.value && exp.value < today) have = 0;   // expired is not stock

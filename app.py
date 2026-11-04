@@ -5303,13 +5303,11 @@ def _read_checklist(data: bytes, sheet: str | None, rows: Docs) -> Doc:
             notes.append(f'{r["item"]}: quantity "{qv}" left blank')
         exp, bad = _checklist_date(row[ecol] if len(row) > ecol else None)
         if bad:
-            notes.append(f'{r["item"]}: expiry {bad}, so it is left for you to enter')
+            notes.append(f'{r["item"]}: expiry {bad}, so it is left blank')
         if have is None:
             if qv in (None, ''):
                 notes.append(f'{r["item"]}: no quantity on the sheet, left blank')
             continue
-        if have > 0 and not exp and not bad and _std_expires(r):
-            notes.append(f'{r["item"]}: no expiry on the sheet, enter it')
         values[str(r['_id'])] = {'have': have, 'expiry': exp or ''}
     return {'sheet': sheet, 'sheets': sheets, 'values': values,
             'unmatched': unmatched, 'notes': notes}
@@ -5651,15 +5649,12 @@ def department_requests() -> ResponseReturnValue:
                     except ValueError:
                         tproblems.append(f"{r['item']}: enter how many are there as a whole number")
                         continue
-                    # The earliest expiry of what is there. Needed for any
-                    # line with stock on it, so the pharmacy can see what is
-                    # about to go out of date before it does.
+                    # The earliest expiry of what is there. Optional: a line
+                    # without one is still sent, it just cannot appear on the
+                    # expiry watch until a date is given.
                     raw_exp = (request.form.get(f"expiry__{r['_id']}") or '').strip()
                     exp_iso = None
-                    if have > 0 and _std_expires(r):
-                        if not raw_exp:
-                            tproblems.append(f"{r['item']}: enter the earliest expiry date")
-                            continue
+                    if have > 0 and _std_expires(r) and raw_exp:
                         try:
                             exp_d = datetime.strptime(raw_exp, '%Y-%m-%d').date()
                         except ValueError:
