@@ -773,6 +773,94 @@ c.post('/requests', data={'action': 'import_checklist', 'department': 'Emergency
 page = c.get('/requests').data.decode()
 check('a checklist just read keeps it open', '<details id="topup" class="req-fold" open>' in page)
 
+print('\n--- 18. Serving some items now and the rest later ---')
+# Asked for: "what if I don't have the time and may want to serve some items
+# and others later".
+reset(); as_ward()
+post([('Paracetamol tabs, 500 mg', 50), ('Gauze swabs', 10), ('Ringers lactate 1L', 2)])
+d = last_req()
+as_user()
+
+
+def serve_some(doc, picks, received_by='Sr. Mokoena'):
+    """picks: {line index: give}. Only those lines are ticked."""
+    data = {'action': 'serve', 'request_id': str(doc['_id']), 'received_by': received_by,
+            'pick': '1', 'serve_note': ''}
+    for i, g in picks.items():
+        data[f'now__{i}'] = '1'
+        data[f'give__{i}'] = str(g)
+    # unticked lines still post their Give box, as the browser does
+    for i in range(len(doc['lines'])):
+        data.setdefault(f'give__{i}', '5')
+    return c.post('/requests', data=data, follow_redirects=True)
+
+
+page = c.get('/requests').data.decode()
+check('each line can be ticked to serve now', page.count('class="req-now"') == 3
+      and 'name="pick" value="1"' in page)
+r = serve_some(d, {})
+check('serving with nothing ticked is refused', 'Tick at least one item' in banner(r.data.decode())
+      and reqs.find_one({'_id': d['_id']})['status'] == 'Pending')
+r = serve_some(d, {0: 50})
+d2 = reqs.find_one({'_id': d['_id']})
+check('the ticked item is served', bal('Paracetamol tabs, 500 mg') == 450
+      and d2['lines'][0]['given'] == 50)
+check('the unticked items are left alone', bal('Gauze swabs') == 40
+      and d2['lines'][1]['given'] is None and d2['lines'][2]['given'] is None)
+check('their Give boxes are ignored, not issued',
+      txs.count_documents({'type': 'internal_issue', 'request_ref': d['ref']}) == 1)
+check('the request is In progress', d2['status'] == 'In progress', d2['status'])
+check('and says how much is still waiting', '2 still waiting' in banner(r.data.decode()))
+page = c.get('/requests').data.decode()
+check('it stays in the waiting list', f'id="{d["ref"]}"' in page)
+check('the served line shows as done, with no box to serve it again',
+      'gave 50' in page and page.count('class="req-now"') == 2)
+check('the menu still counts it as waiting', 'Requests <strong>(1)</strong>' in page)
+check('decline now offers to decline the rest', 'Decline the Rest' in page)
+as_ward()
+dp = c.get('/requests').data.decode()
+check('the department sees it in progress, with the rest to come',
+      'In progress' in dp and 'to come' in dp)
+c.post('/requests', data={'action': 'cancel', 'request_id': str(d['_id'])})
+check('a request part-served cannot be cancelled by the department',
+      reqs.find_one({'_id': d['_id']})['status'] == 'In progress')
+as_user()
+r = serve_some(d2, {0: 50})
+check('a line already served cannot be served again',
+      bal('Paracetamol tabs, 500 mg') == 450)
+d2 = reqs.find_one({'_id': d['_id']})
+r = serve_some(d2, {1: 10, 2: 0})
+d3 = reqs.find_one({'_id': d['_id']})
+check('the rest is served later', bal('Gauze swabs') == 30 and d3['lines'][1]['given'] == 10)
+check('and the out-of-stock line is unmet then', d3['lines'][2]['unmet'] == 2
+      and txs.count_documents({'type': 'unmet_demand', 'request_ref': d['ref']}) == 1)
+check('with every line dealt with, the request closes', d3['status'] == 'Part served', d3['status'])
+check('it leaves the waiting list', f'id="{d["ref"]}"' not in c.get('/requests').data.decode())
+
+as_ward()
+post([('Paracetamol tabs, 500 mg', 5), ('Gauze swabs', 3)])
+d = last_req()
+as_user()
+serve_some(d, {0: 5})
+c.post('/requests', data={'action': 'decline', 'request_id': str(d['_id']),
+                          'reason': 'Gauze is for theatre only'})
+d2 = reqs.find_one({'_id': d['_id']})
+check('declining the rest keeps what was given',
+      d2['lines'][0]['given'] == 5 and d2['lines'][1].get('declined') is True)
+check('and closes it as part served', d2['status'] == 'Part served', d2['status'])
+check('declining moves no stock', bal('Gauze swabs') == 30)
+as_ward()
+check('the department sees which line was declined, and why',
+      'declined' in c.get('/requests').data.decode() and 'Gauze is for theatre only' in c.get('/requests').data.decode())
+as_user()
+as_ward()
+post([('Gauze swabs', 3)])
+d = last_req()
+as_user()
+serve_some(d, {0: 3})
+check('ticking everything serves it in one go, as before',
+      reqs.find_one({'_id': d['_id']})['status'] == 'Served')
+
 print(f"\n=========  {len(PASS)} passed, {len(FAIL)} failed  =========")
 if FAIL:
     for f in FAIL:

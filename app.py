@@ -5050,6 +5050,25 @@ def _temperature_chart(readings: Iterable[Doc], year: int, month: int, location:
 REQ_PENDING = 'Pending'
 REQ_SERVED, REQ_PART, REQ_NONE = 'Served', 'Part served', 'Not supplied'
 REQ_DECLINED, REQ_CANCELLED = 'Declined', 'Cancelled'
+# Some lines served, the rest still to come. It stays in the queue.
+REQ_PROGRESS = 'In progress'
+REQ_OPEN = [REQ_PENDING, REQ_PROGRESS]          # waiting for the pharmacy
+
+
+def _line_done(ln: Doc) -> bool:
+    return ln.get('given') is not None
+
+
+def _final_status(lines: Docs) -> str:
+    """What a request is once every line has been dealt with."""
+    live = [l for l in lines if not l.get('declined')]
+    if not live:
+        return REQ_DECLINED
+    given = sum(l.get('given') or 0 for l in live)
+    if all((l.get('given') or 0) >= (l.get('requested') or 0) for l in live) and \
+            len(live) == len(lines):
+        return REQ_SERVED
+    return REQ_NONE if given == 0 else REQ_PART
 REQ_MAX_LINES = 30
 # Pages a department login may reach. Everything else sends it back to its
 # requests, so a typed address cannot open the dispensing register.
@@ -5076,7 +5095,7 @@ def keep_departments_to_requests() -> ResponseReturnValue | None:
 def _pending_request_count() -> int:
     try:
         return get_mongo_client()['pharmacy_db']['dept_requests'].count_documents(
-            {'status': REQ_PENDING})
+            {'status': {'$in': REQ_OPEN}})
     except Exception:
         return 0
 
@@ -5784,26 +5803,46 @@ def department_requests() -> ResponseReturnValue:
                 if not reason:
                     flash('Give the department a reason for declining.')
                     return redirect(url_for('department_requests'))
-                done = reqs.update_one({'_id': doc['_id'], 'status': REQ_PENDING},
-                                       {'$set': {'status': REQ_DECLINED,
+                # On a request already part-served, this declines only what is
+                # still waiting; what was given stays given.
+                lines = doc.get('lines') or []
+                left = [l for l in lines if not _line_done(l)]
+                dlines: Docs = [l if _line_done(l) else {**l, 'given': 0, 'unmet': 0, 'declined': True}
+                                for l in lines]
+                status = _final_status(dlines) if len(left) < len(lines) else REQ_DECLINED
+                done = reqs.update_one({'_id': doc['_id'], 'status': {'$in': REQ_OPEN}},
+                                       {'$set': {'status': status, 'lines': dlines,
                                                  'decline_reason': reason[:200],
                                                  'served_by': me,
                                                  'served_at': datetime.utcnow()}})
                 if not done.modified_count:
                     flash(f"{doc['ref']} is no longer waiting ({doc.get('status')}).")
                     return redirect(url_for('department_requests'))
-                write_audit_entry('UPDATE', 'dept_request', doc['ref'], f'declined by {me}: {reason}')
-                flash(f"Request {doc['ref']} from {doc['department']} declined.", 'partial')
+                what = ('declined' if len(left) == len(lines)
+                        else f"remaining {len(left)} item(s) declined")
+                write_audit_entry('UPDATE', 'dept_request', doc['ref'], f'{what} by {me}: {reason}')
+                flash(f"Request {doc['ref']} from {doc['department']}: {what}.", 'partial')
                 return redirect(url_for('department_requests'))
 
             if action == 'serve':
+                if doc.get('status') not in REQ_OPEN:
+                    flash(f"{doc['ref']} is no longer waiting - it has already been "
+                          f"dealt with ({doc.get('status')}).")
+                    return redirect(url_for('department_requests'))
                 received_by = (request.form.get('received_by') or '').strip()
                 if not received_by:
                     flash('Enter who from the department is collecting the stock.')
                     return redirect(url_for('department_requests', _anchor=doc['ref']))
                 lines = doc.get('lines') or []
+                # Which lines to serve now. The page sends pick=1 with a tick
+                # per line; a line left unticked stays waiting for later.
+                picking = bool(request.form.get('pick'))
                 plan, problems = [], []
                 for i, ln in enumerate(lines):
+                    if _line_done(ln):
+                        continue                    # served on an earlier visit
+                    if picking and not request.form.get(f'now__{i}'):
+                        continue                    # left for later
                     raw = (request.form.get(f'give__{i}') or '').strip()
                     try:
                         give = int(raw or '0')
@@ -5826,9 +5865,13 @@ def department_requests() -> ResponseReturnValue:
                 if problems:
                     flash(f"Nothing was issued for {doc['ref']}: " + '; '.join(problems) + '.')
                     return redirect(url_for('department_requests', _anchor=doc['ref']))
+                if not plan:
+                    flash(f"Tick at least one item of {doc['ref']} to serve now.")
+                    return redirect(url_for('department_requests', _anchor=doc['ref']))
                 # Claim it first. Two people serving the same request from two
                 # screens would otherwise issue it twice.
-                claim = reqs.update_one({'_id': doc['_id'], 'status': REQ_PENDING},
+                was_status = doc.get('status')
+                claim = reqs.update_one({'_id': doc['_id'], 'status': {'$in': REQ_OPEN}},
                                         {'$set': {'status': 'Serving', 'served_by': me}})
                 if not claim.modified_count:
                     now_doc = reqs.find_one({'_id': doc['_id']}) or {}
@@ -5837,7 +5880,8 @@ def department_requests() -> ResponseReturnValue:
                     return redirect(url_for('department_requests'))
                 now = datetime.utcnow()
                 served_note = (request.form.get('serve_note') or '').strip()[:200]
-                new_lines, issued, short = [], [], []
+                new_lines: Docs = [dict(l) for l in lines]
+                issued, short = [], []
                 for i, ln, med, give, asked, on_hand in plan:
                     # The part that could not be given for want of stock.
                     # Giving less than is on the shelf is the pharmacist's
@@ -5870,22 +5914,32 @@ def department_requests() -> ResponseReturnValue:
                             'user': me, 'timestamp': now,
                         })
                         short.append(f"{ln['med_name']} {unmet} short")
-                    new_lines.append({**ln, 'given': give, 'unmet': unmet})
-                total_asked = sum(l['requested'] for l in new_lines)
-                total_given = sum(l['given'] for l in new_lines)
-                status = (REQ_SERVED if all(l['given'] >= l['requested'] for l in new_lines)
-                          else REQ_NONE if total_given == 0 else REQ_PART)
+                    new_lines[i] = {**ln, 'given': give, 'unmet': unmet, 'served_by': me,
+                                    'served_at': now, 'received_by': received_by}
+                left = [l for l in new_lines if not _line_done(l)]
+                status = REQ_PROGRESS if left else _final_status(new_lines)
                 reqs.update_one({'_id': doc['_id']}, {'$set': {
                     'status': status, 'lines': new_lines, 'served_by': me,
                     'served_at': now, 'received_by': received_by,
                     'serve_note': served_note}})
                 write_audit_entry('UPDATE', 'dept_request', doc['ref'],
-                                  f"{status.lower()} by {me} to {doc['department']} "
+                                  f"{'part of it ' if left or was_status == REQ_PROGRESS else ''}"
+                                  f"served by {me} to {doc['department']} "
                                   f"({received_by}): "
                                   + (', '.join(issued) or 'nothing issued')
-                                  + (f"; unmet: {', '.join(short)}" if short else ''))
-                msg = f"{doc['ref']} for {doc['department']}: {status.lower()}"
-                msg += f" ({total_given} of {total_asked} units)." 
+                                  + (f"; unmet: {', '.join(short)}" if short else '')
+                                  + (f"; {len(left)} item(s) still waiting" if left else ''))
+                now_given = sum(p_[3] for p_ in plan)
+                now_asked = sum(p_[4] for p_ in plan)
+                if left:
+                    msg = (f"{doc['ref']} for {doc['department']}: {len(plan)} item"
+                           f"{'' if len(plan) == 1 else 's'} served ({now_given} of {now_asked} units). "
+                           f"{len(left)} still waiting - it stays in the list to finish later.")
+                else:
+                    total_asked = sum(l['requested'] for l in new_lines if not l.get('declined'))
+                    total_given = sum(l.get('given') or 0 for l in new_lines if not l.get('declined'))
+                    msg = (f"{doc['ref']} for {doc['department']}: {status.lower()} "
+                           f"({total_given} of {total_asked} units).")
                 if short:
                     msg += ' Recorded as unmet demand: ' + '; '.join(short) + '.'
                 flash(msg, 'success' if status == REQ_SERVED else 'partial')
@@ -5909,7 +5963,7 @@ def department_requests() -> ResponseReturnValue:
                 mine=mine, pending=[], history=[], departments=REQUEST_DEPARTMENTS,
                 waited=_waited, max_lines=REQ_MAX_LINES)
 
-        pending_docs = list(reqs.find({'status': {'$in': [REQ_PENDING, 'Serving']}})
+        pending_docs = list(reqs.find({'status': {'$in': REQ_OPEN + ['Serving']}})
                             .sort('requested_at', 1))
         wanted = sorted({ln.get('med_name', '') for d in pending_docs
                          for ln in d.get('lines') or []})
@@ -5917,7 +5971,7 @@ def department_requests() -> ResponseReturnValue:
                     medications.find({'name': {'$in': wanted}}, {'_id': 0, 'name': 1, 'balance': 1})}
         pending = [_request_row(d, balances) for d in pending_docs]
         dept_filter = (request.args.get('department') or '').strip()
-        hq: Query = {'status': {'$nin': [REQ_PENDING, 'Serving']}}
+        hq: Query = {'status': {'$nin': REQ_OPEN + ['Serving']}}
         if dept_filter in REQUEST_DEPARTMENTS:
             hq['department'] = dept_filter
         history = [_request_row(d) for d in

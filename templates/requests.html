@@ -37,6 +37,9 @@
   .req-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px;
                font-weight: bold; background: #e9ecef; color: #333; white-space: nowrap; }
   .req-badge.Pending, .req-badge.Serving { background: #fff3cd; color: #856404; }
+  .req-badge.In.progress { background: #d6e9ff; color: #0b4a8b; }
+  .req-done td { color: #666; background: #f4f6f8 !important; }
+  .req-now { width: 22px; height: 22px; min-height: 0; margin: 0; }
   .req-badge.Served { background: #d4edda; color: #155724; }
   .req-badge.Part.served { background: #ffe5b4; color: #7a4b00; }
   .req-badge.Not.supplied, .req-badge.Declined { background: #f8d7da; color: #721c24; }
@@ -155,8 +158,8 @@ document.addEventListener('DOMContentLoaded', function () {
     <tr>
         <td>{{ l.med_name }}</td>
         <td>{{ l.requested }}</td>
-        <td>{{ l.given if l.given is not none else '&ndash;'|safe }}</td>
-        <td>{% if l.given is none %}&ndash;{% elif l.given < l.requested %}<span class="req-short">{{ l.requested - l.given }}</span>{% else %}0{% endif %}</td>
+        <td>{% if l.declined %}declined{% elif l.given is not none %}{{ l.given }}{% elif r.status == 'In progress' %}<em>to come</em>{% else %}&ndash;{% endif %}</td>
+        <td>{% if l.given is none or l.declined %}&ndash;{% elif l.given < l.requested %}<span class="req-short">{{ l.requested - l.given }}</span>{% else %}0{% endif %}</td>
     </tr>
     {% endfor %}
 </table></div>
@@ -290,7 +293,7 @@ need. The pharmacy sees it straight away, and this page shows what was given.</p
     <h3>{{ r.ref }} <span class="req-badge {{ r.status }}">{{ r.status }}</span></h3>
     <p class="req-meta">Sent {{ r.requested_at|local }}
         by {{ r.requested_by }}{% if r.note %} &middot; &ldquo;{{ r.note }}&rdquo;{% endif %}
-        {% if r.status in ['Served', 'Part served', 'Not supplied'] %}<br>Served by {{ r.served_by }}{% if r.received_by %}, collected by {{ r.received_by }}{% endif %}{% endif %}
+        {% if r.status in ['Served', 'Part served', 'Not supplied', 'In progress'] %}<br>{% if r.status == 'In progress' %}Partly served so far by{% else %}Served by{% endif %} {{ r.served_by }}{% if r.received_by %}, collected by {{ r.received_by }}{% endif %}{% endif %}
         {% if r.status == 'Declined' %}<br>Declined by {{ r.served_by }}: {{ r.reason }}{% endif %}
         {% if r.status in ['Served', 'Part served', 'Not supplied'] and r.reason %}<br>Pharmacy note: {{ r.reason }}{% endif %}
     </p>
@@ -331,24 +334,39 @@ and the count shows beside Requests on every page.</p>{% endif %}
     not finish. Check Internal Issues for {{ r.ref }} before doing anything with it.</p>
     {% else %}
     <form method="POST" action="{{ url_for('department_requests') }}"
-          onsubmit="return confirm({{ ('Issue this to ' ~ r.department ~ '? Stock comes off the shelf now.')|tojson }});">
+          class="req-serve-form"
+          onsubmit="return confirm({{ ('Issue the ticked items to ' ~ r.department ~ '? Stock comes off the shelf now.')|tojson }});">
         <input type="hidden" name="action" value="serve">
         <input type="hidden" name="request_id" value="{{ r.id }}">
+        <input type="hidden" name="pick" value="1">
         <div class="table-scroll"><table>
-            <tr><th>Item</th><th>Asked</th><th>On hand</th><th>Give</th></tr>
+            <tr><th>Now</th><th>Item</th><th>Asked</th><th>On hand</th><th>Give</th></tr>
             {% for l in r.lines %}
+            {% if l.given is not none %}
+            <tr class="req-done">
+                <td>&#10003;</td>
+                <td>{{ l.med_name }}</td>
+                <td>{{ l.requested }}</td>
+                <td colspan="2">{% if l.declined %}declined{% else %}gave {{ l.given }}{% if l.served_at %}, {{ l.served_at|local('%d %b %H:%M') }}{% endif %}{% if l.unmet %} &middot; <span class="req-short">{{ l.unmet }} unmet</span>{% endif %}{% endif %}</td>
+            </tr>
+            {% else %}
             <tr class="{% if l.on_hand < l.requested %}req-none{% endif %}">
+                <td><input type="checkbox" name="now__{{ l.i }}" value="1" checked class="req-now"
+                           aria-label="Serve {{ l.med_name }} now"></td>
                 <td>{{ l.med_name }}</td>
                 <td>{{ l.requested }}</td>
                 <td class="onhand">{{ l.on_hand }}</td>
                 <td><input type="number" name="give__{{ l.i }}" value="{{ l.suggest }}"
                            min="0" max="{{ [l.requested, l.on_hand]|min }}" step="1"></td>
             </tr>
+            {% endif %}
             {% endfor %}
         </table></div>
-        <p class="req-hint">Give is filled in with what you can supply. Anything short
-        because the shelf is empty is recorded as unmet demand, so the next order
-        covers it. Giving less than you have is your call and is not counted as unmet.</p>
+        <p class="req-hint"><strong>Untick an item to leave it for later</strong> &mdash; the
+        request stays here until every item is dealt with. Give is filled in with what you
+        can supply. Anything short because the shelf is empty is recorded as unmet demand,
+        so the next order covers it. Giving less than you have is your call and is not
+        counted as unmet.</p>
         <div class="req-serve">
             <div>
                 <label>Collected by (from {{ r.department }}):</label>
@@ -362,14 +380,15 @@ and the count shows beside Requests on every page.</p>{% endif %}
                 <label>Note to the department (optional):</label>
                 <input name="serve_note" type="text" maxlength="200">
             </div>
-            <div style="flex:0 0 auto;"><button type="submit">Serve</button></div>
+            <div style="flex:0 0 auto;"><button type="submit">Serve Ticked Items</button></div>
         </div>
     </form>
     <form method="POST" action="{{ url_for('department_requests') }}" class="req-decline">
         <input type="hidden" name="action" value="decline">
         <input type="hidden" name="request_id" value="{{ r.id }}">
-        <input name="reason" type="text" maxlength="200" placeholder="Reason, if declining the whole request" required>
-        <button type="submit">Decline</button>
+        <input name="reason" type="text" maxlength="200" required
+               placeholder="{% if r.status == 'In progress' %}Reason, if declining the items still waiting{% else %}Reason, if declining the whole request{% endif %}">
+        <button type="submit">{% if r.status == 'In progress' %}Decline the Rest{% else %}Decline{% endif %}</button>
     </form>
     {% endif %}
 </div>
