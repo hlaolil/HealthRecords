@@ -10060,6 +10060,36 @@ def _medication_names() -> list[str]:
         return []
 
 
+@app.route('/api/stock', methods=['GET'])
+@login_required
+def api_stock() -> ResponseReturnValue:
+    """One item's balance as it stands now, for the dispensing form.
+
+    Asked for each time an item is picked rather than loaded with the page,
+    so a dispense made at the next counter a minute ago is already counted.
+    """
+    name = (request.args.get('name') or '').strip()
+    if not name:
+        return jsonify({'found': False})
+    try:
+        med = get_mongo_client()['pharmacy_db']['medications'].find_one(
+            {'name': name}, {'_id': 0, 'balance': 1, 'expiry_date': 1})
+    except Exception as e:
+        app.logger.warning(f'stock lookup failed: {e}')
+        return jsonify({'found': False, 'error': True})
+    if not med:
+        return jsonify({'found': False})
+    exp = _expiry_iso(med.get('expiry_date')) if med.get('expiry_date') else None
+    days = None
+    if exp:
+        try:
+            days = (datetime.strptime(exp, '%Y-%m-%d').date() - local_now().date()).days
+        except ValueError:
+            days = None
+    return jsonify({'found': True, 'balance': _num(med.get('balance', 0) or 0),
+                    'expiry': exp, 'expiry_days': days})
+
+
 @app.route('/api/medications', methods=['GET'])
 @login_required
 def get_medication_options() -> ResponseReturnValue:

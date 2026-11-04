@@ -11,6 +11,10 @@
                 border-radius: 4px; padding: 4px 8px; margin-top: 4px;
                 display: none; }
   .draft-note.shown { display: block; }
+  /* The shelf balance under each medication, as it is picked. */
+  .med-stock { display: block; font-size: 13px; margin-top: 3px; color: #155724; min-height: 1em; }
+  .med-stock.low { color: #721c24; font-weight: bold; }
+  .med-stock.warn { color: #856404; }
 </style>
 {% endblock %}
 {% block content %}{% include "_medication_options.html" %}
@@ -364,6 +368,87 @@ details repeated down its rows.</p>
 {{ pagebar(pager, 'dispense', '' if window_defaulted else start_date, '' if window_defaulted else end_date, search, unit) }}
 <script>
 let medRowCount = {{ (tx_data.meds|length if tx_data else 1) }};
+
+// ---- Stock on hand, shown under each medication as it is chosen --------
+// Asked of the server each time an item is picked, so a dispense made at
+// another counter a minute ago is already counted. Only shown, never
+// enforced here: dispensing more than is on hand still records the rest as
+// unmet demand, which is what the order is worked from.
+const EDITING = {{ 'true' if tx_data else 'false' }};
+const _stock = {};
+async function stockOf(name) {
+    if (!name) return null;
+    const hit = _stock[name];
+    if (hit && Date.now() - hit.at < 30000) return hit.data;
+    try {
+        const res = await fetch('/api/stock?name=' + encodeURIComponent(name));
+        const data = res.ok ? await res.json() : null;
+        _stock[name] = {at: Date.now(), data: data};
+        return data;
+    } catch (e) { return null; }
+}
+function stockNote(row) {
+    let el = row.querySelector('.med-stock');
+    if (!el) {
+        el = document.createElement('small');
+        el.className = 'med-stock';
+        el.setAttribute('aria-live', 'polite');
+        row.querySelector('[name="med_names"]').insertAdjacentElement('afterend', el);
+    }
+    return el;
+}
+async function showStock(row) {
+    const nameEl = row.querySelector('[name="med_names"]');
+    if (!nameEl) return;
+    const name = nameEl.value.trim(), el = stockNote(row);
+    if (!name) { el.textContent = ''; el.className = 'med-stock'; return; }
+    const d = await stockOf(name);
+    if (nameEl.value.trim() !== name) return;          // changed while we asked
+    if (!d || !d.found) {
+        el.textContent = d && d.error ? '' : 'Not on the medication list';
+        el.className = 'med-stock warn';
+        return;
+    }
+    // Same item on two lines: what they take together against the shelf.
+    let wanted = 0;
+    document.querySelectorAll('#medications .med-row').forEach(function (r) {
+        const n = r.querySelector('[name="med_names"]'), q = r.querySelector('[name="quantities"]');
+        if (n && q && n.value.trim() === name) wanted += parseInt(q.value, 10) || 0;
+    });
+    let text = 'On hand: ' + d.balance, cls = 'med-stock';
+    if (EDITING) {
+        text += ' (this visit is already off it)';
+    } else if (d.balance <= 0) {
+        text = 'Out of stock \u2014 the quantity will be recorded as unmet demand'; cls += ' low';
+    } else if (wanted > d.balance) {
+        text += ' \u2014 only ' + d.balance + ' can be given; ' + (wanted - d.balance) +
+                ' will be recorded as unmet'; cls += ' low';
+    }
+    if (d.expiry_days !== null && d.expiry_days !== undefined) {
+        if (d.expiry_days < 0) { text += ' \u00b7 EXPIRED ' + d.expiry; cls = 'med-stock low'; }
+        else if (d.expiry_days <= 90) { text += ' \u00b7 expires ' + d.expiry; if (cls === 'med-stock') cls += ' warn'; }
+    }
+    el.textContent = text;
+    el.className = cls;
+}
+function showAllStock() {
+    document.querySelectorAll('#medications .med-row').forEach(showStock);
+}
+document.addEventListener('DOMContentLoaded', function () {
+    const box = document.getElementById('medications');
+    if (!box) return;
+    let t = null;
+    function onEdit(e) {
+        if (!e.target.matches('[name="med_names"], [name="quantities"]')) return;
+        clearTimeout(t);
+        // a quantity change can matter to another line with the same item
+        t = setTimeout(e.target.name === 'quantities' ? showAllStock
+                       : function () { showStock(e.target.closest('.med-row')); }, 250);
+    }
+    box.addEventListener('input', onEdit);
+    box.addEventListener('change', onEdit);
+    showAllStock();
+});
 let diagRowCount = {{ (tx_data.diags|length if tx_data else 1) }};
 
 // Filled from /api/people-options, which answers with the companies and
@@ -485,6 +570,7 @@ function clearForm() {
     const medsContainer = document.getElementById('medications');
     while (medsContainer.children.length > 1) medsContainer.removeChild(medsContainer.lastChild);
     medsContainer.firstElementChild.querySelectorAll('input').forEach(el => el.value = '');
+    medsContainer.querySelectorAll('.med-stock').forEach(el => { el.textContent = ''; el.className = 'med-stock'; });
     medRowCount = 1;
 
     ['med_suggestions','diag_suggestions','company_suggestions','position_suggestions']
@@ -602,6 +688,7 @@ function draftRestore() {
     document.querySelectorAll('[name="quantities"]').forEach(function (el, i) {
         if (d.qtys[i]) el.value = d.qtys[i];
     });
+    if (typeof showAllStock === 'function') showAllStock();
     var n = document.getElementById('draft-note');
     if (n) {
         n.textContent = 'This is the visit you had started. Nothing was lost. '
