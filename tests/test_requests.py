@@ -798,6 +798,16 @@ def serve_some(doc, picks, received_by='Sr. Mokoena'):
 page = c.get('/requests').data.decode()
 check('each line can be ticked to serve now', page.count('class="req-now"') == 3
       and 'name="pick" value="1"' in page)
+# Asked for: "you have made mark all as default but I will most likely not
+# serve at once" - nothing is ticked until the pharmacist ticks it.
+check('no line is ticked to start with',
+      _re.search(r'name="now__\d+" value="1"\s+checked', page) is None
+      and page.count('class="req-now"') == 3)
+check('a Tick all button is there for serving it all', 'class="req-tickall"' in page)
+check('no inline handler holds a double-quoted message, which would cut the attribute short',
+      _re.search(r'on[a-z]+="[^"]*\(\s*"', page) is None)
+check('the confirm message is in a data attribute instead',
+      'data-confirm="Issue the ticked items to Emergency Department?' in page)
 r = serve_some(d, {})
 check('serving with nothing ticked is refused', 'Tick at least one item' in banner(r.data.decode())
       and reqs.find_one({'_id': d['_id']})['status'] == 'Pending')

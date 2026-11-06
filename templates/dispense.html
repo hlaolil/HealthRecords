@@ -12,21 +12,7 @@
                 display: none; }
   .draft-note.shown { display: block; }
   /* The shelf balance under each medication, as it is picked. */
-  .med-stock { display: block; font-size: 13px; color: #155724; }
-  .med-stock:empty { display: none; }
-  /* Its own line under the boxes, so Medication and Quantity stay level. */
-  .med-row > .med-stock { grid-column: 1 / -1; grid-row: 2; margin: -4px 0 0; }
-  /* Three fixed columns squeezed each card until the name was unreadable and
-     the third ran off the form; cards now wrap, and the name gets the room. */
-  @media (min-width: 821px) {
-      #medications { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
-      #medications .med-row { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; }
-  }
-  #medications .med-row > div { min-width: 0; }
-  /* Filter, Download CSV and Clear did not fit their cell and Clear hung
-     outside the box; they wrap now instead. */
-  .filter-section .button-div { flex-wrap: wrap; align-items: center; }
-  .filter-section .button-div a { padding: 6px 4px; }
+  .med-stock { display: block; font-size: 13px; margin-top: 3px; color: #155724; min-height: 1em; }
   .med-stock.low { color: #721c24; font-weight: bold; }
   .med-stock.warn { color: #856404; }
 </style>
@@ -407,7 +393,7 @@ function stockNote(row) {
         el = document.createElement('small');
         el.className = 'med-stock';
         el.setAttribute('aria-live', 'polite');
-        row.querySelector('[name="med_names"]').closest('div').insertAdjacentElement('afterend', el);
+        row.querySelector('[name="med_names"]').insertAdjacentElement('afterend', el);
     }
     return el;
 }

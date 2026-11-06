@@ -30,38 +30,49 @@
    shelf must always be recordable. #}
 
 {% if rx_data %}
-<h2>Edit Receive Line</h2>
+<h2>Correct a Receive Line</h2>
+{% if line_delivery %}
+<p style="font-size:13px;">On delivery <strong>{{ line_delivery.reference }}</strong> &mdash;
+{{ line_delivery.supplier }}, order {{ line_delivery.order_number }}, invoice
+{{ line_delivery.invoice_number }}, received by {{ line_delivery.stock_receiver }}.
+These belong to the delivery and are the same for every line on it, so they are not
+changed here.</p>
+{% endif %}
+<p style="font-size:13px;">As when the line was added: the quantity in
+<strong>single units</strong> and the price of a <strong>whole pack</strong>; the unit
+price is worked out from the two. The date it was received stays as it was, and the
+change is kept with the line and in the audit log. The schedule comes from the
+medication &mdash; change it under Edit Medication.</p>
 <form method="POST" action="{{ url_for('edit_receive', receive_id=rx_data.receive_id) }}" class="receive-form">
     <input type="hidden" name="receive_id" value="{{ rx_data.receive_id }}">
     <div class="common-section">
         <div><label>Medication:</label>
-            <input name="med_name" id="med_name" list="med_suggestions" value="{{ rx_data.med_name }}" required></div>
-        <div><label>Quantity:</label>
+            <input name="med_name" id="med_name" list="med_suggestions" value="{{ rx_data.med_name }}" required autocomplete="off"></div>
+        <div><label>Quantity (single units):</label>
             <input name="quantity" type="number" min="1" value="{{ rx_data.quantity }}" required></div>
+        <div><label>Pack Size (units per pack):</label>
+            <input name="pack_size" type="number" min="1" value="{{ rx_data.pack_size or 1 }}" required></div>
+        <div><label>Price per Pack (R):</label>
+            <input name="pack_price" type="number" step="0.01" min="0" value="{{ '%.2f'|format(rx_data.pack_price or 0) }}" required></div>
         <div><label>Batch:</label><input name="batch" value="{{ rx_data.batch }}" required></div>
-        <div><label>Price per Unit:</label>
-            <input name="price" type="number" step="0.01" min="0" value="{{ rx_data.price }}" required></div>
         <div><label>Expiry Date:</label>
             <input name="expiry_date" type="date" value="{{ rx_data.expiry_date }}" required></div>
-        <div><label>Schedule:</label>
-            <select name="schedule" required>
-            {% for opt in ['controlled', 'not controlled'] %}
-                <option value="{{ opt }}" {% if rx_data.schedule == opt %}selected{% endif %}>{{ opt|title }}</option>
-            {% endfor %}
-            </select></div>
+        {% if not line_delivery %}
+        {# A line from before deliveries keeps these on itself. #}
         <div><label>Stock Receiver:</label>
-            <input name="stock_receiver" value="{{ rx_data.stock_receiver if rx_data else current_user }}" required></div>
+            <input name="stock_receiver" value="{{ rx_data.stock_receiver or current_user }}" required></div>
         <div><label>Order Number:</label>
             <input name="order_number" value="{{ rx_data.order_number }}" required></div>
         <div><label>Supplier:</label>
             <input name="supplier" value="{{ rx_data.supplier }}" required></div>
         <div><label>Invoice Number:</label>
             <input name="invoice_number" value="{{ rx_data.invoice_number }}" required></div>
+        {% endif %}
     </div>
     <datalist id="med_suggestions"></datalist>
     <div class="form-buttons">
-        <input type="submit" value="Update Receive">
-        <a href="{{ url_for('receive') }}"><button type="button">Cancel</button></a>
+        <input type="submit" value="Save Correction">
+        <a href="{{ url_for('receive', delivery_id=line_delivery._id|string) if line_delivery else url_for('receive') }}"><button type="button">Cancel</button></a>
     </div>
 </form>
 

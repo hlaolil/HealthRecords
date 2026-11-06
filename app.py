@@ -9111,69 +9111,132 @@ def edit_receive(receive_id: str) -> ResponseReturnValue:
             return redirect(url_for('receive', start_date=start_date or '',
                                     end_date=end_date or '', search=search or ''))
 
-        if request.method == 'POST' and rx_data:
-            try:
-                oid    = ObjectId(receive_id)
-                old_rx = transactions.find_one({'_id': oid})
-                if not old_rx or old_rx['type'] != 'receive':
-                    message = "Transaction not found."
-                    write_app_warning(
-                        'transaction_not_found',
-                        f'Receive transaction "{receive_id}" not found when attempting to edit.',
-                        {'receive_id': receive_id}
-                    )
-                else:
-                    medications.update_one({'name': old_rx['med_name']},
-                                           {'$inc': {'balance': -old_rx['quantity']}})
-                    med_name       = request.form['med_name'].strip()
-                    quantity       = int(request.form['quantity'])
-                    batch          = request.form['batch']
-                    price          = float(request.form['price'])
-                    expiry_date    = request.form['expiry_date']
-                    schedule       = request.form['schedule']
-                    stock_receiver = request.form['stock_receiver']
-                    order_number   = request.form['order_number']
-                    supplier       = request.form['supplier']
-                    invoice_number = request.form['invoice_number']
+        # The line's delivery, if it came in on one: supplier, order, invoice
+        # and receiver belong to the delivery and are shown, not edited here.
+        line_delivery = None
+        if rx_data and rx_data.get('delivery_id'):
+            line_delivery = _load_delivery(db['deliveries'], rx_data.get('delivery_id'))
+        if rx_data:
+            # Lines received before pack pricing carry a unit price only.
+            rx_data.setdefault('pack_size', 1)
+            if not rx_data.get('pack_price'):
+                rx_data['pack_price'] = round((rx_data.get('price') or 0)
+                                              * (rx_data.get('pack_size') or 1), 2)
 
-                    medications.update_one(
-                        {'name': med_name},
-                        {'$inc': {'balance': quantity},
-                         # FIX (Bug): schedule deliberately excluded here too —
-                         # editing a receive line must not be able to reclassify
-                         # a controlled drug. Change it under Edit Medication.
-                         #
-                         # pack_price is recomputed from the edited unit price and
-                         # the pack size already on file, so the three figures
-                         # cannot drift apart and leave the order request costing
-                         # packs at a stale rate.
-                         '$set': {'batch': batch, 'price': price, 'expiry_date': expiry_date,
-                                  'pack_price': price * (medications.find_one(
-                                      {'name': med_name}, {'_id': 0, 'pack_size': 1}
-                                  ) or {}).get('pack_size', 1),
-                                  'stock_receiver': stock_receiver,
-                                  'order_number': order_number, 'supplier': supplier,
-                                  'invoice_number': invoice_number}},
-                        upsert=True
-                    )
-                    transactions.update_one(
-                        {'_id': oid},
-                        {'$set': {'med_name': med_name, 'quantity': quantity, 'batch': batch,
-                                  'price': price, 'expiry_date': expiry_date, 'schedule': schedule,
-                                  'stock_receiver': stock_receiver, 'order_number': order_number,
-                                  'supplier': supplier, 'invoice_number': invoice_number,
-                                  'user': current_user, 'timestamp': datetime.utcnow()}}
-                    )
-                    return redirect(url_for('receive', start_date=start_date or '',
-                                            end_date=end_date or '', search=search or ''))
-            except Exception as e:
-                message = f"Update failed: {str(e)}"
+        if request.method == 'POST' and rx_data:
+            # Rewritten to match Add a Line. It used to ask for a schedule and a
+            # unit price, re-date the receipt to the moment of the edit (moving
+            # it into this month's figures), take the old quantity off the
+            # shelf before checking the form (so a mistyped box left the
+            # balance short), create a new medication from a mistyped name,
+            # and let one line's supplier and invoice drift from its delivery.
+            old_rx = rx_data
+            problems = []
+            med_name = (request.form.get('med_name') or '').strip()
+            try:
+                quantity = int(request.form.get('quantity') or '')
+                if quantity < 1:
+                    problems.append('the quantity must be at least 1')
+            except ValueError:
+                quantity = 0
+                problems.append('the quantity must be a whole number of single units')
+            try:
+                pack_size = int(request.form.get('pack_size') or 1)
+                if pack_size < 1:
+                    problems.append('the pack size must be at least 1')
+            except ValueError:
+                pack_size = 1
+                problems.append('the pack size must be a whole number')
+            try:
+                pack_price = float(request.form.get('pack_price') or '')
+                if pack_price < 0:
+                    problems.append('the price cannot be negative')
+            except ValueError:
+                pack_price = 0.0
+                problems.append('enter the price per pack')
+            batch = (request.form.get('batch') or '').strip()
+            if not batch:
+                problems.append('enter the batch')
+            expiry_date = (request.form.get('expiry_date') or '').strip()
+            try:
+                datetime.strptime(expiry_date, '%Y-%m-%d')
+            except ValueError:
+                problems.append('enter a valid expiry date')
+            new_med = medications.find_one({'name': med_name}) if med_name else None
+            if not new_med:
+                problems.append(f'"{med_name}" is not on the medication list - choose it '
+                                f'from the suggestions')
+            legacy: Doc = {}
+            if not line_delivery:
+                # A line from before deliveries keeps these on the line itself.
+                for f in ('stock_receiver', 'order_number', 'supplier', 'invoice_number'):
+                    legacy[f] = (request.form.get(f) or '').strip() or old_rx.get(f, '')
+            old_med_name = old_rx['med_name']
+            old_qty = old_rx.get('quantity', 0) or 0
+            # Taking the stock back off cannot leave a negative shelf: if it
+            # has been dispensed since, it has to be corrected at a stock take.
+            if not problems and new_med is not None:
+                if new_med['name'] == old_med_name:
+                    shortfall = (new_med.get('balance', 0) or 0) - old_qty + quantity
+                    if shortfall < 0:
+                        problems.append(f'only {_num(new_med.get("balance", 0))} of '
+                                        f'{old_med_name} is left on the shelf, so the '
+                                        f'quantity cannot come down by {old_qty - quantity}')
+                else:
+                    om = medications.find_one({'name': old_med_name}) or {}
+                    if (om.get('balance', 0) or 0) < old_qty:
+                        problems.append(f'{old_med_name} has only {_num(om.get("balance", 0))} '
+                                        f'left, so the {old_qty} received cannot be moved '
+                                        f'to another item')
+            if problems or new_med is None:
+                message = 'Nothing was changed: ' + '; '.join(problems) + '.'
+            else:
+                price = _unit_price(pack_price, pack_size)
+                line_value = quantity * pack_price / pack_size
+                if new_med['name'] == old_med_name:
+                    medications.update_one({'name': old_med_name},
+                                           {'$inc': {'balance': quantity - old_qty}})
+                else:
+                    medications.update_one({'name': old_med_name},
+                                           {'$inc': {'balance': -old_qty}})
+                    medications.update_one({'name': med_name},
+                                           {'$inc': {'balance': quantity}})
+                # The item's current batch, expiry and price are this line's only
+                # if it is the item's latest receipt; correcting an old line must
+                # not put a finished batch back on file as the current one.
+                latest = transactions.find_one({'type': 'receive', 'med_name': med_name},
+                                               sort=[('timestamp', -1)])
+                if not latest or latest['_id'] == old_rx['_id'] or \
+                        (latest.get('timestamp') or datetime.min) <= (old_rx.get('timestamp') or datetime.min):
+                    medications.update_one({'name': med_name}, {'$set': {
+                        'batch': batch, 'price': price, 'expiry_date': expiry_date,
+                        'pack_size': pack_size, 'pack_price': pack_price}})
+                fields: Doc = {'med_name': med_name, 'quantity': quantity, 'batch': batch,
+                               'price': price, 'pack_size': pack_size, 'pack_price': pack_price,
+                               'line_value': line_value, 'expiry_date': expiry_date,
+                               'schedule': new_med.get('schedule', 'not controlled'), **legacy}
+                changes = {k: {'from': old_rx.get(k), 'to': v} for k, v in fields.items()
+                           if k not in ('line_value', 'schedule') and old_rx.get(k) != v}
+                transactions.update_one({'_id': old_rx['_id']}, {
+                    '$set': {**fields, 'edited_by': current_user,
+                             'edited_at': datetime.utcnow()},
+                    '$push': {'corrections': {'at': datetime.utcnow(), 'by': current_user,
+                                              'changes': changes}}})
+                said = '; '.join(f"{k} {v['from']} -> {v['to']}" for k, v in changes.items()) \
+                    or 'saved with no change'
+                ref = old_rx.get('delivery_reference') or str(old_rx['_id'])
+                write_audit_entry('UPDATE', 'receive', ref, f'line corrected: {said}')
+                flash(f'{med_name}: receive line corrected successfully ({said}).', 'success')
+                if line_delivery:
+                    return redirect(url_for('receive', delivery_id=str(line_delivery['_id'])))
+                return redirect(url_for('receive', start_date=start_date or '',
+                                        end_date=end_date or '', search=search or ''))
 
         return render_template(
             'receive.html',
             tx_list=tx_list, nav_links=get_nav_links(),
             message=message, start_date=start_date, end_date=end_date,
-            search=search, rx_data=rx_data,
+            search=search, rx_data=rx_data, line_delivery=line_delivery,
             current_user=session['user']['name'],
             delivery=None, delivery_lines=[], recon={}, deliveries=[], order_summary=None,
             pager=pager, window_defaulted=False, unit='receipts'
