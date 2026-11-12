@@ -252,9 +252,9 @@ add_med('Fine Item, 10 mg', 100, price=2.0, expiry='2030-01-01')
 body = client.get('/dashboard').data.decode()
 check('tile: 4 items tracked', '>4</div>' in body)
 check('tile: expired on shelf present', 'Expired on shelf' in body)
-check('tile: expiring in 90 days shows value at risk', 'R30.00 at risk' in body)
+check('tile: expiring in 90 days shows value at risk', 'M30.00 at risk' in body)
 # 0*? + 20*5 + 10*3 + 100*2 = 330
-check('tile: stock value totals correctly', 'R330' in body)
+check('tile: stock value totals correctly', 'M330' in body)
 
 # =====================================================================
 print('\n--- 9. Expiring panel ---')
@@ -419,9 +419,9 @@ check('3 receipt lines', measure_row(body, 'Stock receipts')[4] == '3',
 check('2 deliveries (two lines shared one order number)',
       measure_row(body, 'Deliveries')[4] == '2', str(measure_row(body, 'Deliveries')))
 # 92 units dispensed x $2.00
-check('value dispensed = $184', measure_row(body, 'Value dispensed')[4] == 'R184',
+check('value dispensed = $184', measure_row(body, 'Value dispensed')[4] == 'M184',
       str(measure_row(body, 'Value dispensed')))
-check('value received = $2,000', measure_row(body, 'Value received')[4] == 'R2,000',
+check('value received = $2,000', measure_row(body, 'Value received')[4] == 'M2,000',
       str(measure_row(body, 'Value received')))
 check('a month with no activity shows a dash for items per visit',
       measure_row(body, 'Items per visit')[0] == '-')

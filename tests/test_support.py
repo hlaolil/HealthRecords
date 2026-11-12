@@ -104,3 +104,21 @@ def reconciles(row):
     """Beginning + Received - Issued = Current, on the figures as printed."""
     n = lambda k: float(row[k])
     return n('Beginning Balance') + n('Received') - n('Issued') == n('Current Balance')
+
+
+def sell(client, db, pairs, payment='Cash', **extra):
+    """Ring up a sale on the till, the way the old tests dispensed.
+
+    Items without a selling price are given one (the till refuses to sell an
+    unpriced item), and prescription details are filled in so prescription
+    and controlled items go through. Returns the response.
+    """
+    meds = db['medications']
+    for name, _q in pairs:
+        if meds.find_one({'name': name, 'selling_price': {'$gt': 0}}) is None:
+            meds.update_one({'name': name}, {'$set': {'selling_price': 1.0}})
+    data = {'med_names': [n for n, _ in pairs], 'quantities': [str(q) for _, q in pairs],
+            'payment_method': payment, 'customer': 'Test Patient',
+            'prescription_no': 'RX1', 'prescriber': 'Dr Test'}
+    data.update(extra)
+    return client.post('/sell', data=data)

@@ -18,7 +18,7 @@ meds, txs = db['medications'], db['transactions']
 c = A.app.test_client()
 # The app refuses a POST without its CSRF token; this makes the
 # test client send it, so these checks exercise the real path.
-from test_support import arm_csrf, inventory_rows, reconciles
+from test_support import arm_csrf, sell, inventory_rows, reconciles
 arm_csrf(c)
 PASS, FAIL = [], []
 
@@ -52,12 +52,19 @@ def add(name, balance, price=2.5):
 
 
 def dispense(patient, pairs):
-    return c.post('/dispense', data={
-        'patient': patient, 'company': 'C', 'position': 'P', 'age_group': 'adult',
-        'gender': 'M', 'sick_leave_days': '0', 'diagnoses': 'flu',
-        'prescriber': 'Dr X', 'dispenser': 'D', 'date': TODAY.strftime('%Y-%m-%d'),
-        'med_names': [p[0] for p in pairs],
-        'quantities': [str(p[1]) for p in pairs]}, follow_redirects=True)
+    """Ring the basket up at the till. A short basket is refused but its
+    shortfall is recorded; like a real cashier, then sell what IS there."""
+    r = sell(c, db, pairs, customer=patient, prescriber='Dr X')
+    if r.status_code == 422:
+        fixed = []
+        for n, q in pairs:
+            m = meds.find_one({'name': n}) or {}
+            have = int(m.get('balance', 0) or 0)
+            if min(q, have) > 0:
+                fixed.append((n, min(q, have)))
+        if fixed:
+            sell(c, db, fixed, customer=patient, prescriber='Dr X')
+    return r
 
 
 def cells(body, name):
@@ -66,28 +73,27 @@ def cells(body, name):
             for x in _re.findall(r'<td>(.*?)</td>', mm.group(1), _re.S)] if mm else []
 
 
-print('\n--- 1. A short line now dispenses what IS there ---')
+print('\n--- 1. A short basket is refused, and the shortfall recorded ---')
 reset()
 login()
 add('Paracetamol, 500 mg', 20)
-r = dispense('Thabo M', [('Paracetamol, 500 mg', 30)])
-check('the available units were dispensed',
-      txs.count_documents({'type': 'dispense'}) == 1)
-check('for the quantity actually on the shelf',
-      txs.find_one({'type': 'dispense'})['quantity'] == 20)
-check('the balance is now zero', meds.find_one({})['balance'] == 0)
-check('the balance never goes negative', meds.find_one({})['balance'] >= 0)
+r = sell(c, db, [('Paracetamol, 500 mg', 30)], customer='Thabo M', prescriber='Dr X')
+check('the till refuses to sell more than is on the shelf', r.status_code == 422)
+check('nothing is sold', txs.count_documents({'type': 'dispense'}) == 0)
+check('the balance is untouched', meds.find_one({})['balance'] == 20)
 u = txs.find_one({'type': 'unmet_demand'})
 check('the shortfall is recorded as its own transaction', u is not None)
 check('requested 30', u['requested'] == 30)
-check('given 20', u['given'] == 20)
+check('20 were available', u['given'] == 20)
 check('short 10', u['shortfall'] == 10)
 check('valued at cost', u['shortfall_value'] == 25.0, str(u['shortfall_value']))
-check('the patient and prescriber are kept',
+check('the customer and prescriber are kept',
       u['patient'] == 'Thabo M' and u['prescriber'] == 'Dr X')
-check('the user is told what happened',
-      'only 20 of 30 available' in r.data.decode())
-check('a warning is still logged', db['app_warnings'].count_documents({}) >= 1)
+check('the cashier is told what is on the shelf',
+      '20 in stock, 30 asked for' in r.data.decode())
+r = sell(c, db, [('Paracetamol, 500 mg', 20)], customer='Thabo M')
+check('selling what IS there then goes through', meds.find_one({})['balance'] == 0)
+check('the balance never goes negative', meds.find_one({})['balance'] >= 0)
 
 print('\n--- 2. It moves no stock in any calculation ---')
 check('the unmet record carries quantity 0', u['quantity'] == 0, str(u['quantity']))
@@ -116,19 +122,19 @@ check('a filled request writes no unmet record',
       txs.count_documents({'type': 'unmet_demand'}) == 0)
 check('stock reduced normally', meds.find_one({})['balance'] == 60)
 
-print('\n--- 5. Mixed lines in one visit ---')
+print('\n--- 5. Mixed lines in one basket ---')
 reset()
 login()
 add('Paracetamol, 500 mg', 100)
 add('Aspirin, 100 mg', 5)
 dispense('Thabo M', [('Paracetamol, 500 mg', 50), ('Aspirin, 100 mg', 20)])
-check('the fillable line is dispensed in full',
+check('the fillable line is sold in full',
       txs.find_one({'type': 'dispense', 'med_name': 'Paracetamol, 500 mg'})['quantity'] == 50)
-check('the short line is dispensed partially',
+check('the short line is sold as far as stock goes',
       txs.find_one({'type': 'dispense', 'med_name': 'Aspirin, 100 mg'})['quantity'] == 5)
 check('only the short line records unmet demand',
       txs.count_documents({'type': 'unmet_demand'}) == 1)
-check('both lines share the visit',
+check('both lines share one sale',
       len({t['transaction_id'] for t in txs.find({'type': 'dispense'})}) == 1)
 
 print('\n--- 6. Inventory report orders from demand, in whole numbers ---')
@@ -220,7 +226,7 @@ check('per-medication fill rate is shown', '%' in seg)
 # Paracetamol short 10, Aspirin short 4 — ranking must follow units short
 check('items are ranked by units short',
       seg.index('Paracetamol, 500 mg') < seg.index('Aspirin, 100 mg'))
-check('value short is priced', 'R50.00' in body or 'R25.00' in body)
+check('value short is priced', 'M50.00' in body or 'M25.00' in body)
 check('a filled period says so',
       'Every request in this period was filled in full' in
       c.post('/reports', data={'report_type': 'unmet_demand',

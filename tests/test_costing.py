@@ -19,7 +19,7 @@ c = A.app.test_client()
 
 # The app refuses a POST without its CSRF token; this makes the
 # test client send it, so these checks exercise the real path.
-from test_support import arm_csrf
+from test_support import arm_csrf, sell
 arm_csrf(c)
 PASS, FAIL = [], []
 
@@ -68,13 +68,7 @@ def receive(med, units, pack_size=100, pack_price='250.00', order='PO-1',
 
 
 def dispense(patient, pairs):
-    data = {'patient': patient, 'company': 'C', 'position': 'P', 'age_group': 'adult',
-            'gender': 'M', 'sick_leave_days': '0', 'diagnoses': 'flu',
-            'prescriber': 'Dr X', 'dispenser': 'D',
-            'date': TODAY.strftime('%Y-%m-%d'),
-            'med_names': [p[0] for p in pairs],
-            'quantities': [str(p[1]) for p in pairs]}
-    return c.post('/dispense', data=data, follow_redirects=True)
+    return sell(c, db, pairs, customer=patient)
 
 
 def monthly(start=None):
@@ -109,28 +103,29 @@ check('the historical dispense cost did NOT change', t['line_value'] == 500.0,
       str(t['line_value']))
 body = monthly()
 check('the month still reports the original cost, not the new price',
-      row(body, 'Total cost dispensed') == 'R500.00',
+      row(body, 'Total cost dispensed') == 'M500.00',
       row(body, 'Total cost dispensed'))
 check('a re-run gives the same answer',
-      row(monthly(), 'Total cost dispensed') == 'R500.00')
+      row(monthly(), 'Total cost dispensed') == 'M500.00')
 
 # =====================================================================
-print('\n--- 2. Cost per dispensing transaction on the dispense page ---')
+print('\n--- 2. Cost of each sale on the cash-up ---')
 reset()
+db['sales'].delete_many({})
 login()
-add_med('Paracetamol, 500 mg', pack_size=100, pack_price='250.00')     # R2.50/unit
-add_med('Aspirin, 100 mg', pack_size=100, pack_price='500.00')         # R5.00/unit
+add_med('Paracetamol, 500 mg', pack_size=100, pack_price='250.00')     # M2.50/unit
+add_med('Aspirin, 100 mg', pack_size=100, pack_price='500.00')         # M5.00/unit
 receive('Paracetamol, 500 mg', 1000)
 receive('Aspirin, 100 mg', 1000, pack_price='500.00', order='PO-A',
         order_total='5000.00', invoice='INV-A', invoice_total='5000.00')
 dispense('Thabo M', [('Paracetamol, 500 mg', 20), ('Aspirin, 100 mg', 10)])
-body = c.get('/dispense').data.decode()
-check('the dispense list shows a unit cost column', '<th>Unit Cost</th>' in body)
-check('and a line cost column', '<th>Line Cost</th>' in body)
-check('and a visit cost column', '<th>Visit Cost</th>' in body)
-check('line cost for 20 @ R2.50 is R50.00', 'R50.00' in body)
-check('line cost for 10 @ R5.00 is R50.00', body.count('R50.00') >= 2)
-check('the visit total is R100.00', 'R100.00' in body)
+body = c.get('/sales').data.decode()
+check('the cash-up shows the cost of goods sold', 'Cost of goods sold' in body)
+check('20 @ M2.50 plus 10 @ M5.00 costs M100.00', '100.00' in body)
+s = db['sales'].find_one()
+check('the sale keeps its cost beside its price', s['cost_total'] == 100.0, str(s.get('cost_total')))
+check('each line keeps its own cost',
+      sorted(l['cost'] for l in s['lines']) == [50.0, 50.0], str(s.get('lines')))
 
 # =====================================================================
 print('\n--- 3. Monthly report: dispensing figures ---')
@@ -138,32 +133,32 @@ reset()
 login()
 add_med('Paracetamol, 500 mg', pack_size=100, pack_price='250.00')
 receive('Paracetamol, 500 mg', 2000, order_total='5000.00', invoice_total='5000.00')
-dispense('Thabo M', [('Paracetamol, 500 mg', 100)])      # R250
-dispense('Palesa N', [('Paracetamol, 500 mg', 200)])     # R500
-dispense('Thabo M', [('Paracetamol, 500 mg', 100)])      # R250, repeat patient
+dispense('Thabo M', [('Paracetamol, 500 mg', 100)])      # M250
+dispense('Palesa N', [('Paracetamol, 500 mg', 200)])     # M500
+dispense('Thabo M', [('Paracetamol, 500 mg', 100)])      # M250, repeat patient
 body = monthly()
 check('the report renders with the month name', TODAY.strftime('%B %Y') in body)
 check('it defaults to a month when no period is chosen', 'Month Report' in body)
 check('3 visits', row(body, 'Visits') == '3', row(body, 'Visits'))
 check('3 items dispensed', row(body, 'Items dispensed') == '3')
 check('2 distinct patients', row(body, 'Patients seen') == '2', row(body, 'Patients seen'))
-check('total cost dispensed R1000.00',
-      row(body, 'Total cost dispensed') == 'R1000.00', row(body, 'Total cost dispensed'))
-check('average cost per visit R333.33',
-      row(body, 'Average cost per visit') == 'R333.33', row(body, 'Average cost per visit'))
-check('average cost per item R333.33',
-      row(body, 'Average cost per item') == 'R333.33', row(body, 'Average cost per item'))
+check('total cost dispensed M1000.00',
+      row(body, 'Total cost dispensed') == 'M1000.00', row(body, 'Total cost dispensed'))
+check('average cost per visit M333.33',
+      row(body, 'Average cost per visit') == 'M333.33', row(body, 'Average cost per visit'))
+check('average cost per item M333.33',
+      row(body, 'Average cost per item') == 'M333.33', row(body, 'Average cost per item'))
 
 print('\n--- 4. Monthly report: procurement figures ---')
 check('1 order raised', row(body, 'Orders raised') == '1', row(body, 'Orders raised'))
-check('order total R5000.00', row(body, 'Total ordered') == 'R5000.00',
+check('order total M5000.00', row(body, 'Total ordered') == 'M5000.00',
       row(body, 'Total ordered'))
 check('1 invoice', row(body, 'Invoices received') == '1')
-check('invoice total R5000.00', row(body, 'Total invoiced') == 'R5000.00')
-check('goods received R5000.00', row(body, 'Goods actually received') == 'R5000.00',
+check('invoice total M5000.00', row(body, 'Total invoiced') == 'M5000.00')
+check('goods received M5000.00', row(body, 'Goods actually received') == 'M5000.00',
       row(body, 'Goods actually received'))
 check('no gap between invoiced and received',
-      row(body, 'Invoiced less goods received') == 'R+0.00',
+      row(body, 'Invoiced less goods received') == 'M+0.00',
       row(body, 'Invoiced less goods received'))
 
 print('\n--- 5. A short delivery shows up as a gap ---')
@@ -172,10 +167,10 @@ login()
 add_med('Paracetamol, 500 mg', pack_size=100, pack_price='250.00')
 receive('Paracetamol, 500 mg', 800, order_total='2500.00', invoice_total='2500.00')
 body = monthly()
-check('goods received is R2000 against a R2500 invoice',
-      row(body, 'Goods actually received') == 'R2000.00', row(body, 'Goods actually received'))
+check('goods received is M2000 against a M2500 invoice',
+      row(body, 'Goods actually received') == 'M2000.00', row(body, 'Goods actually received'))
 check('the shortfall is surfaced as +R500',
-      row(body, 'Invoiced less goods received') == 'R+500.00',
+      row(body, 'Invoiced less goods received') == 'M+500.00',
       row(body, 'Invoiced less goods received'))
 check('the gap row is ambered', 'close-to-expire' in body)
 
@@ -186,16 +181,16 @@ add_med('Paracetamol, 500 mg', pack_size=100, pack_price='250.00')
 receive('Paracetamol, 500 mg', 1000, order_total='2500.00', invoice_total='2500.00')
 dispense('Thabo M', [('Paracetamol, 500 mg', 200)])
 body = monthly()
-opening = float(row(body, 'Opening stock value').replace('R', ''))
-received = float(row(body, 'Received from suppliers').replace('R', ''))
-closing = float(row(body, 'Closing stock value').replace('R', ''))
-disp = float(row(body, 'Dispensed').replace('R', '').replace('−', '').replace('&minus;', ''))
+opening = float(row(body, 'Opening stock value').replace('M', ''))
+received = float(row(body, 'Received from suppliers').replace('M', ''))
+closing = float(row(body, 'Closing stock value').replace('M', ''))
+disp = float(row(body, 'Dispensed').replace('M', '').replace('−', '').replace('&minus;', ''))
 print(f'   opening {opening} + received {received} - dispensed {disp} = {opening + received - disp}'
       f'  vs closing {closing}')
 check('opening is 0 for a brand-new item', opening == 0.0, str(opening))
-check('received is R2500', received == 2500.0, str(received))
-check('dispensed is R500', disp == 500.0, str(disp))
-check('closing is R2000', closing == 2000.0, str(closing))
+check('received is M2500', received == 2500.0, str(received))
+check('dispensed is M500', disp == 500.0, str(disp))
+check('closing is M2000', closing == 2000.0, str(closing))
 check('the value column reconciles',
       abs(opening + received - disp - closing) < 0.01,
       str(opening + received - disp - closing))
@@ -209,10 +204,10 @@ login()
 add_med('Paracetamol, 500 mg', pack_size=100, pack_price='250.00', opening=400)
 receive('Paracetamol, 500 mg', 200, order_total='500.00', invoice_total='500.00')
 body = monthly()
-check('the opening load is valued at R1000',
-      row(body, 'Opening loads') == 'R1000.00', row(body, 'Opening loads'))
+check('the opening load is valued at M1000',
+      row(body, 'Opening loads') == 'M1000.00', row(body, 'Opening loads'))
 check('it is NOT counted as a supplier receipt',
-      row(body, 'Received from suppliers') == 'R500.00',
+      row(body, 'Received from suppliers') == 'M500.00',
       row(body, 'Received from suppliers'))
 
 print('\n--- 8. Stock take losses are admin-only ---')
@@ -227,7 +222,7 @@ c.post('/stock-take', data={'action': 'count', 'stock_take_id': sid,
        follow_redirects=True)
 body = monthly()
 check('admin sees the adjustment value', 'Stock take adjustments' in body)
-check('the loss is valued at -R250', row(body, 'Stock take adjustments') == 'R-250.00',
+check('the loss is valued at -R250', row(body, 'Stock take adjustments') == 'M-250.00',
       row(body, 'Stock take adjustments'))
 login('user', 'Pharm')
 ubody = monthly()
@@ -251,7 +246,7 @@ seg = body[body.index('Highest Cost Items'):]
 order = _re.findall(r'<td>([^<]*Item, 10 mg)</td>', seg)
 check('items are ranked by cost, not by name or quantity',
       order[0] == 'Expensive Item, 10 mg', str(order))
-# 100 x R50 = 5000 vs 100 x R1 = 100 -> 98.0% / 2.0%
+# 100 x M50 = 5000 vs 100 x M1 = 100 -> 98.0% / 2.0%
 check('shares are shown', '98.0' in seg and '2.0' in seg, seg[:400])
 
 print('\n--- 10. Legacy dispense lines are valued and flagged ---')
@@ -265,14 +260,14 @@ txs.insert_one({'type': 'dispense', 'med_name': 'Paracetamol, 500 mg', 'quantity
                 'timestamp': datetime.utcnow()})
 body = monthly()
 check('a legacy line is still valued at the current price',
-      row(body, 'Total cost dispensed') == 'R250.00', row(body, 'Total cost dispensed'))
+      row(body, 'Total cost dispensed') == 'M250.00', row(body, 'Total cost dispensed'))
 check('the estimate is disclosed', 'predate cost capture' in body)
 check('the count of estimated lines is given', '1\ndispensing line(s)' in body
       or '1 dispensing line(s)' in _re.sub(r'\s+', ' ', body))
 dispense('New Patient', [('Paracetamol, 500 mg', 100)])
 body = monthly()
 check('a mix of exact and estimated lines still totals correctly',
-      row(body, 'Total cost dispensed') == 'R500.00', row(body, 'Total cost dispensed'))
+      row(body, 'Total cost dispensed') == 'M500.00', row(body, 'Total cost dispensed'))
 
 print('\n--- 11. Month boundaries and bad input ---')
 reset()
@@ -287,12 +282,12 @@ txs.insert_one({'type': 'dispense', 'med_name': 'Paracetamol, 500 mg', 'quantity
                 'price': 2.5, 'line_value': 1000.0, 'timestamp': prev})
 body = monthly()
 check('this month excludes last month\'s activity',
-      row(body, 'Total cost dispensed') == 'R250.00', row(body, 'Total cost dispensed'))
+      row(body, 'Total cost dispensed') == 'M250.00', row(body, 'Total cost dispensed'))
 body = monthly(start=prev.strftime('%Y-%m-15'))
 check('any date in a month selects that whole month',
       prev.strftime('%B %Y') in body)
 check('last month shows only its own activity',
-      row(body, 'Total cost dispensed') == 'R1000.00', row(body, 'Total cost dispensed'))
+      row(body, 'Total cost dispensed') == 'M1000.00', row(body, 'Total cost dispensed'))
 check('a missing start date is reported, not crashed',
       c.post('/reports', data={'report_type': 'monthly_report',
                                'end_date': M_END}).status_code == 200)
@@ -309,7 +304,7 @@ check('an empty month renders', 'Report &mdash;' in body and 'Stock Value Moveme
 check('zero visits shows a dash for items per visit',
       row(body, 'Items per visit') == '-', row(body, 'Items per visit'))
 check('no divide-by-zero on cost per visit',
-      row(body, 'Average cost per visit') == 'R0.00')
+      row(body, 'Average cost per visit') == 'M0.00')
 check('the top items table says nothing was dispensed',
       'Nothing dispensed in this period' in body)
 

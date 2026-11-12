@@ -123,7 +123,7 @@ check('it is valued at the unit price', t['line_value'] == -750.0, str(t['line_v
 check('the reason is kept', t['reason'] == 'batch B1 only')
 check('the balance before is kept for the audit trail', t['balance_before'] == 1000)
 check('the confirmation states the new balance and value',
-      'Balance is now 700' in r.data.decode() and 'R750.00' in r.data.decode())
+      'Balance is now 700' in r.data.decode() and 'M750.00' in r.data.decode())
 check('it is written to the audit log',
       db['audit_log'].count_documents({'target_type': 'expiry_removal'}) == 1)
 
@@ -201,7 +201,7 @@ body = c.post('/reports', data={'report_type': 'monthly_report',
                                 'start_date': M_START, 'end_date': M_END}).data.decode()
 mm = _re.search(r'<td>Expired stock written off</td>\s*<td>(.*?)</td>', body, _re.S)
 val = _re.sub(r'<[^>]+>', '', mm.group(1)).strip() if mm else None
-check('the write-off appears as a valued line', val == 'R-500.00', str(val))
+check('the write-off appears as a valued line', val == 'M-500.00', str(val))
 check('the write-off count is shown', '1 write-off(s)' in body)
 login('user', 'Pharm')
 ubody = c.post('/reports', data={'report_type': 'monthly_report',
@@ -266,7 +266,7 @@ body = writeoffs()
 check('the removal now appears in the write-off report',
       'Paracetamol, 500 mg' in body)
 check('with the units removed', '<td>400</td>' in body)
-check('valued at cost', 'R1000.00' in body)
+check('valued at cost', 'M1000.00' in body)
 check('with the reason kept', 'batch B1 perished' in body)
 check('and who did it', 'Admin User' in body)
 wl = expired_list()
@@ -301,7 +301,7 @@ print('   summary [write-offs, items, units, value]:', srow)
 check('two write-offs recorded', srow[0] == '2', str(srow))
 check('one item affected', srow[1] == '1', str(srow))
 check('total units lost is 1000', srow[2] == '1000', str(srow))
-check('total value lost is R2500.00', srow[3] == 'R2500.00', str(srow))
+check('total value lost is M2500.00', srow[3] == 'M2500.00', str(srow))
 remove('Aspirin, 100 mg', 200)
 body = writeoffs()
 check('two items affected now', summary_row(body)[1] == '2', str(summary_row(body)))
@@ -328,13 +328,13 @@ print('\n--- 15. Everyone can see losses; the totals agree with the month ---')
 login('user', 'Pharm')
 ubody = writeoffs()
 check('a non-admin can run the losses report', 'Stock Losses for' in ubody)
-check('and sees the same value lost', 'R3500.00' in ubody)
+check('and sees the same value lost', 'M3500.00' in ubody)
 login()
 mbody = c.post('/reports', data={'report_type': 'monthly_report',
                                  'start_date': M_START, 'end_date': M_END}).data.decode()
 mm = _re.search(r'<td>Expired stock written off</td>\s*<td>(.*?)</td>', mbody, _re.S)
 val = _re.sub(r'<[^>]+>', '', mm.group(1)).strip() if mm else None
-check('the monthly report total matches the write-off report', val == 'R-3500.00', str(val))
+check('the monthly report total matches the write-off report', val == 'M-3500.00', str(val))
 
 print(f'\n=========  {len(PASS)} passed, {len(FAIL)} failed  =========')
 if FAIL:

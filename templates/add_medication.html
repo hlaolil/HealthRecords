@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Add New Medication &middot; NMC Pharmacy{% endblock %}
+{% block title %}Add New Medication &middot; The Healing Hub Pharmacy{% endblock %}
 {% block heading %}Add New Medication{% endblock %}
 {% block content %}{% include "_medication_options.html" %}
 {% if message %}
@@ -39,7 +39,7 @@ Receiving page.</p>
             <input name="pack_size" type="number" min="1" value="1" required>
         </div>
         <div>
-            <label>Price per Pack (R):</label>
+            <label>Price per Pack (M):</label>
             <input name="pack_price" type="number" step="0.01" min="0" required>
         </div>
         <div>
@@ -51,6 +51,8 @@ Receiving page.</p>
             </select>
         </div>
     </div>
+
+    {% set m = none %}{% include '_retail_fields.html' %}
 
     <h3>Opening Stock (optional)</h3>
     <p style="font-size:13px;">Only for stock already on the shelf when this item is

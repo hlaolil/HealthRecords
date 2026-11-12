@@ -51,7 +51,7 @@ def add(name, bal=1000, price=2.5, expiry='2030-01-01'):
 
 
 def damage(name, qty, reason='Broken / spilled'):
-    return c.post('/internal-issue', data={'action': 'damage', 'med_name': name,
+    return c.post('/write-off', data={'med_name': name,
                                            'quantity': str(qty), 'reason': reason},
                   follow_redirects=True)
 
@@ -108,9 +108,9 @@ check('reducing 60 to 40 returns 20 units',
       meds.find_one({})['balance'] == 960, str(meds.find_one({})['balance']))
 t = txs.find_one({'type': 'damage'})
 check('the record now says 40', abs(t['quantity']) == 40, str(t['quantity']))
-check('the value is revalued to R100', t['line_value'] == -100.0, str(t['line_value']))
+check('the value is revalued to M100', t['line_value'] == -100.0, str(t['line_value']))
 check('the message reports both figures',
-      'quantity from 60 to 40' in r.data.decode() and 'R100.00' in r.data.decode())
+      'quantity from 60 to 40' in r.data.decode() and 'M100.00' in r.data.decode())
 check('and says what happened to stock on hand',
       'stock on hand from 940 to 960' in r.data.decode(), r.data.decode()[:0] or '')
 check('it is audited',
@@ -122,7 +122,7 @@ r = edit(loss_id(), 100, 2.5)
 check('increasing 40 to 100 removes 60 more',
       meds.find_one({})['balance'] == 900, str(meds.find_one({})['balance']))
 check('the record now says 100', abs(txs.find_one({'type': 'damage'})['quantity']) == 100)
-check('the report shows the new value', 'R250.00' in losses())
+check('the report shows the new value', 'M250.00' in losses())
 
 print('\n--- 4. Editing only the price moves no stock ---')
 before = meds.find_one({})['balance']
@@ -131,7 +131,7 @@ check('the balance is untouched', meds.find_one({})['balance'] == before,
       str(meds.find_one({})['balance']))
 t = txs.find_one({'type': 'damage'})
 check('the unit price is updated', t['price'] == 5.0)
-check('and the loss is revalued to R500', t['line_value'] == -500.0, str(t['line_value']))
+check('and the loss is revalued to M500', t['line_value'] == -500.0, str(t['line_value']))
 check('the message names the price change', 'unit price' in r.data.decode())
 
 print('\n--- 5. It cannot write off stock that is not there ---')
@@ -196,12 +196,12 @@ check('the corrected expiry write-off is listed',
 
 print('\n--- 8. Totals and reports follow the correction ---')
 body = losses()
-check('the line value is R300.00', 'R300.00' in body)
+check('the line value is M300.00', 'M300.00' in body)
 mbody = c.post('/reports', data={'report_type': 'monthly_report', 'period': 'month',
                                  'start_date': M_START, 'end_date': M_END}).data.decode()
 mm = _re.search(r'<td>Expired stock written off</td>\s*<td>(.*?)</td>', mbody, _re.S)
 val = _re.sub(r'<[^>]+>', '', mm.group(1)).strip() if mm else None
-check('the period report reflects the corrected value', val == 'R-300.00', str(val))
+check('the period report reflects the corrected value', val == 'M-300.00', str(val))
 inv = c.post('/reports', data={'report_type': 'inventory', 'start_date': M_START,
                                'end_date': M_END}).data.decode()
 row = inventory_rows(inv).get('Paracetamol tabs, 500 mg', {})
@@ -247,14 +247,14 @@ check('item description is the medication', rows[0][1] == 'Amoxycillin Cap, 250 
 check('QTY is the units written off', rows[0][2] == '40', rows[0][2])
 check('expiry date is shown', rows[0][3] == '2026-11-30', rows[0][3])
 check('batch/lot is shown', rows[0][4] == 'A-220', rows[0][4])
-check('total cost is qty x unit cost (40 x 1.50)', rows[0][5] == 'R60.00', rows[0][5])
+check('total cost is qty x unit cost (40 x 1.50)', rows[0][5] == 'M60.00', rows[0][5])
 check('remarks defaults to the recorded reason so nothing is lost',
       rows[0][6] == 'Broken / spilled', rows[0][6])
 
 check('the table is sorted by medication',
       [r[1] for r in rows] == ['Amoxycillin Cap, 250 mg', 'Zinc Tablets, 020 mg'],
       str([r[1] for r in rows]))
-check('unit cost is no longer a column', 'R1.5000' not in seg and 'Unit Cost' not in seg)
+check('unit cost is no longer a column', 'M1.5000' not in seg and 'Unit Cost' not in seg)
 check('the Kind column is gone', '<th>Kind</th>' not in body)
 check('but damage and expiry are still distinguished in the summaries',
       'By Medication' in body)

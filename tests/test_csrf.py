@@ -49,21 +49,18 @@ def token_of(cl):
 print('\n--- 1. A state-changing post without the token is refused ---')
 meds.delete_many({})
 txs.delete_many({})
-meds.insert_one({'name': 'Morphine tabs, 10mg', 'balance': 100, 'price': 1.0,
+meds.insert_one({'name': 'Morphine tabs, 10mg', 'balance': 100, 'price': 1.0, 'selling_price': 3.0,
                  'expiry_date': '2028-03-31', 'batch': 'B',
                  'category': 'controlled', 'schedule': 'controlled',
                  'pack_size': 1, 'pack_price': 1.0})
 c = fresh_client()
-c.get('/dispense')                       # the token is issued on a page load
+c.get('/sell')                       # the token is issued on a page load
 check('the session now holds a token', bool(token_of(c)), str(token_of(c)))
 
-attack = c.post('/dispense', data={
-    'patient': 'Forged Visit', 'company': 'X', 'position': 'Y',
-    'birth_decade': '1980', 'gender': 'Male', 'outcome': 'Outpatient',
-    'prescriber': 'Dr. T. Khothatso', 'dispenser': 'Letlotlo Hlaoli',
-    'date': A.local_now().strftime('%Y-%m-%d'),
-    'med_names': 'Morphine tabs, 10mg', 'quantities': '50',
-    'diagnoses': 'Headache'})
+attack = c.post('/sell', data={
+    'customer': 'Forged Visit', 'payment_method': 'Cash',
+    'prescription_no': 'RX1', 'prescriber': 'Dr. T. Khothatso',
+    'med_names': 'Morphine tabs, 10mg', 'quantities': '50'})
 check('the request is refused', attack.status_code == 400, str(attack.status_code))
 check('and NOTHING was recorded',
       txs.count_documents({'patient': 'Forged Visit'}) == 0)
@@ -77,28 +74,22 @@ check('and that their typing may still be recoverable',
 check('with a way back', '/login' in body)
 
 print('\n--- 2. A wrong token is no better than none ---')
-wrong = c.post('/dispense', data={
-    'patient': 'Forged Again', 'company': 'X', 'position': 'Y',
-    'birth_decade': '1980', 'gender': 'Male', 'outcome': 'Outpatient',
-    'prescriber': 'Dr. T. Khothatso', 'dispenser': 'Letlotlo Hlaoli',
-    'date': A.local_now().strftime('%Y-%m-%d'),
-    'med_names': 'Morphine tabs, 10mg', 'quantities': '50',
-    'diagnoses': 'Headache', A.CSRF_FIELD_NAME: 'not-the-real-token'})
+wrong = c.post('/sell', data={
+    'customer': 'Forged Again', 'payment_method': 'Cash',
+    'prescription_no': 'RX1', 'prescriber': 'Dr. T. Khothatso',
+    'med_names': 'Morphine tabs, 10mg', 'quantities': '50', A.CSRF_FIELD_NAME: 'not-the-real-token'})
 check('a guessed token is refused', wrong.status_code == 400,
       str(wrong.status_code))
 check('and still nothing was recorded',
       txs.count_documents({'patient': 'Forged Again'}) == 0)
 
 print('\n--- 3. The real token lets the work through ---')
-good = c.post('/dispense', data={
-    'patient': 'Real Visit', 'company': 'Letseng', 'position': 'Driver',
-    'birth_decade': '1980', 'gender': 'Male', 'outcome': 'Outpatient',
-    'prescriber': 'Dr. T. Khothatso', 'dispenser': 'Letlotlo Hlaoli',
-    'date': A.local_now().strftime('%Y-%m-%d'),
-    'med_names': 'Morphine tabs, 10mg', 'quantities': '5',
-    'diagnoses': 'Headache', A.CSRF_FIELD_NAME: token_of(c)},
+good = c.post('/sell', data={
+    'customer': 'Real Visit', 'payment_method': 'Cash',
+    'prescription_no': 'RX1', 'prescriber': 'Dr. T. Khothatso',
+    'med_names': 'Morphine tabs, 10mg', 'quantities': '5', A.CSRF_FIELD_NAME: token_of(c)},
     follow_redirects=True)
-check('the visit is recorded', txs.count_documents({'patient': 'Real Visit'}) == 1,
+check('the sale is recorded', txs.count_documents({'patient': 'Real Visit'}) == 1,
       str(good.data.decode()[:160]))
 check('and the stock moved',
       meds.find_one({'name': 'Morphine tabs, 10mg'})['balance'] == 95,
@@ -112,17 +103,16 @@ check('the ping is refused without the token', ping.status_code == 400,
 ping = c.post('/api/session-ping', headers={A.CSRF_HEADER: token_of(c)})
 check('and accepted with it', ping.status_code == 200, str(ping.status_code))
 check('the page gives the ping somewhere to read the token from',
-      'name="csrf-token"' in c.get('/dispense').data.decode())
+      'name="csrf-token"' in c.get('/sell').data.decode())
 check('and the ping actually sends it',
-      "'X-CSRF-Token': tokenMeta.content" in c.get('/dispense').data.decode())
+      "'X-CSRF-Token': tokenMeta.content" in c.get('/sell').data.decode())
 
 print('\n--- 5. Every POST form on every page carries the field ---')
 # 43 forms across 17 templates. The field is added to the rendered page
 # rather than written into each template, because a scheme that relies on
 # remembering to add a line to 43 forms is a scheme that protects 42 of them.
-pages = ['/', '/dispense', '/receive', '/add-medication', '/internal-issue',
-         '/stock-take', '/temperature', '/key-register', '/loans',
-         '/loan-items', '/audit', '/reports']
+pages = ['/', '/sell', '/sales', '/receive', '/add-medication', '/write-off',
+         '/stock-take', '/temperature', '/audit', '/reports']
 total_forms = 0
 for path in pages:
     page = c.get(path, follow_redirects=True).data.decode()
@@ -131,7 +121,7 @@ for path in pages:
     missing = [f[:80] for f in forms if A.CSRF_FIELD_NAME not in f]
     check(f'{path}: all {len(forms)} POST forms carry the token',
           not missing, str(missing))
-check('and that was a real number of forms, not zero', total_forms >= 20,
+check('and that was a real number of forms, not zero', total_forms >= 8,
       str(total_forms))
 
 anon = A.app.test_client()
@@ -141,7 +131,7 @@ check('the login form carries one too',
       _forms and all(A.CSRF_FIELD_NAME in f for f in _forms), str(_forms[:1]))
 
 print('\n--- 6. A GET is never refused, and never altered ---')
-for path in ['/dispense', '/reports', '/audit']:
+for path in ['/sell', '/reports', '/audit']:
     r = c.get(path)
     check(f'{path} still loads', r.status_code == 200, str(r.status_code))
 csv_page = c.get('/audit?export=csv')
@@ -154,7 +144,7 @@ print('\n--- 7. An expired session gets the login page, not a rejection ---')
 # somebody whose session simply timed out. The login redirect is the kinder
 # and equally safe answer, and the browser draft then puts their work back.
 stale = A.app.test_client()
-r = stale.post('/dispense', data={'patient': 'Timed Out'},
+r = stale.post('/sell', data={'patient': 'Timed Out'},
                follow_redirects=False)
 check('a session with no token at all is not rejected outright',
       r.status_code != 400, str(r.status_code))
@@ -180,7 +170,7 @@ print('\n--- 9. The token is a token, not a guess ---')
 check('it is long enough to be unguessable', len(token_of(c)) >= 32,
       str(len(token_of(c))))
 other = fresh_client()
-other.get('/dispense')
+other.get('/sell')
 check('two sessions do not share one', token_of(c) != token_of(other))
 check('it is compared in constant time',
       'hmac.compare_digest' in open('app.py').read(),

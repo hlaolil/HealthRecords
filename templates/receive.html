@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Receiving &middot; NMC Pharmacy{% endblock %}
+{% block title %}Receiving &middot; The Healing Hub Pharmacy{% endblock %}
 {% block heading %}Receiving{% endblock %}
 {% block page_styles %}
 <style>
@@ -52,7 +52,7 @@ medication &mdash; change it under Edit Medication.</p>
             <input name="quantity" type="number" min="1" value="{{ rx_data.quantity }}" required></div>
         <div><label>Pack Size (units per pack):</label>
             <input name="pack_size" type="number" min="1" value="{{ rx_data.pack_size or 1 }}" required></div>
-        <div><label>Price per Pack (R):</label>
+        <div><label>Price per Pack (M):</label>
             <input name="pack_price" type="number" step="0.01" min="0" value="{{ '%.2f'|format(rx_data.pack_price or 0) }}" required></div>
         <div><label>Batch:</label><input name="batch" value="{{ rx_data.batch }}" required></div>
         <div><label>Expiry Date:</label>
@@ -96,11 +96,11 @@ raised against this order number.</p>
                <th>Goods Received</th><th>Still to Invoice</th><th>Status</th></tr></thead>
     <tbody>
         <tr class="{% if order_summary.over_invoiced %}expired{% elif order_summary.fully_invoiced %}normal{% else %}close-to-expire{% endif %}">
-            <td>R{{ "%.2f"|format(order_summary.order_total) }}</td>
+            <td>M{{ "%.2f"|format(order_summary.order_total) }}</td>
             <td>{{ order_summary.invoice_count }}</td>
-            <td>R{{ "%.2f"|format(order_summary.invoiced) }}</td>
-            <td>R{{ "%.2f"|format(order_summary.goods) }}</td>
-            <td>R{{ "%.2f"|format(order_summary.outstanding) }}</td>
+            <td>M{{ "%.2f"|format(order_summary.invoiced) }}</td>
+            <td>M{{ "%.2f"|format(order_summary.goods) }}</td>
+            <td>M{{ "%.2f"|format(order_summary.outstanding) }}</td>
             <td>{% if order_summary.over_invoiced %}Invoiced beyond the order
                 {% elif order_summary.fully_invoiced %}Fully invoiced
                 {% else %}Part-delivered{% endif %}</td>
@@ -120,7 +120,7 @@ opened delivery. Check the paperwork.</p>
         <tr {% if sib.id == delivery._id|string %}style="font-weight:bold;"{% endif %}>
             <td><a href="{{ url_for('receive', delivery_id=sib.id) }}">{{ sib.reference }}</a></td>
             <td>{{ sib.invoice_number }}</td>
-            <td>R{{ "%.2f"|format(sib.invoice_total) }}</td>
+            <td>M{{ "%.2f"|format(sib.invoice_total) }}</td>
             <td>{{ sib.status|upper }}</td>
         </tr>
     {% endfor %}
@@ -135,8 +135,8 @@ opened delivery. Check the paperwork.</p>
     <tbody>
         <tr class="{{ recon.goods_class }}">
             <td>Invoice {{ delivery.invoice_number }}</td>
-            <td>R{{ "%.2f"|format(delivery.invoice_total) }}</td>
-            <td>Goods received R{{ "%.2f"|format(recon.goods_value) }}</td>
+            <td>M{{ "%.2f"|format(delivery.invoice_total) }}</td>
+            <td>Goods received M{{ "%.2f"|format(recon.goods_value) }}</td>
             <td>{{ recon.goods_diff_label }}</td>
             <td>{{ recon.goods_note }}</td>
         </tr>
@@ -166,7 +166,7 @@ priced singly, leave pack size as 1.</p>
             <input name="quantity" type="number" min="1" required></div>
         <div><label>Pack Size (units per pack):</label>
             <input name="pack_size" type="number" min="1" value="1" required></div>
-        <div><label>Price per Pack (R):</label>
+        <div><label>Price per Pack (M):</label>
             <input name="pack_price" type="number" step="0.01" min="0" required></div>
         <div><label>Batch:</label><input name="batch" required></div>
         <div><label>Expiry Date:</label><input name="expiry_date" type="date" required></div>
@@ -208,9 +208,9 @@ priced singly, leave pack size as 1.</p>
             <td>{{ '%g'|format(l.quantity / (l.get('pack_size') or 1)) }}</td>
             {# a missing key yields Undefined, which is NOT none - so test with
                .get(), or rows written before pack pricing existed blow up here #}
-            <td>{% if l.get('pack_price') is not none %}R{{ "%.2f"|format(l.get('pack_price')) }}{% else %}&ndash;{% endif %}</td>
-            <td>R{{ "%.4f"|format(l.price) }}</td>
-            <td>R{{ "%.2f"|format(l.get('line_value') if l.get('line_value') is not none else l.quantity * l.price) }}</td>
+            <td>{% if l.get('pack_price') is not none %}M{{ "%.2f"|format(l.get('pack_price')) }}{% else %}&ndash;{% endif %}</td>
+            <td>M{{ "%.4f"|format(l.price) }}</td>
+            <td>M{{ "%.2f"|format(l.get('line_value') if l.get('line_value') is not none else l.quantity * l.price) }}</td>
             <td>{{ l.batch }}</td><td>{{ l.expiry_date }}</td>
             <td>{{ l.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
         </tr>
@@ -229,10 +229,10 @@ deliveries can be open at the same time.</p>
     <div class="common-section">
         <div><label>Supplier:</label><input name="supplier" required></div>
         <div><label>Order Number:</label><input name="order_number" required></div>
-        <div><label>Order Total (R):</label>
+        <div><label>Order Total (M):</label>
             <input name="order_total" type="number" step="0.01" min="0" required></div>
         <div><label>Invoice Number:</label><input name="invoice_number" required></div>
-        <div><label>Invoice Total (R):</label>
+        <div><label>Invoice Total (M):</label>
             <input name="invoice_total" type="number" step="0.01" min="0" required></div>
         <div><label>Received By:</label><input name="stock_receiver" value="{{ current_user }}" required></div>
         <div><label>Note (optional):</label><input name="note" type="text"></div>
@@ -251,9 +251,9 @@ deliveries can be open at the same time.</p>
     {% for d in deliveries %}
         <tr class="{{ d.row_class }}">
             <td>{{ d.reference }}</td><td>{{ d.supplier }}</td>
-            <td>{{ d.order_number }}</td><td>R{{ "%.2f"|format(d.order_total) }}</td>
-            <td>{{ d.invoice_number }}</td><td>R{{ "%.2f"|format(d.invoice_total) }}</td>
-            <td>R{{ "%.2f"|format(d.goods_value) }}</td>
+            <td>{{ d.order_number }}</td><td>M{{ "%.2f"|format(d.order_total) }}</td>
+            <td>{{ d.invoice_number }}</td><td>M{{ "%.2f"|format(d.invoice_total) }}</td>
+            <td>M{{ "%.2f"|format(d.goods_value) }}</td>
             <td>{{ d.diff_label }}</td>
             <td>{{ d.line_count }}</td><td>{{ d.status|upper }}</td>
             <td>{{ d.opened_at.strftime('%Y-%m-%d') }}</td>
@@ -328,7 +328,7 @@ search looks across all records, not just this month.</p>
             <td>{{ t.med_name }}</td>
             <td>{{ t.quantity }}</td>
             <td>{{ t.batch }}</td>
-            <td>R{{ "%.2f"|format(t.price) }}</td>
+            <td>M{{ "%.2f"|format(t.price) }}</td>
             <td>{{ t.expiry_date }}</td>
             <td>{{ t.stock_receiver }}</td>
             <td>{{ t.order_number }}</td>

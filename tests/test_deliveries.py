@@ -129,7 +129,7 @@ check('medication price updated from the line',
 print('\n--- 3. Three-way match: fully matched ---')
 body = c.get(f'/receive?delivery_id={did}').data.decode()
 check('three-way match panel renders', 'This Invoice vs Goods Received' in body)
-check('goods value computed as 1000.00', 'R1000.00' in body)
+check('goods value computed as 1000.00', 'M1000.00' in body)
 check('a fully matched delivery says so', 'Matched' in body
       and 'Fewer goods' not in body and 'More goods' not in body)
 check('no discrepancy colouring when matched', 'class="expired"' not in
@@ -145,7 +145,7 @@ add_line(did, 'Paracetamol, 500 mg', 300, 2.50)     # 750.00 only
 body = c.get(f'/receive?delivery_id={did}').data.decode()
 panel = body.split('This Invoice vs Goods Received')[1].split('</table>')[0]
 check('shortfall against the invoice is flagged', 'Fewer goods than invoiced' in panel)
-check('the difference is shown signed', 'R-250.00' in panel, panel[:200])
+check('the difference is shown signed', 'M-250.00' in panel, panel[:200])
 check('shortfall is ambered, not red', 'close-to-expire' in panel)
 
 print('\n--- 5. Goods above the invoice ---')
@@ -157,7 +157,7 @@ add_line(did, 'Paracetamol, 500 mg', 500, 2.50)     # 1250.00
 panel = c.get(f'/receive?delivery_id={did}').data.decode() \
     .split('This Invoice vs Goods Received')[1].split('</table>')[0]
 check('surplus against the invoice is flagged', 'More goods than invoiced' in panel)
-check('surplus difference shown', 'R+250.00' in panel)
+check('surplus difference shown', 'M+250.00' in panel)
 
 print('\n--- 6. Invoice against the order ---')
 reset()
@@ -168,12 +168,12 @@ body = c.get(f'/receive?delivery_id={did}').data.decode()
 panel = body.split('<h3>Order ')[1].split('</table>')[0]
 check('being invoiced beyond the order is flagged', 'Invoiced beyond the order' in panel)
 check('over-invoicing is shown as a negative amount still to invoice',
-      'R-150.00' in panel, panel[-400:])
+      'M-150.00' in panel, panel[-400:])
 did2, _ = open_delivery(order='PO-9', order_total='1000.00',
                         invoice='INV-9', invoice_total='900.00')
 panel = c.get(f'/receive?delivery_id={did2}').data.decode().split('<h3>Order ')[1].split('</table>')[0]
 check('an order not yet fully invoiced reads as part-delivered',
-      'Part-delivered' in panel and 'R100.00' in panel, panel[-400:])
+      'Part-delivered' in panel and 'M100.00' in panel, panel[-400:])
 
 # =====================================================================
 print('\n--- 7. Warn but allow: a mismatch never blocks receiving ---')
@@ -190,7 +190,7 @@ body = r.data.decode()
 check('closing with a mismatch is allowed',
       dels.find_one({'_id': A.ObjectId(did)})['status'] == 'closed')
 check('closing warns about the mismatch', 'closed with a mismatch' in body)
-check('the warning quotes both figures', 'R250.00' in body and 'R1000.00' in body)
+check('the warning quotes both figures', 'M250.00' in body and 'M1000.00' in body)
 check('the mismatch is audited',
       db['audit_log'].count_documents({'target_type': 'delivery', 'action': 'UPDATE'}) == 1)
 
@@ -238,7 +238,7 @@ def row(body, ref):
 
 ra, rb = row(body, da['reference']), row(body, dbb['reference'])
 check('matched delivery shows "matched"', 'matched' in ra, str(ra))
-check('mismatched delivery shows the difference', 'R-550.00' in rb, str(rb))
+check('mismatched delivery shows the difference', 'M-550.00' in rb, str(rb))
 check('mismatched closed delivery is flagged red',
       _re.search(r'<tr class="expired">\s*<td>' + _re.escape(dbb['reference']), body) is not None)
 check('matched closed delivery is not flagged',
@@ -316,7 +316,7 @@ check('deleting a delivery line reverses the stock',
       str(meds.find_one({'name': 'Paracetamol, 500 mg'})['balance']))
 body = c.get(f'/receive?delivery_id={did}').data.decode()
 check('the three-way match updates after a line is deleted',
-      'R0.00' in body.split('This Invoice vs Goods Received')[1].split('</table>')[0])
+      'M0.00' in body.split('This Invoice vs Goods Received')[1].split('</table>')[0])
 
 check('receive list is still paginated', 'pagebar' not in body and c.get('/receive').status_code == 200)
 
@@ -326,7 +326,7 @@ reset()
 login()
 add_med('Paracetamol, 500 mg', 0)
 did, _ = open_delivery(order_total='1250.00', invoice_total='1250.00')
-# 5 boxes of 100 tablets at R250 a box = 500 units, R1250
+# 5 boxes of 100 tablets at M250 a box = 500 units, M1250
 add_line(did, 'Paracetamol, 500 mg', 500, pack_price=250.00, pack_size=100)
 line = txs.find_one({'delivery_id': did})
 check('quantity is stored in single units', line['quantity'] == 500)
@@ -349,7 +349,7 @@ print('\n--- 13. A pack size that does not divide cleanly still matches ---')
 reset()
 login()
 add_med('Odd Item, 10 mg', 0)
-# 3 units per pack at R250 -> unit price R83.3333...; 300 units = 100 packs = R25,000
+# 3 units per pack at M250 -> unit price M83.3333...; 300 units = 100 packs = M25,000
 did, _ = open_delivery(order_total='25000.00', invoice_total='25000.00')
 add_line(did, 'Odd Item, 10 mg', 300, pack_price=250.00, pack_size=3)
 line = txs.find_one({'delivery_id': did})
@@ -391,9 +391,9 @@ add_med('Paracetamol, 500 mg', 0)
 did, _ = open_delivery(order_total='1250.00', invoice_total='1250.00')
 add_line(did, 'Paracetamol, 500 mg', 500, pack_price=250.00, pack_size=100)
 body = c.get('/dashboard').data.decode()
-# 500 units x R2.50 = R1,250 -- NOT 500 x R250 = R125,000
-check('stock value uses the unit price', 'R1,250' in body, )
-check('stock value is not inflated by the pack size', 'R125,000' not in body)
+# 500 units x M2.50 = M1,250 -- NOT 500 x M250 = M125,000
+check('stock value uses the unit price', 'M1,250' in body, )
+check('stock value is not inflated by the pack size', 'M125,000' not in body)
 
 # =====================================================================
 print('\n--- 16. Several invoices against one order ---')
@@ -401,7 +401,7 @@ reset()
 login()
 add_med('Paracetamol, 500 mg', 0)
 add_med('Aspirin, 100 mg', 0)
-# order PO-777 worth R3,000, filled by two part-deliveries
+# order PO-777 worth M3,000, filled by two part-deliveries
 d1, dd1 = open_delivery(order='PO-777', order_total='3000.00',
                         invoice='INV-A', invoice_total='1250.00')
 add_line(d1, 'Paracetamol, 500 mg', 500, pack_price=250.00, pack_size=100)
@@ -412,11 +412,11 @@ add_line(d2, 'Aspirin, 100 mg', 200, pack_price=500.00, pack_size=100)
 body = c.get(f'/receive?delivery_id={d2}').data.decode()
 order_panel = body.split('<h3>Order ')[1].split('</table>')[0]
 check('the order panel appears', 'PO-777' in body)
-check('order total shown', 'R3000.00' in order_panel, order_panel[:400])
+check('order total shown', 'M3000.00' in order_panel, order_panel[:400])
 check('both invoices counted', '<td>2</td>' in order_panel, order_panel[:400])
-check('invoiced to date sums both invoices', 'R2250.00' in order_panel, order_panel[:400])
-check('goods received sums across both deliveries', 'R2250.00' in order_panel)
-check('still to invoice is the balance of the order', 'R750.00' in order_panel,
+check('invoiced to date sums both invoices', 'M2250.00' in order_panel, order_panel[:400])
+check('goods received sums across both deliveries', 'M2250.00' in order_panel)
+check('still to invoice is the balance of the order', 'M750.00' in order_panel,
       order_panel[:400])
 check('the order reads as part-delivered', 'Part-delivered' in order_panel)
 
@@ -431,14 +431,14 @@ d3, _ = open_delivery(order='PO-777', order_total='3000.00',
 add_line(d3, 'Amoxycillin Cap, 250 mg', 150, pack_price=500.00, pack_size=100)
 panel = c.get(f'/receive?delivery_id={d3}').data.decode().split('<h3>Order ')[1].split('</table>')[0]
 check('the order now reads as fully invoiced', 'Fully invoiced' in panel, panel[:400])
-check('nothing left to invoice', 'R0.00' in panel)
+check('nothing left to invoice', 'M0.00' in panel)
 check('three invoices counted', '<td>3</td>' in panel)
 
 d4, _ = open_delivery(order='PO-777', order_total='3000.00',
                       invoice='INV-D', invoice_total='500.00')
 panel = c.get(f'/receive?delivery_id={d4}').data.decode().split('<h3>Order ')[1].split('</table>')[0]
 check('invoicing beyond the order total is flagged', 'Invoiced beyond the order' in panel)
-check('the overrun is shown as a negative remainder', 'R-500.00' in panel, panel[:400])
+check('the overrun is shown as a negative remainder', 'M-500.00' in panel, panel[:400])
 
 print('\n--- 18. Deliveries disagreeing on the order total ---')
 reset()
@@ -450,7 +450,7 @@ d2, _ = open_delivery(order='PO-888', order_total='1200.00',
 body = c.get(f'/receive?delivery_id={d2}').data.decode()
 check('a conflicting order total is surfaced, not silently resolved',
       'do not agree on the order total' in body)
-check('the most recent figure is used', 'R1200.00' in body.split('<h3>Order ')[1])
+check('the most recent figure is used', 'M1200.00' in body.split('<h3>Order ')[1])
 body = c.get(f'/receive?delivery_id={d1}').data.decode()
 check('an order with consistent totals shows no warning after correction',
       'do not agree on the order total' in body)
@@ -484,7 +484,7 @@ check('a line with no pack data falls back to quantity x price',
 body = c.get(f'/receive?delivery_id={d1}').data.decode()
 check('a legacy line renders without a pack price', '&ndash;' in body or '–' in body)
 check('the delivery list values legacy lines too',
-      'R300.00' in c.get('/receive').data.decode())
+      'M300.00' in c.get('/receive').data.decode())
 
 print('\n--- A half-typed delivery line is not lost ---')
 # The dispensing form already keeps a draft. A delivery line is the other place

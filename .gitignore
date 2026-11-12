@@ -14,3 +14,7 @@ npm-debug.log*
 Thumbs.db
 
 
+
+__pycache__/
+*.pyc
+errors.log

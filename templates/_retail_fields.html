@@ -1,0 +1,33 @@
+{#- Selling price and website listing, shared by Add Medication and Edit
+    Medication. `m` is the product being edited, or none on the add page. -#}
+<h3>Selling &amp; Website</h3>
+<p style="font-size:13px;">The selling price is what the customer pays for
+<strong>one unit</strong> at the till. Prescription-only items need a
+prescription number at the till and never show a price on the website.</p>
+<div class="common-section">
+    <div>
+        <label>Customer price, each single unit (M):</label>
+        <input name="selling_price" type="number" step="0.01" min="0"
+               value="{{ '%.2f'|format(m.get('selling_price') or 0) if m else '' }}" required>
+    </div>
+    <div>
+        <label>Website Category:</label>
+        <select name="web_category">
+            {% for c in web_categories %}
+            <option value="{{ c }}" {% if m and m.get('web_category') == c %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div>
+        <label><input type="checkbox" name="rx_only" {% if m and m.get('rx_only') %}checked{% endif %}>
+            Prescription only</label>
+    </div>
+    <div>
+        <label><input type="checkbox" name="on_website" {% if m and m.get('on_website') %}checked{% endif %}>
+            Show on website</label>
+    </div>
+    <div style="grid-column: 1 / -1;">
+        <label>Short description for the website (optional):</label>
+        <input name="description" maxlength="200" value="{{ m.get('description', '') if m else '' }}">
+    </div>
+</div>

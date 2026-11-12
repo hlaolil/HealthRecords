@@ -17,7 +17,7 @@
 {# The keep-alive ping below is a POST that is not a form, so it reads the
    token from here instead. #}
 <meta name="csrf-token" content="{{ csrf_token() }}">
-<title>{% block title %}{{ page_title|default('NMC Pharmacy', true) }}{% endblock %}</title>
+<title>{% block title %}{{ page_title|default('The Healing Hub Pharmacy', true) }}{% endblock %}</title>
 <style>
     body {
         font-family: Arial, sans-serif;
@@ -617,8 +617,8 @@ document.addEventListener('DOMContentLoaded', function () {
     is a different controlled form, with its own reference and revision, so
     it overrides doc_ref; the login and registration pages have no
     navigation to show, so they override nav with nothing. #}
-<h1>{% block heading %}NMC Pharmacy{% endblock %}</h1>
-{% block doc_ref %}<p>LD-HSE/NMC/HRD/6.1.3.3</p>
+<h1>{% block heading %}The Healing Hub Pharmacy{% endblock %}</h1>
+{% block doc_ref %}<p>The Healing Hub Pharmacy (Pty) Ltd &middot; Ha Leqele, Maseru</p>
 {% endblock %}{% block nav %}{{ nav_links|safe }}
 {% endblock %}{% block content %}{% endblock %}</body>
 </html>

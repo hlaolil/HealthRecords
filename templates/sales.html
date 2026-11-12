@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Sales &middot; The Healing Hub Pharmacy{% endblock %}
+{% block heading %}Sales &amp; Cash-up{% endblock %}
+{% block content %}
+{% from "_pagebar.html" import pagebar with context %}
+{% if message %}<p class="message {{ message_class or 'success' }}">{{ message }}</p>{% endif %}
+
+<form method="GET" action="{{ url_for('sales') }}" class="common-section">
+    <div><label>From</label><input type="date" name="start_date" value="{{ start_date }}"></div>
+    <div><label>To</label><input type="date" name="end_date" value="{{ end_date }}"></div>
+    <div><label>Search (receipt, customer, item)</label><input name="search" value="{{ search }}"></div>
+    <div><label>&nbsp;</label><input type="submit" value="Show"></div>
+</form>
+
+<h2>Cash-up {% if start_date == end_date and start_date %}for {{ start_date }}{% endif %}</h2>
+<div class="table-scroll"><table>
+    <thead><tr><th>Payment</th><th>Sales</th><th>Total (M)</th></tr></thead>
+    <tbody>
+    {% for m, v in by_method %}
+        <tr><td>{{ m }}</td><td>{{ v.count }}</td><td>{{ '%.2f'|format(v.total) }}</td></tr>
+    {% else %}
+        <tr><td colspan="3">No sales in this period.</td></tr>
+    {% endfor %}
+    <tr><td><strong>All payments</strong></td><td><strong>{{ grand.count }}</strong></td>
+        <td><strong>{{ '%.2f'|format(grand.total) }}</strong></td></tr>
+    {% if is_admin %}
+    <tr><td>Cost of goods sold</td><td></td><td>{{ '%.2f'|format(grand.cost) }}</td></tr>
+    <tr><td>Gross profit</td><td></td>
+        <td>{{ '%.2f'|format(grand.margin) }}{% if grand.total %} ({{ '%.0f'|format(100 * grand.margin / grand.total) }}%){% endif %}</td></tr>
+    {% endif %}
+    </tbody>
+</table></div>
+{% if grand.voided %}<p style="font-size:13px;">{{ grand.voided }} voided sale(s) in this period are not counted.</p>{% endif %}
+<p><a href="{{ url_for('sales', start_date=start_date, end_date=end_date, search=search, export='csv') }}"><button type="button">Download CSV</button></a></p>
+
+<h2>Sales</h2>
+{{ pagebar(pager, 'sales', start_date, end_date, search, unit) }}
+<div class="table-scroll"><table>
+    <thead><tr><th>Receipt</th><th>Time</th><th>Items</th><th>Total (M)</th><th>Payment</th><th>Customer</th><th>Cashier</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+        <tr {% if r.status == 'voided' %}style="opacity:.55; text-decoration: line-through;"{% endif %}>
+            <td><a href="{{ url_for('receipt', receipt_no=r.receipt_no) }}">{{ r.receipt_no }}</a></td>
+            <td>{{ r.when }}</td>
+            <td>{% for l in r.lines %}{{ l.name }} &times;{{ l.quantity }}{% if not loop.last %}; {% endif %}{% endfor %}</td>
+            <td>{{ '%.2f'|format(r.total) }}</td>
+            <td>{{ r.payment_method }}</td>
+            <td>{{ r.customer }}</td>
+            <td>{{ r.cashier }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="7">No sales found.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{{ pagebar(pager, 'sales', start_date, end_date, search, unit) }}
+{% endblock %}

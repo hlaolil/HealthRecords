@@ -59,9 +59,9 @@ txs.insert_one({
     'user': 'Letlotlo Hlaoli', 'date': NOW.strftime('%Y-%m-%d'), 'timestamp': NOW})
 
 login()
-PAGES = ['/', '/dispense', '/receive', '/add-medication', '/internal-issue',
-         '/stock-take', '/temperature', '/key-register', '/loans',
-         '/loan-items', '/audit', '/reports']
+PAGES = ['/', '/sell', '/sales', '/write-off', '/receive', '/add-medication',
+         '/stock-take', '/temperature',
+         '/audit', '/reports']
 
 print('\n--- 1. Every page is a real document that says how wide the screen is ---')
 pages = {}

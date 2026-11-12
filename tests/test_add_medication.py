@@ -115,7 +115,7 @@ check('line value uses the pack price (500/50 x 100 = 1000)',
       abs(t['line_value'] - 1000.00) < 0.001, str(t['line_value']))
 check('the opening load is audited',
       db['audit_log'].count_documents({'target_type': 'opening_balance'}) == 1)
-check('the confirmation states the unit price', 'R2.0000' in r.data.decode())
+check('the confirmation states the unit price', 'M2.0000' in r.data.decode())
 
 # =====================================================================
 print('\n--- 4. An opening load is not a delivery and not a discrepancy ---')
@@ -189,8 +189,8 @@ reset()
 login()
 add_medication('Paracetamol, 500 mg', pack_size=100, pack_price='250.00', opening=500)
 body = c.get('/dashboard').data.decode()
-check('stock value uses the derived unit price (500 x 2.50)', 'R1,250' in body)
-check('stock value is not inflated by the pack size', 'R125,000' not in body)
+check('stock value uses the derived unit price (500 x 2.50)', 'M1,250' in body)
+check('stock value is not inflated by the pack size', 'M125,000' not in body)
 
 # =====================================================================
 print('\n--- 8. Receiving refuses an undefined medication ---')

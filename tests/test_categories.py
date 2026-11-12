@@ -18,7 +18,7 @@ meds, txs = db['medications'], db['transactions']
 c = A.app.test_client()
 # The app refuses a POST without its CSRF token; this makes the
 # test client send it, so these checks exercise the real path.
-from test_support import arm_csrf, inventory_rows, reconciles
+from test_support import arm_csrf, sell, inventory_rows, reconciles
 arm_csrf(c)
 PASS, FAIL = [], []
 
@@ -176,21 +176,12 @@ c.post('/receive', data={'action': 'line', 'delivery_id': did,
 check('a supply can be received on a delivery',
       meds.find_one({})['balance'] == 1000)
 # dispensing to a patient
-c.post('/dispense', data={'patient': 'Thabo M', 'company': 'C', 'position': 'P',
-                          'birth_decade': '1980', 'gender': 'M',
-                          'outcome': 'Outpatient', 'outcome_days': '',
-                          'diagnoses': 'wound', 'prescriber': 'Dr X',
-                          'dispenser': 'D', 'date': NOW.strftime('%Y-%m-%d'),
-                          'med_names': ['Gauze Bandage, 10 cm'],
-                          'quantities': ['50']}, follow_redirects=True)
-check('a supply can be dispensed to a patient', meds.find_one({})['balance'] == 950)
-# issue to a department
-c.post('/internal-issue', data={'action': 'issue', 'department': 'Emergency Trolley',
-                                'issued_to': 'Sr M', 'med_name': ['Gauze Bandage, 10 cm'],
-                                'quantity': ['100']}, follow_redirects=True)
-check('a supply can be issued to a department', meds.find_one({})['balance'] == 850)
+sell(c, db, [('Gauze Bandage, 10 cm', 50)], customer='Thabo M')
+check('a supply can be sold at the till', meds.find_one({})['balance'] == 950)
+sell(c, db, [('Gauze Bandage, 10 cm', 100)])
+check('and sold again', meds.find_one({})['balance'] == 850)
 # damage
-c.post('/internal-issue', data={'action': 'damage', 'med_name': 'Gauze Bandage, 10 cm',
+c.post('/write-off', data={'med_name': 'Gauze Bandage, 10 cm',
                                 'quantity': '50', 'reason': 'Contaminated'},
        follow_redirects=True)
 check('a supply can be written off as damaged', meds.find_one({})['balance'] == 800)
@@ -208,7 +199,7 @@ body = rep('inventory', 'supply', start_date=M_START, end_date=M_END)
 row = inventory_rows(body).get('Gauze Bandage, 10 cm', {})
 print('   supply inventory row:', row)
 check('the supply row reconciles like any other', row and reconciles(row), str(row))
-check('its AMC counts dispensing and department issues',
+check('its AMC counts what was sold',
       row and float(row['Adjusted AMC']) > 0, str(row))
 
 print('\n--- 6. Ordering and the controlled register ---')

@@ -71,27 +71,6 @@ with c.session_transaction() as s:
     s.clear()
 r = c.get('/api/stock?name=Paracetamol tabs, 500 mg')
 check('signed out, it is refused', r.status_code == 302)
-login('department', 'Sr. Mokoena', 'Lab')
-r = c.get('/api/stock?name=Paracetamol tabs, 500 mg')
-check('a department login cannot read the pharmacy stock',
-      r.status_code == 302 and r.headers['Location'].endswith('/requests'))
-
-print('\n--- 3. The dispensing form uses it ---')
-src = page_source('dispense.html')
-check('the form asks for the stock of the item picked', "fetch('/api/stock?name='" in src)
-check('and shows it under the medication box', "'On hand: '" in src and 'med-stock' in src)
-check('it warns when more is asked for than the shelf holds',
-      'will be recorded as unmet' in src and 'Out of stock' in src)
-check('it adds up the same item on two lines', 'wanted +=' in src)
-check('it warns of an item expiring or expired', 'EXPIRED' in src and 'expires ' in src)
-check('it is told when it is an edit, where the visit is already off the shelf',
-      'this visit is already off it' in src)
-check('clearing the form clears the notes', ".med-stock').forEach" in src)
-check('a restored draft looks its stock up too', 'showAllStock();' in src)
-login()
-page = c.get('/dispense').data.decode()
-check('the dispensing page renders with it', page.count('const EDITING = false') == 1)
-
 print(f"\n=========  {len(PASS)} passed, {len(FAIL)} failed  =========")
 if FAIL:
     for f in FAIL:

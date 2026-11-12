@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Receipt {{ sale.receipt_no }} &middot; The Healing Hub Pharmacy{% endblock %}
+{% block heading %}Receipt{% endblock %}
+{% block page_styles %}
+<style>
+    .receipt { max-width: 380px; margin: 10px 0 20px; padding: 16px; border: 1px dashed #999; font-family: 'Courier New', monospace; font-size: 13px; background: #fff; }
+    .receipt h3 { text-align: center; margin: 0 0 2px; font-size: 16px; }
+    .receipt .c { text-align: center; }
+    .receipt table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+    .receipt td { padding: 2px 0; border: 0; vertical-align: top; }
+    .receipt td.r { text-align: right; white-space: nowrap; }
+    .receipt .total td { border-top: 1px dashed #999; font-weight: 700; padding-top: 6px; }
+    .voided { color: #b3422e; font-weight: 700; text-align: center; font-size: 18px; letter-spacing: 2px; }
+    @media print {
+        body > *:not(.receipt-wrap) { display: none !important; }
+        .receipt-wrap > *:not(.receipt) { display: none !important; }
+        .receipt { border: 0; margin: 0; }
+    }
+</style>
+{% endblock %}
+{% block content %}
+{% if message %}<p class="message {{ message_class or 'success' }}">{{ message }}</p>{% endif %}
+<div class="receipt-wrap">
+<div class="receipt">
+    <h3>THE HEALING HUB PHARMACY</h3>
+    <div class="c">Ha Leqele, Maseru &middot; +266 5617 6099</div>
+    <div class="c">Reg. No. 93656</div>
+    {% if sale.status == 'voided' %}<div class="voided">VOIDED</div>{% endif %}
+    <p>Receipt: <strong>{{ sale.receipt_no }}</strong><br>
+       Date: {{ when }}<br>
+       Served by: {{ sale.cashier }}
+       {% if sale.customer %}<br>Customer: {{ sale.customer }}{% endif %}
+       {% if sale.prescription_no %}<br>Prescription: {{ sale.prescription_no }}{% endif %}</p>
+    <table>
+        {% for l in sale.lines %}
+        <tr><td colspan="2">{{ l.name }}</td></tr>
+        <tr><td>&nbsp;&nbsp;{{ l.quantity }} x {{ '%.2f'|format(l.unit_price) }}</td>
+            <td class="r">{{ '%.2f'|format(l.line_total) }}</td></tr>
+        {% endfor %}
+        <tr class="total"><td>TOTAL (M)</td><td class="r">{{ '%.2f'|format(sale.total) }}</td></tr>
+        <tr><td>Paid by</td><td class="r">{{ sale.payment_method }}</td></tr>
+        {% if sale.amount_tendered is not none %}
+        <tr><td>Tendered</td><td class="r">{{ '%.2f'|format(sale.amount_tendered) }}</td></tr>
+        <tr><td>Change</td><td class="r">{{ '%.2f'|format(sale.change or 0) }}</td></tr>
+        {% endif %}
+        {% if sale.medical_aid %}
+        <tr><td>Medical aid</td><td class="r">{{ sale.medical_aid.scheme }} {{ sale.medical_aid.member_no }}</td></tr>
+        {% endif %}
+    </table>
+    <div class="c">Thank you. Ask us about free refill reminders.</div>
+</div>
+<p>
+    <button type="button" onclick="window.print()">Print receipt</button>
+    <a href="{{ url_for('sell') }}"><button type="button">New sale</button></a>
+    <a href="{{ url_for('sales') }}"><button type="button">All sales</button></a>
+</p>
+{% if sale.status == 'voided' %}
+<p class="message error">Voided by {{ sale.voided_by }}: {{ sale.void_reason }}</p>
+{% elif is_admin %}
+<form method="POST" action="{{ url_for('void_sale') }}" onsubmit="return confirm('Void this sale and return its stock?');">
+    <input type="hidden" name="receipt_no" value="{{ sale.receipt_no }}">
+    <label>Void this sale (admin): reason
+        <input name="reason" required maxlength="200" placeholder="e.g. rung up twice">
+    </label>
+    <input type="submit" value="Void sale">
+</form>
+{% endif %}
+</div>
+{% endblock %}

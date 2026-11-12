@@ -292,7 +292,8 @@ print('\n--- 10. One clock, or the order above cannot be trusted ---')
 _src = open('app.py').read()
 _utc = _src.count("'timestamp': datetime.utcnow()")
 _local = _src.count("'timestamp': local_now()")
-check('transaction timestamps are written in UTC', _utc >= 10, str(_utc))
+_utc += _src.count("now = datetime.utcnow()")   # the till stamps a whole sale with one UTC time
+check('transaction timestamps are written in UTC', _utc >= 8, str(_utc))
 check('and not one of them uses the pharmacy wall clock', _local == 0,
       f'{_local} writes use local_now(), which is UTC+2 — a register '
       f'mixing the two sorts rows into the wrong order')

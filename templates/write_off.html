@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Write-offs &middot; The Healing Hub Pharmacy{% endblock %}
+{% block heading %}Write-offs (damage &amp; loss){% endblock %}
+{% block content %}{% include "_medication_options.html" %}
+{% if message %}<p class="message {% if 'recorded' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>{% endif %}
+<p>For stock that is broken, spoiled or lost. Expired stock is removed from
+Reports &rarr; Expired Stock on Shelf. A write-off reduces the balance and is
+kept out of the monthly consumption, so a breakage never makes the order
+request buy more.</p>
+<form method="POST" action="{{ url_for('write_off') }}">
+    <div class="common-section">
+        <div><label>Medication:</label>
+            <input name="med_name" list="wo_meds" required></div>
+        <div><label>Quantity (single units):</label>
+            <input name="quantity" type="number" min="1" required></div>
+        <div><label>Reason:</label>
+            <select name="reason" required>
+                <option value="">-- Select --</option>
+                {% for r in damage_reasons %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+            </select></div>
+        <div><label>Note (optional):</label><input name="note" maxlength="200"></div>
+    </div>
+    <datalist id="wo_meds"></datalist>
+    <div class="form-buttons"><input type="submit" value="Record write-off"></div>
+</form>
+<script>
+getMedicationOptions().then(function (names) {
+    var dl = document.getElementById('wo_meds');
+    (names || []).forEach(function (n) { var o = document.createElement('option'); o.value = n; dl.appendChild(o); });
+});
+</script>
+
+<h2>Recent write-offs</h2>
+<div class="table-scroll"><table>
+    <thead><tr><th>When</th><th>Medication</th><th>Units</th><th>Reason</th><th>Value (M)</th><th>By</th></tr></thead>
+    <tbody>
+    {% for r in recent %}
+        <tr><td>{{ r.when }}</td><td>{{ r.med_name }}</td><td>{{ -(r.quantity or 0) }}</td>
+            <td>{{ r.reason }}{% if r.note %} &mdash; {{ r.note }}{% endif %}</td>
+            <td>{{ '%.2f'|format(-(r.line_value or 0)) }}</td><td>{{ r.user }}</td></tr>
+    {% else %}
+        <tr><td colspan="6">No write-offs recorded.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% endblock %}

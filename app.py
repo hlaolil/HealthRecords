@@ -305,33 +305,11 @@ def init_db_collections() -> None:
         # (morning/afternoon), holding the max-min thermometer's three figures.
         if 'temperature_logs' not in existing:
             db.create_collection('temperature_logs')
-        # NEW (Equipment loans): crutches, moon boots and arm slings are lent
-        # out and come back, so they are NOT stock. A consumable leaves and is
-        # gone; a loaned item is still owned by the pharmacy while it is off
-        # the shelf. Holding them in `medications` would give them a balance
-        # that drops on issue, an AMC, a reorder level and an expiry date, all
-        # of which are meaningless here and would corrupt the stock reports.
-        # loan_items is the asset register, one document per physical item;
-        # loans is the lending ledger, one document per issue.
-        if 'loan_items' not in existing:
-            db.create_collection('loan_items')
-        if 'loans' not in existing:
-            db.create_collection('loans')
-        # NEW (Store key register, LD-HSE/NMC/PSKR/6.1.3.3): one document per
-        # issue of the pharmacy store key, carrying both sides of the paper
-        # form — who took it and when, who brought it back and who received it.
-        if 'key_register' not in existing:
-            db.create_collection('key_register')
-        # NEW: who may hold the key. A Nurse Assistant may well be the person
-        # at the counter entering the record, but is not an officer in charge,
-        # so the two things are kept apart by an explicit flag rather than by
-        # anyone remembering.
-        if 'key_officers' not in existing:
-            db.create_collection('key_officers')
-        # NEW: one small document recording that the key is up for handover,
-        # set when the pharmacist logs out and cleared when somebody takes it.
-        if 'key_control' not in existing:
-            db.create_collection('key_control')
+        # NEW (Point of sale): one document per sale (the receipt); its lines
+        # are ordinary 'dispense' transactions tagged with the same
+        # transaction_id, so every stock report keeps working unchanged.
+        if 'sales' not in existing:
+            db.create_collection('sales')
 
         # audit_log: /audit page sorts by timestamp desc and filters by
         # action/target_type/target_id/user via $or regex, plus an exact
@@ -378,29 +356,11 @@ def init_db_collections() -> None:
         db['temperature_logs'].create_index(
             [('location', 1), ('date', 1), ('session', 1)], unique=True)
 
-        # loan_items: the asset register. item_code is how staff refer to a
-        # physical item ("CR-003"), so it must be unique or two crutch pairs
-        # share an identity and the loan history becomes unreadable.
-        db['loan_items'].create_index([('item_code', 1)], unique=True)
-        db['loan_items'].create_index([('item_type', 1), ('status', 1)])
-
-        # loans: the lending ledger. The hot query is "what is still out",
-        # which is status + due_date for the overdue list, and item_code for
-        # the double-issue guard and an item's own history.
-        db['loans'].create_index([('status', 1), ('due_date', 1)])
-        db['loans'].create_index([('item_code', 1), ('issued_date', -1)])
-        db['loans'].create_index([('patient_name', 1)])
-        db['loans'].create_index([('issued_date', -1)])
-        db['loans'].create_index([('loan_ref', 1)], unique=True)
-
-        # key_register: the hot query is "is the key out right now", which is
-        # status alone; the register itself reads newest-first by issue time.
-        db['key_register'].create_index([('status', 1)])
-        db['key_register'].create_index([('issued_at', -1)])
-        db['key_register'].create_index([('recipient_name', 1)])
-        db['key_register'].create_index([('ref', 1)], unique=True)
-        db['key_officers'].create_index([('name', 1)], unique=True)
-        db['key_officers'].create_index([('active', 1), ('in_charge', 1)])
+        # sales: the sales list reads newest first; the receipt number is how a
+        # customer refers to a sale, so it is unique.
+        db['sales'].create_index([('timestamp', -1)])
+        db['sales'].create_index([('receipt_no', 1)], unique=True)
+        db['sales'].create_index([('status', 1), ('timestamp', -1)])
         db['deliveries'].create_index([('status', 1), ('opened_at', -1)])
         db['deliveries'].create_index([('reference', 1)], unique=True)
         db['deliveries'].create_index([('invoice_number', 1)])
@@ -420,550 +380,6 @@ def init_db_collections() -> None:
 # Run at import time so this also applies under `flask run` / gunicorn,
 # not just `python app.py`.
 init_db_collections()
-
-# Diagnosis options
-# The clinical vocabulary.
-#
-# Standardised 20 October 2026, in three passes.
-#
-# The first corrected 79 entries that carried a spelling or punctuation error
-# ("Chelazion", "Rynaulds phenomenon", "Myocardiac infaction"), removed 14
-# that were body-system headings rather than diagnoses ("ENT", "Respiratory",
-# "Surgical"), and merged three that said the same thing twice.
-#
-# The second split six entries that put two DIFFERENT diseases on one line —
-# worst of them "Inflammatory bowel disease / IBS", which is Crohn's and
-# ulcerative colitis filed under irritable bowel — and added 23 conditions the
-# pharmacy plainly treats but could not record. Those were found by reading
-# the medicine cupboard against this list: Anti Snake Bite Serum with no snake
-# bite, Tetanus Toxoid with no immunisation, four contraceptives with no
-# family planning, Adrenalin with no anaphylaxis.
-#
-# The third took the naming discipline of ICD-10's tabular list, but only
-# where it removes a real ambiguity. A diagnosis of "Ulcer" does not say
-# whether it is gastric, oral, venous or corneal; "Injury" does not say what
-# was injured. ICD will not let a title be that vague, so those 12 now carry
-# the qualifier, named as "unspecified" rather than left silent. The other 16
-# were joined with a slash, which ICD does not use: it says "and" for a shared
-# title and gives separate entries otherwise. The abbreviations the pharmacy
-# speaks in — HTN, DM, TB — are deliberately left alone: they are not
-# ambiguous here, they are already findable by their full name, and spelling
-# them out would only make the register wider.
-#
-# Records already written keep whatever was entered at the time — a clinical
-# record is not rewritten after the fact — so every wording this list has ever
-# carried lives on in DIAGNOSIS_SEARCH_TERMS and still finds its entry, and
-# DIAGNOSIS_RENAMES below keeps the reports counting it as one condition.
-DIAGNOSES_OPTIONS = [
-    'Abrasion', 'Abscess, site unspecified', 'Acne', 'Acute appendicitis',
-    'Acute bronchitis', 'Acute gastroenteritis (AGE)', 'Acute kidney injury',
-    'Acute myocardial infarction', 'Acute nasopharyngitis [common cold]',
-    'Acute otitis media', 'Acute sinusitis', 'Acute stress disorder',
-    'Acute tonsillitis and pharyngitis', 'Acute urinary retention',
-    'Alcohol intoxication', 'Allergic conjunctivitis', 'Allergic rhinitis',
-    'Allergic skin reaction', 'Allergy, unspecified', 'Anaemia',
-    'Anal fissure', 'Anaphylaxis', 'Angina', 'Angio-oedema',
-    'Antiphospholipid syndrome', 'Anxiety disorder',
-    'Aphthous ulcer and other oral lesions', 'Aquagenic pruritus', 'ARDS',
-    'Arthralgia', 'Asthma', 'Awaiting PCR results',
-    'Bacterial conjunctivitis', 'Bereavement reaction', 'Bipolar disorder',
-    'Bladder stone', 'Boutonniere deformity', 'Bowel obstruction', 'BPH',
-    'Brachial plexus compression', 'Breast lump', 'Bullous skin lesions',
-    'Burn, site and degree unspecified', 'Bursitis', 'Calcaneal spur',
-    'Candidiasis of mouth or oesophagus', 'Cardiac dysrhythmia',
-    'Cardiomegaly', 'Cataract', 'CCF', 'Cellulitis', 'Cervixitis',
-    'Chalazion', 'Chemical burn', 'Chemical conjunctivitis',
-    'Chemical pneumonitis', 'Chronic fatigue syndrome',
-    'Chronic kidney disease', 'Chronic sinusitis',
-    'Chronic suppurative otitis media (CSOM)', 'Circumcision', 'Common cold',
-    'Constipation', 'Contusion', 'COPD', 'Corneal abrasion',
-    'Corns and callosities', 'Costochondritis', 'COVID-19', 'Crush syndrome',
-    'CVA', 'Dehydration', 'Dental abscess', 'Dental caries',
-    'Depressive disorder', 'Dermatitis and eczema', 'Dermatophytosis [tinea]',
-    'Diarrhoea', 'Disc herniation', 'Dislocation, site unspecified', 'DKA',
-    'DM', 'Dog bite', 'Drug-induced kidney injury', 'Dry eyes', 'DVT',
-    'Dysentery', 'Dysfunctional uterine bleeding', 'Dysmenorrhoea',
-    'Ear wax impaction', 'Emergency contraception', 'Emphysema',
-    'Epidermoid cyst', 'Epididymo-orchitis', 'Epilepsy', 'Epistaxis',
-    'Erectile dysfunction', 'Eyelid infection', 'Faecal incontinence',
-    'Family planning', 'Fibroid uterus', 'Fitness to work examination',
-    'Foreign body (in soft tissue)', 'Foreign body ear',
-    'Foreign body, site unspecified', 'Fracture, site unspecified',
-    'Ganglion cyst', 'Gastritis', 'Gastro-oesophageal reflux disease [GERD]',
-    'Gingivitis', "Golfer's elbow", 'Gout', 'Haemorrhoids',
-    'Hairy leucoplakia', 'Hallux valgus deformity', 'Head injury',
-    'Headache (tension, migraine, cluster etc)', 'Heat exhaustion',
-    'Heat stroke', 'Hepatitis, unspecified', 'Herpes labialis (cold sore)',
-    'Herpes zoster', 'HHS', 'Hiccups', 'High altitude syndrome', 'HIV',
-    'HIV-associated vasculitis', 'Hormonal imbalance', 'HTN', 'Hydrocele',
-    'Hypercholesterolaemia', 'Hyperglycaemia', 'Hypertriglyceridaemia',
-    'Hypoglycaemia', 'Hypotension', 'I & D', 'Iliotibial band syndrome',
-    'Immunisation', 'Indigestion', 'Inflammatory bowel disease', 'Influenza',
-    'Ingrown toenail', 'Inhibited sexual desire', 'Injury (RTA)',
-    'Injury on duty', 'Injury, site unspecified', 'Insect bite', 'Insomnia',
-    'Insufficient sleep syndrome', 'Irritable bowel syndrome',
-    "Kaposi's sarcoma", 'Kidney stone', 'Laceration', 'Laryngitis',
-    'Ligament sprain', 'Lightning injury', 'Lipoma', 'Loose teeth',
-    'Lower GI bleed', 'LRTI', 'Lymphadenitis', 'Mechanical low back pain',
-    'Medication side effects', 'Medication-induced cough (ACE-I etc)',
-    'Menorrhagia', 'Miscarriage', 'Mucus hypersecretion', 'Muscle strain',
-    'Myalgia and muscle spasm', 'Nasal lesion and infection', 'Nasal polyp',
-    'Nausea and vomiting', 'Negative on AgRDT',
-    'Neoplasm, nature unspecified', 'Neuralgia and neuritis, unspecified',
-    'Noise-induced hearing loss', 'Non-specific spinal pain',
-    'Normal menstrual period', 'Obstructive sleep apnoea', 'Oral lesion(s)',
-    'Osteoarthritis', 'Otitis externa', 'Ovarian cyst', 'Overdose',
-    'Pancreatitis', 'Panic disorder', 'Papules, pustules', 'Paraesthesia',
-    'PCOS', 'Pelvic congestion syndrome', 'Pelvic mass',
-    'Peri-orbital lesion', 'Perianal abscess', 'Periodontitis',
-    'Peripheral neuropathy', 'Peripheral vascular disease', 'Pica', 'PID',
-    'Pinguecula', 'PJP', 'Plantar fasciitis', 'Pleural effusion', 'Pleurisy',
-    'Pneumoconiosis', 'Pneumonia', 'Poisoning', 'Polyarthralgia',
-    'Positive on AgRDT', 'Post HIV exposure',
-    'Post-COVID hyperactive airway disease', 'Post-menopausal bleeding',
-    'Post-menopausal syndrome', 'Post-operative adhesions', 'Pregnancy',
-    'Preseptal cellulitis', 'Psychosomatic disorder', 'Pterygium', 'PUD',
-    'Rabies exposure', 'Radiculopathy', "Raynaud's phenomenon",
-    'Rheumatoid arthritis', 'Scabies', 'Sciatica', 'Secondary amenorrhoea',
-    'Seizure, unspecified', 'Septic nasal piercing',
-    'Smoke inhalation injury', 'Snake bite', 'Spinal abnormality',
-    'Spondylolisthesis', 'Spondylosis',
-    'STI (MUS, VDS, herpes genitalia, syphilis etc)', 'Stye (hordeolum)',
-    'Supplementation', 'Surgical site infection', 'Swan neck deformity',
-    'Syncope', 'TB', 'TB meningitis', 'Temporal arteritis', 'Tendon injury',
-    'Tendonitis', 'Tennis elbow', 'Tetanus prophylaxis', 'Thoracic back pain',
-    'TIA', 'Tinnitus', 'Toothache', 'Torticollis', 'Traumatic conjunctivitis',
-    'Typhoid', 'Ulcer, site unspecified', 'Upper GI bleed',
-    'Urethral stricture and bladder outlet obstruction',
-    'Urinary catheter blockage', 'Urinary incontinence', 'URTI', 'Urticaria',
-    'UTI', 'Vaginal candidiasis', 'Venous insufficiency',
-    'Viral conjunctivitis', 'Visual impairment, unspecified', 'Warts',
-    'Welding flash (arc eye)', 'Worm infestation', 'Wound care (dressing)',
-]
-
-# What each renamed entry used to be called.
-#
-# Renaming a diagnosis splits its own history: every visit before today says
-# "Injury" and every visit after says "Injury, site unspecified", so a count
-# of either is half the truth. The records are not touched — they are clinical
-# records — so the reports are told that these pairs are one condition.
-DIAGNOSIS_RENAMES = {
-    'Abscess':
-        'Abscess, site unspecified',
-    'Acute tonsillitis / pharyngitis':
-        'Acute tonsillitis and pharyngitis',
-    'Allergies':
-        'Allergy, unspecified',
-    'Aphthous ulcers / oral lesions':
-        'Aphthous ulcer and other oral lesions',
-    'Burns':
-        'Burn, site and degree unspecified',
-    'Candidiasis (oral / oesophageal)':
-        'Candidiasis of mouth or oesophagus',
-    'Dermatitis / eczema':
-        'Dermatitis and eczema',
-    'Dislocation':
-        'Dislocation, site unspecified',
-    'Feet corns / calluses':
-        'Corns and callosities',
-    'Foreign body':
-        'Foreign body, site unspecified',
-    'Fractures':
-        'Fracture, site unspecified',
-    'Fungal infection / tinea / dermatophyte':
-        'Dermatophytosis [tinea]',
-    'GERD / oesophageal sphincter dysfunction':
-        'Gastro-oesophageal reflux disease [GERD]',
-    'Grief / bereavement':
-        'Bereavement reaction',
-    'Hepatitis':
-        'Hepatitis, unspecified',
-    'Injury':
-        'Injury, site unspecified',
-    'Internal / external haemorrhoids':
-        'Haemorrhoids',
-    'Myalgia / muscle tension / spasm':
-        'Myalgia and muscle spasm',
-    'Myocardial infarction / ACS':
-        'Acute myocardial infarction',
-    'Nasal lesion / infection':
-        'Nasal lesion and infection',
-    'Neuralgia / neuritis':
-        'Neuralgia and neuritis, unspecified',
-    'Pleuritic chest pain / pleuritis':
-        'Pleurisy',
-    'Poor vision':
-        'Visual impairment, unspecified',
-    'Seizure':
-        'Seizure, unspecified',
-    'Tumour':
-        'Neoplasm, nature unspecified',
-    'Ulcer':
-        'Ulcer, site unspecified',
-    'Urethral stricture / urinary outlet obstruction':
-        'Urethral stricture and bladder outlet obstruction',
-    'Viral rhinitis / common cold':
-        'Acute nasopharyngitis [common cold]',
-}
-
-# Extra words that find an entry without being part of its name: the long
-# form of an abbreviation, the everyday word for it, and every spelling,
-# joined-up phrasing and old title this list has ever carried. Typing
-# "hypertension" found NOTHING before this, because the entry is called HTN;
-# so did "diabetes", "stroke", "shingles" and "nosebleed". A standard list
-# only standardises anything if it is easier to hit than typing something of
-# your own.
-DIAGNOSIS_SEARCH_TERMS = {
-    'ARDS': [
-        'acute respiratory distress syndrome',],
-    'Abrasion': [
-        'graze', 'scrape',],
-    'Abscess, site unspecified': [
-        'abscess',],
-    'Acute gastroenteritis (AGE)': [
-        'age', 'diarrhoea vomiting', 'stomach bug',],
-    'Acute myocardial infarction': [
-        'acs', 'acute coronary syndrome', 'heart attack', 'mi',
-        'myocardiac infaction/ acs', 'myocardial infarction / acs',],
-    'Acute nasopharyngitis [common cold]': [
-        'cold', 'common cold', 'viral rhinitis',
-        'viral rhinitis / common cold', 'viral rhinitis/ common cold',],
-    'Acute otitis media': [
-        'ear infection', 'earache',],
-    'Acute tonsillitis and pharyngitis': [
-        'acute tonsilitis /pharyngitis', 'acute tonsillitis / pharyngitis',
-        'sore throat', 'tonsils',],
-    'Acute urinary retention': [
-        'acute urinary retension',],
-    'Allergic conjunctivitis': [
-        'pink eye', 'red eye',],
-    'Allergy, unspecified': [
-        'allergies',],
-    'Anaemia': [
-        'anemia', 'low blood',],
-    'Anaphylaxis': [
-        'anaphylactic', 'severe allergic reaction',],
-    'Angio-oedema': [
-        'angioedema', 'facial swelling', 'swelling of the lips',],
-    'Antiphospholipid syndrome': [
-        'antiphspholipid syndrome',],
-    'Anxiety disorder': [
-        'anxiety', 'anxiety disorder / panic disorder',],
-    'Aphthous ulcer and other oral lesions': [
-        'aphthous ulcers / oral lesions', 'aphthous ulcers/oral lessions',],
-    'Awaiting PCR results': [
-        'awating pcr results',],
-    'BPH': [
-        'benign prostatic hyperplasia', 'enlarged prostate', 'prostate',],
-    'Bacterial conjunctivitis': [
-        'pink eye', 'red eye',],
-    'Bereavement reaction': [
-        'bereavement', 'grief', 'grief / bereavement', 'grief/bereavement',],
-    'Boutonniere deformity': [
-        'boutoner deformity', 'boutonniere',],
-    'Bullous skin lesions': [
-        'bulous skin lessions',],
-    'Burn, site and degree unspecified': [
-        'burn', 'burns',],
-    'CCF': [
-        'congestive cardiac failure', 'heart failure',],
-    'COPD': [
-        'chronic obstructive pulmonary disease', 'emphysema bronchitis',],
-    'COVID-19': [
-        'covid_19',],
-    'CVA': [
-        'cerebrovascular accident', 'stroke', 'tia / cva',],
-    'Calcaneal spur': [
-        'calcaneous spur',],
-    'Candidiasis of mouth or oesophagus': [
-        'candida', 'candidiasis (oral / oesophageal)',
-        'candidiasis(oral/esophageal)', 'oral candidiasis', 'thrush',],
-    'Cardiac dysrhythmia': [
-        'cardiac dysrythmia',],
-    'Cardiomegaly': [
-        'cardiomegally', 'enlarged heart',],
-    'Chalazion': [
-        'chelazion', 'eyelid lump',],
-    'Chemical burn': [
-        'acid burn', 'caustic',],
-    'Chronic fatigue syndrome': [
-        'chronic fatique syndrome',],
-    'Chronic suppurative otitis media (CSOM)': [
-        'chronic suppurative otits media (csom)', 'csom', 'discharging ear',],
-    'Circumcision': [
-        'circumcission',],
-    'Contusion': [
-        'bruise', 'bruising',],
-    'Corneal abrasion': [
-        'cornea', 'scratched eye',],
-    'Corns and callosities': [
-        'callus', 'calluses', 'corn', 'feet corns', 'feet corns / calluses',
-        'feet corns/calluses',],
-    'DKA': [
-        'diabetic ketoacidosis',],
-    'DM': [
-        'diabetes', 'diabetes and hypertension', 'diabetes mellitus',
-        'htn / dm', 'sugar',],
-    'DVT': [
-        'clot', 'deep vein thrombosis',],
-    'Dehydration': [
-        'dehydrated', 'fluid loss',],
-    'Dental caries': [
-        'cavity', 'dental decay', 'tooth decay',],
-    'Dermatitis and eczema': [
-        'dermatitis / eczema', 'dermatitis/eczema',],
-    'Dermatophytosis [tinea]': [
-        "athlete's foot", 'dermatophyte', 'fungal infection',
-        'fungal infection / tinea / dermatophyte',
-        'fungal infections/tineas/ dermatophyte', 'ringworm', 'tinea',],
-    'Diarrhoea': [
-        'diarrhea', 'loose stools',],
-    'Disc herniation': [
-        'disc hernia',],
-    'Dislocation, site unspecified': [
-        'dislocation',],
-    'Drug-induced kidney injury': [
-        'drug induced kidney injury',],
-    'Dysfunctional uterine bleeding': [
-        'dysfunctional uterine beeding',],
-    'Dysmenorrhoea': [
-        'dysmenorrhea', 'period pain',],
-    'Ear wax impaction': [
-        'cerumen', 'wax',],
-    'Emergency contraception': [
-        'emergency pill', 'morning after',],
-    'Epididymo-orchitis': [
-        'epididimorchitis',],
-    'Epilepsy': [
-        'epilepsy / seizure disorder', 'fits',],
-    'Epistaxis': [
-        'nose bleed', 'nosebleed',],
-    'Family planning': [
-        'contraception', 'contraceptive', 'depo', 'implant',],
-    'Fitness to work examination': [
-        'fitness to work', 'medical examination', 'periodic medical',
-        'pre-employment',],
-    'Foreign body, site unspecified': [
-        'foreign body',],
-    'Fracture, site unspecified': [
-        'broken bone', 'fracture', 'fractures',],
-    'Gastritis': [
-        'pud / gastritis',],
-    'Gastro-oesophageal reflux disease [GERD]': [
-        'gastro-oesophageal reflux', 'gerd',
-        'gerd / esophageal sphincter dysfunction',
-        'gerd / oesophageal sphincter dysfunction', 'heartburn', 'reflux',],
-    "Golfer's elbow": [
-        'medial epicondylitis',],
-    'HHS': [
-        'hyperosmolar hyperglycaemic state',],
-    'HIV': [
-        'human immunodeficiency virus', 'retroviral',],
-    'HIV-associated vasculitis': [
-        'hiv -associated vasculitis',],
-    'HTN': [
-        'blood pressure', 'bp', 'high blood pressure', 'htn / dm',
-        'hypertension', 'hypertension and diabetes',],
-    'Haemorrhoids': [
-        'external haemorrhoids', 'hemorrhoids',
-        'internal / external haemorrhoids', 'internal haemorrhoids',
-        'internal/external haemorrhoids', 'piles',],
-    'Hallux valgus deformity': [
-        'bunion', 'hallus valgus deformity',],
-    'Headache (tension, migraine, cluster etc)': [
-        'headaches (tension, migrane, cluster etc)',],
-    'Heat exhaustion': [
-        'heat', 'overheating',],
-    'Heat stroke': [
-        'heatstroke',],
-    'Hepatitis, unspecified': [
-        'hepatitis',],
-    'Herpes labialis (cold sore)': [
-        'cold sore', 'fever blister',],
-    'Herpes zoster': [
-        'shingles',],
-    'Hypercholesterolaemia': [
-        'cholesterol', 'high cholesterol',],
-    'Hyperglycaemia': [
-        'high sugar', 'hyperglycemia',],
-    'Hypertriglyceridaemia': [
-        'triglycerides',],
-    'Hypoglycaemia': [
-        'hypoglycemia', 'low sugar',],
-    'I & D': [
-        'incision and drainage',],
-    'Iliotibial band syndrome': [
-        'illio-tibial band syndrome',],
-    'Immunisation': [
-        'immunization', 'vaccination', 'vaccine',],
-    'Inflammatory bowel disease': [
-        "crohn's", 'crohns', 'ibd', 'inflammatory bowel disease / ibs',
-        'ulcerative colitis',],
-    'Ingrown toenail': [
-        'ingrowing toenail', 'ingrown', 'onychocryptosis',],
-    'Injury (RTA)': [
-        'car accident', 'mva', 'road traffic accident',],
-    'Injury on duty': [
-        'injuries on duty', 'iod', 'work injury', 'workplace injury',],
-    'Injury, site unspecified': [
-        'injuries', 'injury',],
-    'Irritable bowel syndrome': [
-        'ibs', 'inflammatory bowel disease / ibs', 'irritable bowel',],
-    "Kaposi's sarcoma": [
-        'kaposi', 'kaposis sarcoma',],
-    'LRTI': [
-        'chest infection', 'lower respiratory tract infection',],
-    'Laceration': [
-        'cut', 'open wound',],
-    'Ligament sprain': [
-        'ligmament sprain',],
-    'Lightning injury': [
-        'lightening injury',],
-    'Mechanical low back pain': [
-        'back pain', 'backache',],
-    'Medication-induced cough (ACE-I etc)': [
-        'medication induced cough(ace-i etc)',],
-    'Myalgia and muscle spasm': [
-        'myalgia / muscle tension / spasm', 'myalgia/muscle tension/ spasm',],
-    'Nasal lesion and infection': [
-        'nasal lesion / infection', 'nasal lession/infection',],
-    'Neoplasm, nature unspecified': [
-        'growth', 'mass', 'tumor', 'tumour',],
-    'Neuralgia and neuritis, unspecified': [
-        'neuralgia / neuritis',],
-    'Noise-induced hearing loss': [
-        'deafness', 'hearing loss', 'nihl', 'noise induced',],
-    'Non-specific spinal pain': [
-        'non specific spinal pain',],
-    'Normal menstrual period': [
-        'normal mentrual period',],
-    'Obstructive sleep apnoea': [
-        'obstructive sleep apnea', 'sleep apnea', 'snoring',],
-    'Oral lesion(s)': [
-        'oral lession(s)',],
-    'Osteoarthritis': [
-        'arthritis', 'oa',],
-    'Overdose': [
-        'od', 'opioid overdose',],
-    'PCOS': [
-        'polycystic ovary syndrome',],
-    'PID': [
-        'pelvic inflammatory disease',],
-    'PJP': [
-        'pneumocystis pneumonia',],
-    'PUD': [
-        'peptic ulcer disease', 'pud / gastritis', 'stomach ulcer',],
-    'Panic disorder': [
-        'anxiety disorder / panic disorder', 'panic attack',],
-    'Papules, pustules': [
-        'papule, pastules',],
-    'Paraesthesia': [
-        'numbness', 'parasthesia', 'paresthesia', 'pins and needles',],
-    'Pelvic congestion syndrome': [
-        'pelvic congestion', 'pelvic hypertension', 'pelvic varices',],
-    'Peri-orbital lesion': [
-        'peri-orbital lession',],
-    'Pica': [
-        'pica',],
-    'Plantar fasciitis': [
-        'heel pain', 'planta fascitis',],
-    'Pleurisy': [
-        'pleuritic chest pain', 'pleuritic chest pain / pleuritis',
-        'pleuritic chest pain/pleuritis', 'pleuritis',],
-    'Pneumoconiosis': [
-        'dust disease', 'dust exposure', 'occupational lung', 'silicosis',],
-    'Poisoning': [
-        'ingestion', 'swallowed',],
-    'Post-COVID hyperactive airway disease': [
-        'post covid hyperactive airway dx',],
-    'Post-menopausal bleeding': [
-        'post menauposal bleeding',],
-    'Post-menopausal syndrome': [
-        'post menopausal syndrome',],
-    'Post-operative adhesions': [
-        'post operative adhessions',],
-    'Rabies exposure': [
-        'animal bite', 'rabid', 'rabies',],
-    "Raynaud's phenomenon": [
-        'raynaud', 'raynauds', 'rynaulds phenomenon',],
-    'Rheumatoid arthritis': [
-        'arthritis', 'ra',],
-    'STI (MUS, VDS, herpes genitalia, syphilis etc)': [
-        'discharge', 'gonorrhoea', 'sexually transmitted infection', 'std',
-        'syphilis',],
-    'Scabies': [
-        'itch mite',],
-    'Secondary amenorrhoea': [
-        'secondary ammenorrhoea',],
-    'Seizure, unspecified': [
-        'convulsion', 'epilepsy / seizure disorder', 'fit', 'seizure',],
-    'Septic nasal piercing': [
-        'sceptic nasal piercing',],
-    'Smoke inhalation injury': [
-        'smoke inhilation injury',],
-    'Snake bite': [
-        'snake', 'snakebite',],
-    'Spondylolisthesis': [
-        'spondylosis / spondylolisthesis',],
-    'Spondylosis': [
-        'spondylosis / spondylolisthesis',],
-    'Stye (hordeolum)': [
-        'eyelid', 'hordeolum', 'stye /',],
-    'TB': [
-        'tuberculosis',],
-    'TB meningitis': [
-        'tuberculous meningitis',],
-    'TIA': [
-        'mini stroke', 'tia / cva', 'transient ischaemic attack',],
-    'Tennis elbow': [
-        'lateral epicondylitis',],
-    'Tetanus prophylaxis': [
-        'tetanus', 'tetanus toxoid',],
-    'Torticollis': [
-        'torticolis',],
-    'URTI': [
-        'cold', 'flu', 'upper respiratory tract infection',],
-    'UTI': [
-        'bladder infection', 'urinary tract infection',],
-    'Ulcer, site unspecified': [
-        'ulcer',],
-    'Urethral stricture and bladder outlet obstruction': [
-        'urethral stricture / urinary outlet obstruction',
-        'urethral stricture/urinary outlet obstruction',],
-    'Urinary incontinence': [
-        'urine incontinence',],
-    'Urticaria': [
-        'hives',],
-    'Vaginal candidiasis': [
-        'candida', 'thrush',],
-    'Viral conjunctivitis': [
-        'pink eye', 'red eye',],
-    'Visual impairment, unspecified': [
-        'bad eyesight', 'blurred vision', 'poor vision',],
-    'Welding flash (arc eye)': [
-        'arc eye', 'photokeratitis', 'welder', 'welding flash',],
-    'Worm infestation': [
-        'helminth', 'worms',],
-    'Wound care (dressing)': [
-        'dressing', 'dressing change', 'wound care',],
-}
-
-
-_DIAGNOSIS_CANONICAL = {old.strip().lower(): new
-                        for old, new in DIAGNOSIS_RENAMES.items()}
-
-
-def _canonical_diagnosis(name: str) -> str:
-    """The name this diagnosis is called NOW.
-
-    An old record says "Injury"; the list calls it "Injury, site unspecified".
-    Counting those as two conditions would halve both figures and break the
-    trend on the dashboard, which is the one place a diagnosis is counted at
-    all. Anything not renamed comes back exactly as it was recorded.
-    """
-    if not name:
-        return name
-    return _DIAGNOSIS_CANONICAL.get(name.strip().lower(), name.strip())
 
 # Login required decorator
 def login_required(f: Callable[..., Any]) -> Callable[..., Any]:
@@ -1006,23 +422,9 @@ def enforce_session_timeout() -> ResponseReturnValue | None:
     session['last_active'] = now.isoformat()
     session.permanent = True
 
-    # The pharmacist using the app at all is what tells the key register he
-    # is still here. Throttled through his own session so it is at most one
-    # write a minute, and never allowed to get in the way of the request.
-    if session['user'].get('role') == 'admin':
-        last_note = session.get('_key_seen_noted')
-        try:
-            due = (not last_note or (now - datetime.fromisoformat(last_note))
-                   >= timedelta(seconds=60))
-        except ValueError:
-            due = True
-        if due:
-            _key_note_pharmacist_seen(session['user'].get('name', ''))
-            session['_key_seen_noted'] = now.isoformat()
-
     # NEW: if this user's password has expired, block every route except
     # the change-password page itself and logout — otherwise a user could
-    # just type /dispense into the address bar and skip the requirement
+    # just type /sell into the address bar and skip the requirement
     # entirely, since they're still a normally-authenticated session.
     if session.get('must_change_password') and request.endpoint not in (
         'change_expired_password', 'logout', 'static'
@@ -1119,33 +521,15 @@ def get_nav_links() -> str:
         audit_link = '<a href="/audit">Audit Log</a> | ' if is_admin else ''
         # NEW (Stock Take): admin-only physical count page.
         stock_take_link = '<a href="/stock-take">Stock Take</a> | ' if is_admin else ''
-        # NEW (Equipment loans): the lending desk is counter work, so everyone
-        # reaches it; the asset register is an admin decision.
-        loan_items_link = '<a href="/loan-items">Equipment Register</a> | ' if is_admin else ''
-        if user.get('role') == 'department':
-            dept = escape(user.get('department', ''))
-            return f"""
-        <p class="nav-links nav-short"><strong>{dept}:</strong>
-            <a href="/requests">Requests</a> |
-            <span>Welcome, {name}! <a href="/logout">Logout</a></span>
-        </p>
-        """ + SESSION_GUARD_JS.replace('__TIMEOUT__', str(SESSION_TIMEOUT_MINUTES))
-        # Waiting requests show on every page, so a department is not left
-        # waiting because nobody happened to open the requests page.
-        waiting = _pending_request_count()
-        req_label = f'Requests <strong>({waiting})</strong>' if waiting else 'Requests'
         return f"""
         <p class="nav-links"><strong>Navigate:</strong>
+            <a href="/sell">Point of Sale</a> |
+            <a href="/sales">Sales</a> |
             <a href="/dashboard">Dashboard</a> |
-            <a href="/dispense">Dispensing</a> |
             <a href="/receive">Receiving</a> |
-            <a href="/requests">{req_label}</a> |
-            <a href="/internal-issue">Internal Issues</a> |
+            <a href="/write-off">Write-offs</a> |
             <a href="/temperature">Temperature</a> |
-            <a href="/loans">Loans</a> |
-            <a href="/key-register">Store Key</a> |
             {add_med_link}
-            {loan_items_link}
             <a href="/reports">Reports</a> |
             {stock_take_link}
             {audit_link}
@@ -1256,31 +640,15 @@ def login() -> ResponseReturnValue:
                     'name': user_doc.get('name', username),
                     'role': user_doc.get('role', 'employee')
                 }
-                if user_doc.get('role') == 'department':
-                    session['user']['department'] = user_doc.get('department', '')
                 session.permanent = True
                 session['last_active'] = datetime.now(timezone.utc).isoformat()
-                # Keep the store key register in step with who is on duty.
-                # Guarded here as well as inside: this is the login path, and
-                # no change to the key register should ever be able to lock
-                # everybody out of the app.
-                # A department login is not someone on duty in the pharmacy,
-                # so it never takes or hands over the store key.
-                try:
-                    if session['user'].get('role') != 'department':
-                        _key_on_login(session['user']['name'],
-                                      session['user'].get('role') == 'admin')
-                except Exception as e:
-                    app.logger.warning(f'key register login hook failed: {e}')
 
                 if password_expired:
                     session['must_change_password'] = True
                     flash('Your password has expired and must be changed before continuing.', 'error')
                     return redirect('/change-expired-password')
 
-                if session['user'].get('role') == 'department':
-                    return redirect('/requests')
-                return redirect('/dispense')
+                return redirect('/sell')
             else:
                 session['error'] = 'Invalid username or password.'
         except ServerSelectionTimeoutError:
@@ -1299,7 +667,7 @@ def change_expired_password() -> ResponseReturnValue:
     # changing it), just send them on to the app rather than show a
     # confusing forced form with nothing to enforce.
     if not session.get('must_change_password'):
-        return redirect('/dispense')
+        return redirect('/sell')
 
     error = None
     if request.method == 'POST':
@@ -1367,12 +735,9 @@ def register() -> ResponseReturnValue:
             if not username or not password or not name or not role:
                 session['error'] = 'All fields are required.'
                 return redirect('/register')
-            department = (request.form.get('department') or '').strip()
-            if role == 'department' and department not in REQUEST_DEPARTMENTS:
-                session['error'] = 'Choose which department this account requests for.'
+            if role not in ('employee', 'viewer', 'admin'):
+                session['error'] = 'Choose a role.'
                 return redirect('/register')
-            if role != 'department':
-                department = ''
             try:
                 client = get_mongo_client()
                 db = client['pharmacy_db']
@@ -1405,7 +770,6 @@ def register() -> ResponseReturnValue:
                             'password_hash': generate_password_hash(password),
                             'name': name,
                             'role': role,
-                            'department': department,
                             'account_created_at': now,
                             'password_set_at': now,
                         }}
@@ -1442,7 +806,6 @@ def register() -> ResponseReturnValue:
                     'password_hash': password_hash,
                     'name': name,
                     'role': role,
-                    'department': department,
                     'account_created_at': now,
                     'password_set_at': now,
                 })
@@ -1458,411 +821,417 @@ def register() -> ResponseReturnValue:
     if 'admin_access' not in session:
         return render_template('register_password.html', error=error)
     else:
-        return render_template('register.html', error=error, message=message,
-                               departments=REQUEST_DEPARTMENTS)
+        return render_template('register.html', error=error, message=message)
 
 
 @app.route('/logout', methods=['GET'])
 def logout() -> ResponseReturnValue:
-    # The pharmacist logging out IS the key handover: whoever logs in next is
-    # holding it. Arming here means nobody has to record anything.
-    user = session.get('user') or {}
-    if user.get('role') == 'admin':
-        try:
-            _key_arm_handover(user.get('name', ''))
-        except Exception as e:
-            app.logger.warning(f'key handover arm failed: {e}')
     session.pop('user', None)
     session.pop('admin_access', None)
     return redirect('/login')
 
 
-@app.route('/dispense', methods=['GET', 'POST'])
-@login_required
-def dispense() -> ResponseReturnValue:
-    try:
-        client = get_mongo_client()
-        db = client['pharmacy_db']
-        medications = db['medications']
-        transactions = db['transactions']
-        # Read any flashed message from a preceding redirect (e.g. from
-        # delete_dispense success/error, or access-denied from other routes).
-        # with_categories so the banner colour is decided by the route, which
-        # knows WHY the dispense was partial, rather than by the template
-        # guessing from words in the message.
-        message_class, message = _flashed_banner()
-        start_date = request.values.get('start_date')
-        end_date = request.values.get('end_date')
-        search = request.values.get('search')
-        current_user = session['user']['name']
-        # FIX (Performance): default to the current month so an unfiltered
-        # visit never asks for the whole history. A search bypasses this and
-        # looks across all time.
-        start_date, end_date, window_defaulted = _default_window(start_date, end_date, search)
-        page = _requested_page()
+def _num(v: Any) -> Any:
+    """A whole-number float shown as an int (3.0 -> 3), anything else as is."""
+    return int(v) if isinstance(v, float) and v.is_integer() else v
 
-        base_query: Query = {'type': 'dispense'}
-        date_query: Query = {}
-        if start_date:
-            date_query['$gte'] = datetime.strptime(start_date, '%Y-%m-%d')
-        if end_date:
-            end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
-            date_query['$lte'] = end_dt
-        if date_query:
-            base_query['timestamp'] = date_query
-        if search:
-            base_query['$or'] = [
-                {'patient':   {'$regex': search, '$options': 'i'}},
-                {'med_name':  {'$regex': search, '$options': 'i'}},
-                {'company':   {'$regex': search, '$options': 'i'}},
-                {'position':  {'$regex': search, '$options': 'i'}},
-                {'outcome': {'$regex': search, '$options': 'i'}},
-                {'gender':    {'$regex': search, '$options': 'i'}},
-                {'prescriber':{'$regex': search, '$options': 'i'}},
-                {'dispenser': {'$regex': search, '$options': 'i'}},
-                {'date':      {'$regex': search, '$options': 'i'}},
-                {'diagnoses.0':{'$regex': search, '$options': 'i'}},
-            ]
 
-        # The download is the whole filtered record, not the page on screen.
-        if request.values.get('export') == 'csv':
-            made = _dispense_csv(transactions, base_query)
-            if made:
-                filename, body = made
-                resp = make_response(body)
-                resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
-                resp.headers['Content-Disposition'] = \
-                    f'attachment; filename="{filename}"'
-                return resp
-            flash(f'That is more than {DISPENSE_CSV_MAX_LINES:,} lines to '
-                  f'download at once. Narrow the date range and try again.')
-            return redirect(url_for('dispense', start_date=start_date or '',
-                                    end_date=end_date or '', search=search or ''))
+# ============================================================================
+# POINT OF SALE
+# ============================================================================
+# A sale is one receipt. Its lines are written as ordinary 'dispense'
+# transactions sharing the sale's transaction_id, which is what every stock
+# report, the controlled drug register, AMC and the order request already
+# read — so they all keep working without a single change. The receipt itself
+# (payment, totals, receipt number) lives in the `sales` collection.
+#
+# Two prices travel on every line, deliberately apart:
+#   price / line_value          -> COST, frozen at the moment of sale
+#   unit_sell_price / line_total -> what the customer paid
+# so margins can be reported honestly, and a later price change never
+# rewrites a past sale.
+#
+# Selling is all-or-nothing. At a till you cannot hand over what is not on the
+# shelf, so a basket with a short or unknown line is refused as a whole and
+# the cashier fixes it; the shortfall is still recorded as unmet demand.
+# ============================================================================
 
-        # FIX (Performance): page over VISITS, not lines. Paging the raw
-        # transaction rows would split a patient's three medicines across a
-        # page break, so the distinct transaction_ids are paged first and then
-        # every line belonging to that page's visits is fetched. A search that
-        # matches one line still shows the whole visit it belongs to, which is
-        # what someone looking up a record actually wants.
-        visit_ids, total_visits = [], 0
+PAYMENT_METHODS = ['Cash', 'M-Pesa', 'EcoCash', 'Card', 'Medical aid']
+SALES_PAGE_SIZE = 25
+SALE_MAX_LINES = 40
+
+
+def _next_receipt_no(db: Database) -> str:
+    """HH-YYYYMMDD-0001: sequential per day, atomic across tills."""
+    today = local_now().strftime('%Y%m%d')
+    doc = db['counters'].find_one_and_update(
+        {'_id': f'receipt-{today}'}, {'$inc': {'seq': 1}},
+        upsert=True, return_document=ReturnDocument.AFTER)
+    return f"HH-{today}-{int(doc['seq']):04d}"
+
+
+def _money(v: Any) -> float:
+    return round(float(v or 0) + 1e-9, 2)
+
+
+def _sale_lines_from_form(form: Any) -> tuple[list[tuple[str, int]], str | None]:
+    """(name, quantity) pairs from the basket; same name twice is merged."""
+    names = [n.strip() for n in form.getlist('med_names')]
+    qtys = form.getlist('quantities')
+    merged: dict[str, int] = {}
+    order: list[str] = []
+    for name, q in zip(names, qtys):
+        if not name:
+            continue
         try:
-            counted = list(transactions.aggregate([
-                {'$match': base_query},
-                {'$group': {'_id': '$transaction_id'}},
-                {'$count': 'n'},
-            ]))
-            total_visits = counted[0]['n'] if counted else 0
-            pager = _pager(page, DISPENSE_PAGE_SIZE, total_visits)
-            visit_ids = [g['_id'] for g in transactions.aggregate([
-                {'$match': base_query},
-                {'$group': {'_id': '$transaction_id', 'ts': {'$max': '$timestamp'}}},
-                {'$sort': {'ts': -1}},
-                {'$skip': (pager['page'] - 1) * DISPENSE_PAGE_SIZE},
-                {'$limit': DISPENSE_PAGE_SIZE},
-            ])]
-        except Exception as e:
-            # Never let a paging failure turn back into an unbounded fetch.
-            app.logger.warning(f"Dispense paging aggregation unavailable: {e}")
-            seen, capped = [], transactions.find(base_query).sort('timestamp', -1).limit(
-                DISPENSE_PAGE_SIZE * 40)
-            for t in capped:
-                if t.get('transaction_id') not in seen:
-                    seen.append(t.get('transaction_id'))
-            total_visits = len(seen)
-            pager = _pager(page, DISPENSE_PAGE_SIZE, total_visits)
-            start = (pager['page'] - 1) * DISPENSE_PAGE_SIZE
-            visit_ids = seen[start:start + DISPENSE_PAGE_SIZE]
+            qty = int(q)
+        except (TypeError, ValueError):
+            return [], f'"{q}" is not a whole number for {name}.'
+        if qty <= 0:
+            return [], f'Quantity for {name} must be at least 1.'
+        if name not in merged:
+            order.append(name)
+            merged[name] = 0
+        merged[name] += qty
+    if not order:
+        return [], 'Add at least one item to the sale.'
+    if len(order) > SALE_MAX_LINES:
+        return [], f'A sale can have at most {SALE_MAX_LINES} different items.'
+    return [(n, merged[n]) for n in order], None
 
-        raw_tx = list(transactions.find(
-            {'type': 'dispense', 'transaction_id': {'$in': visit_ids}}
-        ).sort('timestamp', -1)) if visit_ids else []
 
-        # FIX (UX/Correctness): group rows by transaction_id in Python so the
-        # template can use reliable rowspan values regardless of sort order or
-        # shared timestamps.  Ordered by the paged visit order.
-        # BUG: t['transaction_id'] was a direct key access. A dispense record
-        # without that field groups under None, which $in then matches, and the
-        # KeyError took the WHOLE dispensing page down with a 500 — no form, no
-        # history, nothing. One malformed old record must not be able to do
-        # that, so the field is read defensively and such rows are grouped
-        # under None, which no visit id matches, so they simply do not list.
-        grouped: dict[Any, Docs] = {}
-        for t in raw_tx:
-            grouped.setdefault(t.get('transaction_id'), []).append(t)
-        tx_groups = [(tid, grouped[tid]) for tid in visit_ids if tid in grouped]
-        # Keep flat list for backwards-compat with anything that needs it
-        tx_list = raw_tx
+@app.route('/api/pos/products', methods=['GET'])
+@login_required
+def pos_products() -> ResponseReturnValue:
+    """Everything sellable, for the till's item picker: price, stock, Rx flag."""
+    try:
+        meds = get_mongo_client()['pharmacy_db']['medications'].find(
+            _active(), {'_id': 0, 'name': 1, 'selling_price': 1, 'balance': 1,
+                        'rx_only': 1, 'schedule': 1})
+        return jsonify([{
+            'name': m['name'],
+            'price': _money(m.get('selling_price')),
+            'balance': _num(m.get('balance', 0) or 0),
+            'rx_only': bool(m.get('rx_only')),
+            'controlled': m.get('schedule') == 'controlled',
+        } for m in _by_name(meds)])
+    except Exception as e:
+        app.logger.warning(f'pos product list failed: {e}')
+        return jsonify([])
 
-        tx_data = None
-        edit_id = request.args.get('edit')
-        if edit_id:
-            tx = transactions.find_one({'transaction_id': edit_id, 'type': 'dispense'})
-            if tx:
-                common = {k: v for k, v in tx.items()
-                          if k not in ['_id', 'med_name', 'quantity', 'type', 'timestamp', 'transaction_id', 'user']}
-                meds_cursor = transactions.find(
-                    {'transaction_id': edit_id, 'type': 'dispense'},
-                    {'med_name': 1, 'quantity': 1}
-                )
-                common['meds'] = [(m['med_name'], m['quantity']) for m in meds_cursor]
-                common['diags'] = common.get('diagnoses', [])
-                common['transaction_id'] = edit_id
-                tx_data = common
 
-        if request.method == 'POST':
-            transaction_id = request.form.get('transaction_id')
-            if transaction_id:
-                old_meds = list(transactions.find({'transaction_id': transaction_id}))
-                for old_tx in old_meds:
-                    medications.update_one({'name': old_tx['med_name']}, {'$inc': {'balance': old_tx['quantity']}})
-                transactions.delete_many({'transaction_id': transaction_id})
-                tx_id = transaction_id
-                message_prefix = 'Updated'
-            else:
-                tx_id = str(uuid4())
-                message_prefix = 'Dispensed'
+@app.route('/sell', methods=['GET', 'POST'])
+@login_required
+def sell() -> ResponseReturnValue:
+    message_class, message = _flashed_banner()
+    if request.method == 'GET':
+        return render_template('sell.html', nav_links=get_nav_links(),
+                               message=message, message_class=message_class,
+                               payment_methods=PAYMENT_METHODS, form={})
+    form = request.form
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        medications, transactions = db['medications'], db['transactions']
+        current_user = session['user']['name']
 
+        def refuse(msg: str, cls: str = 'error') -> ResponseReturnValue:
+            # The basket is kept on screen, so the cashier fixes one line
+            # rather than ringing the whole sale up again.
+            return render_template('sell.html', nav_links=get_nav_links(),
+                                   message=msg, message_class=cls,
+                                   payment_methods=PAYMENT_METHODS, form=form), 422
+
+        lines, problem = _sale_lines_from_form(form)
+        if problem:
+            return refuse(problem)
+        payment = form.get('payment_method') or ''
+        if payment not in PAYMENT_METHODS:
+            return refuse('Choose how the customer is paying.')
+        customer = (form.get('customer') or '').strip()[:80]
+        rx_no = (form.get('prescription_no') or '').strip()[:40]
+        prescriber = (form.get('prescriber') or '').strip()[:80]
+        aid_scheme = (form.get('aid_scheme') or '').strip()[:80]
+        aid_member = (form.get('aid_member') or '').strip()[:40]
+        if payment == 'Medical aid' and not (aid_scheme and aid_member):
+            return refuse('Enter the medical aid scheme and member number.')
+
+        meds: dict[str, Doc] = {}
+        missing, short, unpriced = [], [], []
+        sale_id = str(uuid4())
+        for name, qty in lines:
+            med = medications.find_one(_active({'name': name}))
+            if not med:
+                missing.append(name)
+                continue
+            meds[name] = med
+            have = med.get('balance', 0) or 0
+            if qty > have:
+                short.append(f'{name}: {_num(have)} in stock, {qty} asked for')
+                transactions.insert_one({
+                    'type': 'unmet_demand', 'transaction_id': sale_id,
+                    'med_name': name, 'quantity': 0,
+                    # 'given' is what was on the shelf: the cashier normally
+                    # sells that much once the basket is corrected, so only
+                    # the part that could never be supplied counts as unmet.
+                    'requested': qty, 'given': max(have, 0), 'shortfall': qty - max(have, 0),
+                    'price': med.get('price', 0) or 0,
+                    'shortfall_value': (qty - max(have, 0)) * (med.get('price', 0) or 0),
+                    'patient': customer, 'prescriber': prescriber,
+                    'dispenser': current_user,
+                    'date': local_now().strftime('%Y-%m-%d'),
+                    'user': current_user, 'timestamp': datetime.utcnow(),
+                })
+            if not _money(med.get('selling_price')):
+                unpriced.append(name)
+        if missing:
+            return refuse('Not on file: ' + '; '.join(missing)
+                          + '. Check the spelling, or add the item under Add Medication.')
+        if short:
+            return refuse('Not enough stock — nothing was sold. ' + '; '.join(short)
+                          + '. Reduce the quantity; the shortfall has been recorded as unmet demand.',
+                          'partial')
+        if unpriced:
+            return refuse('No selling price set for: ' + '; '.join(unpriced)
+                          + '. An admin can set it under Edit Medication.')
+        needs_rx = [n for n, _ in lines if meds[n].get('rx_only')
+                    or meds[n].get('schedule') == 'controlled']
+        if needs_rx and not (customer and rx_no):
+            return refuse('Prescription items (' + ', '.join(needs_rx) + ') need the '
+                          'patient\'s name and the prescription number.')
+        controlled = [n for n in needs_rx if meds[n].get('schedule') == 'controlled']
+        if controlled and not prescriber:
+            return refuse('Controlled items (' + ', '.join(controlled) + ') need the '
+                          'prescriber\'s name for the register.')
+
+        total = _money(sum(_money(meds[n].get('selling_price')) * q for n, q in lines))
+        tendered = None
+        change = None
+        if payment == 'Cash':
             try:
-                patient       = request.form['patient']
-                company       = request.form['company']
-                position      = request.form['position']
-                # Stored as the year itself; age is derived at report time so it
-                # never goes stale.
-                # Stored as the first year of the decade (1980 means 1980-1989),
-                # so the range can always be re-derived and never goes stale the
-                # way a recorded age band would.
-                try:
-                    birth_decade = int(request.form.get('birth_decade') or 0) or None
-                except (TypeError, ValueError):
-                    birth_decade = None
-                prescriber    = request.form['prescriber']
-                dispenser     = request.form['dispenser']
-                date_str      = request.form['date']
-                gender        = request.form['gender']
-                outcome = (request.form.get('outcome') or '').strip() or 'Outpatient'
-                try:
-                    outcome_days = int(request.form.get('outcome_days') or 0) or None
-                except (TypeError, ValueError):
-                    outcome_days = None
-                # Days belong to sick leave only. The field is hidden for every
-                # other outcome, but hiding it does not clear it: pick Sick
-                # leave, type 3, change to Referral, and the browser still
-                # submits 3. Enforced here as well so a referral can never
-                # carry days, whatever the form sends or whether its script ran.
-                if outcome != 'Sick leave':
-                    outcome_days = None
-                diagnoses     = [d.strip() for d in request.form.getlist('diagnoses') if d.strip()]
+                tendered = _money(form.get('amount_tendered') or total)
+            except ValueError:
+                return refuse('Amount tendered must be a number.')
+            if tendered + 1e-9 < total:
+                return refuse(f'Amount tendered M{tendered:.2f} is less than the total M{total:.2f}.')
+            change = _money(tendered - total)
 
-                if not diagnoses:
-                    message = 'Please provide at least one diagnosis.'
-                else:
-                    med_names = [n.strip() for n in request.form.getlist('med_names') if n.strip()]
-                    quantities = []
-                    for q_str in request.form.getlist('quantities'):
-                        try:
-                            qty = int(q_str)
-                            if qty > 0:
-                                quantities.append(qty)
-                        except ValueError:
-                            pass
+        receipt_no = _next_receipt_no(db)
+        now = datetime.utcnow()
+        today = local_now().strftime('%Y-%m-%d')
+        taken: list[tuple[str, int]] = []
+        sale_lines: Docs = []
+        for name, qty in lines:
+            med = meds[name]
+            # Guarded decrement: only succeeds if the stock is still there, so
+            # two tills selling the last box at the same moment cannot both win.
+            res = medications.update_one({'name': name, 'balance': {'$gte': qty}},
+                                         {'$inc': {'balance': -qty}})
+            if res.modified_count != 1:
+                for n2, q2 in taken:
+                    medications.update_one({'name': n2}, {'$inc': {'balance': q2}})
+                transactions.delete_many({'transaction_id': sale_id, 'type': 'dispense'})
+                return refuse(f'{name} was sold at another till a moment ago and there '
+                              f'is no longer enough. Nothing was sold — check and try again.')
+            taken.append((name, qty))
+            cost = med.get('price', 0) or 0
+            sell_price = _money(med.get('selling_price'))
+            line_total = _money(sell_price * qty)
+            transactions.insert_one({
+                'type': 'dispense', 'transaction_id': sale_id, 'receipt_no': receipt_no,
+                'patient': customer, 'prescriber': prescriber, 'prescription_no': rx_no,
+                'dispenser': current_user, 'user': current_user, 'date': today,
+                'med_name': name, 'quantity': qty,
+                'price': cost, 'pack_size': med.get('pack_size'),
+                'line_value': qty * cost,
+                'unit_sell_price': sell_price, 'line_total': line_total,
+                'payment_method': payment, 'schedule': med.get('schedule'),
+                'timestamp': now,
+            })
+            sale_lines.append({'name': name, 'quantity': qty, 'unit_price': sell_price,
+                               'line_total': line_total, 'cost': _money(qty * cost),
+                               'rx_only': bool(med.get('rx_only'))})
 
-                    if len(med_names) != len(quantities) or not med_names:
-                        message = 'Please provide at least one valid medication and quantity.'
-                    else:
-                        # NEW: the two partial outcomes mean different things and
-                        # need different urgency. Running short is routine — the
-                        # shortfall is captured as unmet demand and the order
-                        # request will act on it. A medication that is NOT ON FILE
-                        # is a data fault: nothing was recorded against it at all,
-                        # and it stays broken until someone fixes the item. Showing
-                        # both in the same amber banner buries the second.
-                        missing_msgs = []
-                        short_msgs = []
-                        dispensed_meds = []
-                        for med_name, quantity in zip(med_names, quantities):
-                            med = medications.find_one({'name': med_name})
-                            if not med:
-                                missing_msgs.append(f'"{med_name}" is not on file')
-                                write_app_warning(
-                                    'medication_not_found',
-                                    f'Medication "{med_name}" not found during dispense.',
-                                    {'med_name': med_name, 'requested_quantity': quantity,
-                                     'patient': patient, 'transaction_id': tx_id}
-                                )
-                            else:
-                                # NEW (Unmet demand): a short line used to be
-                                # refused ENTIRELY — not even the units actually on
-                                # the shelf were recorded. In practice the
-                                # pharmacist still hands over what they have, so the
-                                # software was manufacturing the very
-                                # "issued, not recorded" discrepancies the stock
-                                # take exists to find. Now the available units are
-                                # dispensed and the shortfall is recorded as demand
-                                # that could not be met.
-                                available = med.get('balance', 0) or 0
-                                given     = min(quantity, available)
-                                short     = quantity - given
-                                if short > 0:
-                                    unit_price = med.get('price', 0) or 0
-                                    transactions.insert_one({
-                                        'type': 'unmet_demand',
-                                        'transaction_id': tx_id,
-                                        'med_name': med_name,
-                                        # quantity is 0 so this NEVER moves stock in
-                                        # any balance calculation; the demand figures
-                                        # live in their own fields.
-                                        'quantity': 0,
-                                        'requested': quantity, 'given': given,
-                                        'shortfall': short,
-                                        'price': unit_price,
-                                        'shortfall_value': short * unit_price,
-                                        'patient': patient, 'prescriber': prescriber,
-                                        'dispenser': dispenser, 'date': date_str,
-                                        'user': current_user,
-                                        'timestamp': datetime.utcnow(),
-                                    })
-                                    write_app_warning(
-                                        'insufficient_stock',
-                                        f'Insufficient stock for "{med_name}" during dispense.',
-                                        {'med_name': med_name, 'requested_quantity': quantity,
-                                         'available_quantity': available,
-                                         'dispensed_quantity': given,
-                                         'patient': patient, 'transaction_id': tx_id}
-                                    )
-                                    short_msgs.append(
-                                        f'{med_name}: only {given} of {quantity} available, '
-                                        f'{short} recorded as unmet demand')
-                                if given <= 0:
-                                    continue
-                                quantity = given
-                                medications.update_one({'name': med_name}, {'$inc': {'balance': -quantity}})
-                                transactions.insert_one({
-                                    'type': 'dispense',
-                                    'transaction_id': tx_id,
-                                    'patient': patient,
-                                    'company': company,
-                                    'position': position,
-                                    'birth_decade': birth_decade,
-                                    'gender': gender,
-                                    'outcome': outcome,
-                                    'outcome_days': outcome_days,
-                                    'diagnoses': diagnoses,
-                                    'prescriber': prescriber,
-                                    'dispenser': dispenser,
-                                    'user': current_user,
-                                    'date': date_str,
-                                    'med_name': med_name,
-                                    'quantity': quantity,
-                                    # NEW (Costing): freeze the unit price AT THE
-                                    # MOMENT OF DISPENSING. Costing historical
-                                    # activity by looking up today's price would
-                                    # silently rewrite last year's figures every
-                                    # time a supplier changed a rate — a report
-                                    # run twice would not agree with itself.
-                                    'price': med.get('price', 0) or 0,
-                                    'pack_size': med.get('pack_size'),
-                                    'line_value': quantity * (med.get('price', 0) or 0),
-                                    'timestamp': datetime.utcnow()
-                                })
-                                dispensed_meds.append(med_name)
-
-                        parts = []
-                        if dispensed_meds:
-                            parts.append(f'{message_prefix}: {", ".join(dispensed_meds)}')
-                        if short_msgs:
-                            parts.append('Short: ' + '; '.join(short_msgs))
-                        if missing_msgs:
-                            parts.append('NOT ON FILE: ' + '; '.join(missing_msgs)
-                                         + ' — nothing was recorded for these. '
-                                           'Add the item under Add Medication, then dispense it.')
-
-                        if missing_msgs:
-                            # Red: needs someone to fix the data before this
-                            # prescription is complete.
-                            severity = 'error'
-                            head = ('Partial — item not on file' if dispensed_meds
-                                    else 'Not dispensed — item not on file')
-                        elif short_msgs:
-                            severity = 'partial'
-                            head = ('Partial — insufficient stock' if dispensed_meds
-                                    else 'Not dispensed — no stock')
-                        elif dispensed_meds:
-                            severity = 'success'
-                            head = f'{message_prefix} successfully'
-                        else:
-                            severity = 'error'
-                            head = f'No medications {message_prefix.lower()}'
-                        message = head + ('. ' + ' | '.join(parts) if parts else '.')
-
-                        # FIX (Bug): this used to fall through and re-render with
-                        # the transaction list that was fetched BEFORE the insert,
-                        # so a dispense you had just recorded did not appear until
-                        # the next one pushed it into view.
-                        #
-                        # It also left the browser sitting on a POST, so a refresh
-                        # re-submitted the whole dispense and deducted the stock a
-                        # second time. Redirecting after the write fixes both.
-                        # BUG: the form was cleared only if the message said
-                        # "successfully". A partial dispense says "Partial —
-                        # insufficient stock", so the form stayed loaded with
-                        # the whole visit in it — and the items that DID
-                        # dispense were already recorded and already deducted.
-                        # Pressing Dispense again, which is the natural thing
-                        # to do when a form looks unsubmitted, dispensed them a
-                        # second time. Whether the visit was written is a fact
-                        # the server knows; it must not be inferred from the
-                        # wording of a message.
-                        #   dispensed_meds -> dispense records written
-                        #   short_msgs     -> unmet demand records written
-                        #   missing_msgs alone -> nothing written, so the form
-                        #                         stays for the user to fix.
-                        session['dispense_saved'] = bool(dispensed_meds or short_msgs)
-                        flash(message, severity)
-                        return redirect(url_for('dispense'))
-            except ValueError as e:
-                message = f'Invalid input: {str(e)}'
-
-        return render_template(
-            'dispense.html',
-            tx_list=tx_list,
-            tx_groups=tx_groups,
-            nav_links=get_nav_links(),
-            message=message,
-            start_date=start_date,
-            end_date=end_date,
-            search=search,
-            tx_data=tx_data, current_year=datetime.utcnow().year,
-            message_class=message_class,
-            form_saved=session.pop('dispense_saved', False),
-            is_admin=session['user'].get('role') == 'admin',
-            prescribers=_staff_named_for(db, 'prescriber'),
-            dispensers=_staff_named_for(db, 'dispenser'),
-            today=local_now().strftime('%Y-%m-%d'),
-            current_user=session['user']['name'],
-            form_defaults=_new_visit_defaults(session['user']['name']),
-            birth_decades=_birth_decades(),
-            pager=pager, window_defaulted=window_defaulted, unit='visits'
-        )
+        db['sales'].insert_one({
+            'receipt_no': receipt_no, 'transaction_id': sale_id, 'status': 'completed',
+            'lines': sale_lines, 'total': total,
+            'cost_total': _money(sum(l['cost'] for l in sale_lines)),
+            'payment_method': payment, 'amount_tendered': tendered, 'change': change,
+            'medical_aid': ({'scheme': aid_scheme, 'member_no': aid_member}
+                            if payment == 'Medical aid' else None),
+            'customer': customer, 'prescription_no': rx_no, 'prescriber': prescriber,
+            'cashier': current_user, 'timestamp': now,
+        })
+        write_audit_entry('CREATE', 'sale', receipt_no,
+                          f'{len(sale_lines)} item(s), M{total:.2f} by {payment}, '
+                          f'cashier {current_user}')
+        flash(f'Sale {receipt_no} recorded: M{total:.2f}'
+              + (f', change M{change:.2f}' if change else '') + '.', 'success')
+        return redirect(url_for('receipt', receipt_no=receipt_no))
     except ServerSelectionTimeoutError:
-        return render_template(
-            'dispense.html',
-            tx_list=[], tx_groups=[],
-            nav_links=get_nav_links(),
-            message="Database connection failed. Please try again later.",
-            start_date='', end_date='', search='', tx_data=None,
-            current_year=datetime.utcnow().year, birth_decades=_birth_decades(),
-            today=local_now().strftime('%Y-%m-%d'),
-            current_user=session.get('user', {}).get('name', ''),
-            form_defaults=_new_visit_defaults(session.get('user', {}).get('name', '')),
-            message_class='error', form_saved=False,
-            is_admin=session.get('user', {}).get('role') == 'admin',
-            # The database is unreachable on this path, so the roster falls
-            # back to the seed rather than leaving both dropdowns empty.
-            prescribers=_staff_named_for(None, 'prescriber'),
-            dispensers=_staff_named_for(None, 'dispenser'),
-            pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='visits'
-        ), 500
+        return render_template('sell.html', nav_links=get_nav_links(),
+                               message='Database connection failed. Nothing was sold.',
+                               message_class='error', payment_methods=PAYMENT_METHODS,
+                               form=form), 500
+
+
+# ---------------------------------------------------------------------------
+# Damage write-off: stock LOST other than by expiry (broken, spilled, cold
+# chain failure). Excluded from AMC exactly like expiry, so a breakage never
+# makes the order request buy more. Expired stock has its own path under
+# Reports > Expired Stock on Shelf.
+# ---------------------------------------------------------------------------
+DAMAGE_REASONS = ['Broken / spilled', 'Contaminated', 'Cold chain failure',
+                  'Recalled by supplier', 'Lost / unaccounted', 'Other']
+
+
+@app.route('/write-off', methods=['GET', 'POST'])
+@login_required
+def write_off() -> ResponseReturnValue:
+    current_user = session['user']['name']
+    flashed = get_flashed_messages()
+    message = flashed[0] if flashed else None
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        medications, transactions = db['medications'], db['transactions']
+        if request.method == 'POST':
+            name = (request.form.get('med_name') or '').strip()
+            try:
+                qty = int(request.form.get('quantity', ''))
+            except (TypeError, ValueError):
+                flash('Quantity must be a whole number.')
+                return redirect(url_for('write_off'))
+            reason = (request.form.get('reason') or '').strip()
+            if qty < 1 or not reason:
+                flash('A quantity of at least 1 and a reason are both required.')
+                return redirect(url_for('write_off'))
+            med = medications.find_one({'name': name})
+            if not med:
+                flash(f'Medication "{name}" is not on file.')
+                return redirect(url_for('write_off'))
+            balance = med.get('balance', 0) or 0
+            if qty > balance:
+                flash(f'Cannot write off {qty} of "{name}" — only {balance} on hand.')
+                return redirect(url_for('write_off'))
+            price = med.get('price', 0) or 0
+            medications.update_one({'name': name}, {'$inc': {'balance': -qty}})
+            transactions.insert_one({
+                'type': 'damage', 'med_name': name,
+                'quantity': -qty,                    # signed, like expiry
+                'price': price, 'line_value': -qty * price,
+                'reason': reason, 'note': (request.form.get('note') or '').strip(),
+                'batch': med.get('batch'),
+                'expiry_date': med.get('expiry_date'),
+                'balance_before': balance,
+                'user': current_user, 'timestamp': datetime.utcnow(),
+            })
+            write_audit_entry('UPDATE', 'damage', name,
+                              f'{qty} unit(s) written off as {reason} '
+                              f'(balance {balance} -> {balance - qty}, '
+                              f'value M{qty * price:.2f})')
+            flash(f'Loss recorded: {name} x{qty} ({reason}). '
+                  f'Balance is now {balance - qty}. Value M{qty * price:.2f}.')
+            return redirect(url_for('write_off'))
+
+        recent = list(transactions.find({'type': 'damage'}).sort('timestamp', -1).limit(100))
+        for r in recent:
+            r['when'] = to_local(r.get('timestamp'))
+        return render_template('write_off.html', nav_links=get_nav_links(), message=message,
+                               damage_reasons=DAMAGE_REASONS, recent=recent)
+    except ServerSelectionTimeoutError:
+        return render_template('write_off.html', nav_links=get_nav_links(),
+                               message='Database connection failed. Please try again later.',
+                               damage_reasons=DAMAGE_REASONS, recent=[]), 500
+
+
+@app.route('/sales/<receipt_no>', methods=['GET'])
+@login_required
+def receipt(receipt_no: str) -> ResponseReturnValue:
+    sale = get_mongo_client()['pharmacy_db']['sales'].find_one({'receipt_no': receipt_no})
+    if not sale:
+        flash(f'No sale with receipt number {receipt_no}.', 'error')
+        return redirect(url_for('sales'))
+    message_class, message = _flashed_banner()
+    return render_template('receipt.html', nav_links=get_nav_links(), sale=sale,
+                           when=to_local(sale.get('timestamp'), '%d %b %Y %H:%M'),
+                           message=message, message_class=message_class,
+                           is_admin=session['user'].get('role') == 'admin')
+
+
+@app.route('/sales', methods=['GET'])
+@login_required
+def sales() -> ResponseReturnValue:
+    """Sales list and cash-up: totals by payment method for the chosen days."""
+    db = get_mongo_client()['pharmacy_db']
+    start_date = request.args.get('start_date') or ''
+    end_date = request.args.get('end_date') or ''
+    search = (request.args.get('search') or '').strip()
+    today = local_now().strftime('%Y-%m-%d')
+    if not start_date and not end_date and not search:
+        start_date = end_date = today         # the default view is today's cash-up
+    q: Query = {}
+    try:
+        rng: Query = {}
+        if start_date:
+            rng['$gte'] = datetime.strptime(start_date, '%Y-%m-%d') - timedelta(hours=PHARMACY_UTC_OFFSET_HOURS)
+        if end_date:
+            rng['$lt'] = (datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+                          - timedelta(hours=PHARMACY_UTC_OFFSET_HOURS))
+        if rng:
+            q['timestamp'] = rng
+    except ValueError:
+        flash('Dates must be in the form YYYY-MM-DD.', 'error')
+        return redirect(url_for('sales'))
+    if search:
+        rx = re.escape(search)
+        q['$or'] = [{'receipt_no': {'$regex': rx, '$options': 'i'}},
+                    {'customer': {'$regex': rx, '$options': 'i'}},
+                    {'lines.name': {'$regex': rx, '$options': 'i'}}]
+
+    by_method: dict[str, Doc] = {m: {'count': 0, 'total': 0.0} for m in PAYMENT_METHODS}
+    grand = {'count': 0, 'total': 0.0, 'cost': 0.0, 'voided': 0}
+    for s in db['sales'].find(q, {'status': 1, 'payment_method': 1, 'total': 1, 'cost_total': 1}):
+        if s.get('status') == 'voided':
+            grand['voided'] += 1
+            continue
+        m = by_method.setdefault(s.get('payment_method') or 'Other', {'count': 0, 'total': 0.0})
+        m['count'] += 1
+        m['total'] += s.get('total') or 0
+        grand['count'] += 1
+        grand['total'] += s.get('total') or 0
+        grand['cost'] += s.get('cost_total') or 0
+    grand['margin'] = grand['total'] - grand['cost']
+
+    if request.args.get('export') == 'csv':
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(['Receipt', 'Date', 'Status', 'Customer', 'Item', 'Quantity',
+                     'Unit price', 'Line total', 'Payment', 'Cashier'])
+        for s in db['sales'].find(q).sort('timestamp', 1):
+            for l in s.get('lines', []):
+                w.writerow([_csv_value(v) for v in (
+                    s.get('receipt_no'), to_local(s.get('timestamp')), s.get('status'),
+                    s.get('customer'), l.get('name'), l.get('quantity'),
+                    f"{l.get('unit_price', 0):.2f}", f"{l.get('line_total', 0):.2f}",
+                    s.get('payment_method'), s.get('cashier'))])
+        resp = make_response(out.getvalue())
+        resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+        resp.headers['Content-Disposition'] = (
+            f'attachment; filename="sales_{start_date or "all"}_{end_date or "all"}.csv"')
+        return resp
+
+    total = db['sales'].count_documents(q)
+    pager = _pager(_requested_page(), SALES_PAGE_SIZE, total)
+    rows = list(db['sales'].find(q).sort('timestamp', -1)
+                .skip((pager['page'] - 1) * SALES_PAGE_SIZE).limit(SALES_PAGE_SIZE))
+    for r in rows:
+        r['when'] = to_local(r.get('timestamp'), '%d %b %H:%M')
+    message_class, message = _flashed_banner()
+    return render_template('sales.html', nav_links=get_nav_links(), rows=rows,
+                           by_method=[(m, v) for m, v in by_method.items() if v['count']],
+                           grand=grand, start_date=start_date, end_date=end_date,
+                           search=search, pager=pager, window_defaulted=False, unit='sales',
+                           is_admin=session['user'].get('role') == 'admin',
+                           message=message, message_class=message_class)
 
 
 def _load_delivery(deliveries: Collection, raw_id: str | None) -> Doc | None:
@@ -1980,7 +1349,7 @@ def _reconcile_delivery(delivery: Doc, goods_value: float) -> Doc:
         if abs(diff) < 0.01:
             return 'normal', 'matched', 'Matched'
         return ('expired' if diff > 0 else 'close-to-expire',
-                f'R{diff:+.2f}', over if diff > 0 else under)
+                f'M{diff:+.2f}', over if diff > 0 else under)
 
     o_class, o_label, o_note = band(
         order_diff, 'Invoiced above the order', 'Invoiced below the order')
@@ -2160,8 +1529,8 @@ def receive() -> ResponseReturnValue:
                 })
                 packs = quantity / pack_size
                 flash(f'{med_name}: {quantity} units received onto {d["reference"]} '
-                      f'({packs:g} x pack of {pack_size} at R{pack_price:.2f} = '
-                      f'R{line_value:.2f}; unit price R{price:.4f}).')
+                      f'({packs:g} x pack of {pack_size} at M{pack_price:.2f} = '
+                      f'M{line_value:.2f}; unit price M{price:.4f}).')
                 # line_added tells the page the line really posted, so the
                 # half-typed draft can be dropped. The page must not try to
                 # work this out by reading its own text.
@@ -2183,13 +1552,13 @@ def receive() -> ResponseReturnValue:
                               'closed_at': datetime.utcnow(),
                               'goods_value_at_close': goods}})
                 write_audit_entry('UPDATE', 'delivery', d['reference'],
-                                  f"closed by {current_user}; goods R{goods:.2f} "
-                                  f"vs invoice R{d['invoice_total']:.2f}")
+                                  f"closed by {current_user}; goods M{goods:.2f} "
+                                  f"vs invoice M{d['invoice_total']:.2f}")
                 # Warn but allow: a mismatch is surfaced, never blocking.
                 if abs(goods - d['invoice_total']) >= 0.01:
                     flash(f"Delivery {d['reference']} closed with a mismatch: goods received "
-                          f"R{goods:.2f} against invoice R{d['invoice_total']:.2f} "
-                          f"(difference R{goods - d['invoice_total']:+.2f}).")
+                          f"M{goods:.2f} against invoice M{d['invoice_total']:.2f} "
+                          f"(difference M{goods - d['invoice_total']:+.2f}).")
                 else:
                     flash(f"Delivery {d['reference']} closed and fully matched.")
                 return redirect(url_for('receive', delivery_id=str(d['_id'])))
@@ -2217,7 +1586,7 @@ def receive() -> ResponseReturnValue:
                 d['goods_value'], d['line_count'] = goods_value, line_count
                 diff = d['goods_value'] - d.get('invoice_total', 0)
                 matched = abs(diff) < 0.01
-                d['diff_label'] = 'matched' if matched else f'R{diff:+.2f}'
+                d['diff_label'] = 'matched' if matched else f'M{diff:+.2f}'
                 d['row_class'] = ('close-to-expire' if d['status'] == 'open'
                                   else ('normal' if matched else 'expired'))
 
@@ -2278,12 +1647,13 @@ def add_medication() -> ResponseReturnValue:
                     raise ValueError('price cannot be negative')
                 if initial_balance < 0:
                     raise ValueError('opening balance cannot be negative')
+                retail = _retail_fields(request.form)
 
                 if medications.find_one({'name': med_name}):
                     message = f'Medication "{med_name}" already exists. Use Receiving to add stock.'
                     return render_template('add_medication.html', nav_links=get_nav_links(), message=message,
                      current_user=session.get('user', {}).get('name', ''),
-                                                  categories=CATEGORIES)
+                                                  categories=CATEGORIES, web_categories=WEB_CATEGORIES)
 
                 price = _unit_price(pack_price, pack_size)
                 medications.insert_one({
@@ -2291,7 +1661,7 @@ def add_medication() -> ResponseReturnValue:
                     'balance': initial_balance, 'batch': batch,
                     'price': price, 'pack_size': pack_size, 'pack_price': pack_price,
                     'expiry_date': expiry_date, 'schedule': schedule,
-                    'stock_receiver': stock_receiver,
+                    'stock_receiver': stock_receiver, **retail,
                 })
 
                 # An opening load is stock that was already on the shelf, not a
@@ -2316,21 +1686,21 @@ def add_medication() -> ResponseReturnValue:
                                       f'opening stock of {initial_balance} units '
                                       f'recorded by {current_user}')
                     message = (f'Medication added with an opening balance of '
-                               f'{initial_balance} units (unit price R{price:.4f}).')
+                               f'{initial_balance} units (unit price M{price:.4f}).')
                 else:
                     message = 'Medication added successfully! Receive stock against a delivery.'
                 return render_template('add_medication.html', nav_links=get_nav_links(), message=message,
                      current_user=session.get('user', {}).get('name', ''),
-                                                  categories=CATEGORIES)
+                                                  categories=CATEGORIES, web_categories=WEB_CATEGORIES)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
                 return render_template('add_medication.html', nav_links=get_nav_links(), message=message,
                      current_user=session.get('user', {}).get('name', ''),
-                                                  categories=CATEGORIES)
+                                                  categories=CATEGORIES, web_categories=WEB_CATEGORIES)
 
         return render_template('add_medication.html', nav_links=get_nav_links(), message=message,
                      current_user=session.get('user', {}).get('name', ''),
-                                                  categories=CATEGORIES)
+                                                  categories=CATEGORIES, web_categories=WEB_CATEGORIES)
     except ServerSelectionTimeoutError:
         return render_template(
             'add_medication.html', nav_links=get_nav_links(),
@@ -2371,7 +1741,7 @@ def edit_medication() -> ResponseReturnValue:
         if not med_name:
             message = 'No medication specified.'
             return render_template('edit_medication.html', nav_links=get_nav_links(),
-                                          categories=CATEGORIES,
+                                          categories=CATEGORIES, web_categories=WEB_CATEGORIES,
                                           message=message, med_data=None, med_name=None)
 
         med = medications.find_one({'name': med_name})
@@ -2383,7 +1753,7 @@ def edit_medication() -> ResponseReturnValue:
                 {'med_name': med_name}
             )
             return render_template('edit_medication.html', nav_links=get_nav_links(),
-                                          categories=CATEGORIES,
+                                          categories=CATEGORIES, web_categories=WEB_CATEGORIES,
                                           message=message, med_data=None, med_name=med_name)
 
         med_data = med
@@ -2406,26 +1776,28 @@ def edit_medication() -> ResponseReturnValue:
                 price       = _unit_price(pack_price, pack_size)
                 expiry_date = request.form['expiry_date']
                 schedule    = request.form['schedule']
+                retail      = _retail_fields(request.form)
                 medications.update_one(
                     {'name': med_name},
                     # balance deliberately absent — see the note in the template
                     {'$set': {'batch': batch, 'price': price, 'category': category,
                               'pack_size': pack_size, 'pack_price': pack_price,
-                              'expiry_date': expiry_date, 'schedule': schedule}}
+                              'expiry_date': expiry_date, 'schedule': schedule,
+                              **retail}}
                 )
                 message = 'Medication updated successfully!'
                 med_data = medications.find_one({'name': med_name})
                 return render_template('edit_medication.html', nav_links=get_nav_links(),
-                                          categories=CATEGORIES,
+                                          categories=CATEGORIES, web_categories=WEB_CATEGORIES,
                                               message=message, med_data=med_data, med_name=med_name)
             except ValueError as e:
                 message = f'Invalid input: {str(e)}'
                 return render_template('edit_medication.html', nav_links=get_nav_links(),
-                                          categories=CATEGORIES,
+                                          categories=CATEGORIES, web_categories=WEB_CATEGORIES,
                                               message=message, med_data=med_data, med_name=med_name)
 
         return render_template('edit_medication.html', nav_links=get_nav_links(),
-                                          categories=CATEGORIES,
+                                          categories=CATEGORIES, web_categories=WEB_CATEGORIES,
                                       message=message, med_data=med_data, med_name=med_name)
     except ServerSelectionTimeoutError:
         # FIX: med_name may not be assigned yet if get_mongo_client() itself
@@ -2434,7 +1806,7 @@ def edit_medication() -> ResponseReturnValue:
         fallback_med_name = (request.form.get('med_name') if request.method == 'POST'
                              else request.args.get('med_name'))
         return render_template('edit_medication.html', nav_links=get_nav_links(),
-                                          categories=CATEGORIES,
+                                          categories=CATEGORIES, web_categories=WEB_CATEGORIES,
                                       message="Database connection failed.", med_data=None, med_name=fallback_med_name), 500
 
 
@@ -2522,7 +1894,6 @@ def _demand_by_month(transactions: Collection, since: datetime) -> dict[str, dic
     return out
 
 
-ACTIVE_ONLY = {'archived': {'$ne': True}}
 
 # NEW (Categories): items are either pharmaceuticals or medical supplies. This is
 # a field on the item, NOT a second collection — deliveries, stock takes,
@@ -2536,6 +1907,39 @@ CATEGORY_LABELS = {'pharmaceutical': 'Pharmaceuticals',
                    'supply': 'Medical Supplies',
                    'donor': 'Donor Funded',
                    'both': 'All Categories'}
+
+
+# ---------------------------------------------------------------------------
+# Retail: selling price and the public website listing.
+#
+# 'price' stays what it always was — the COST of one unit, frozen on each line
+# so stock values and margins are honest. 'selling_price' is what the customer
+# pays per unit. Prescription-only items are sold against a prescription
+# number and are never priced on the website.
+# ---------------------------------------------------------------------------
+WEB_CATEGORIES = ['Prescription medicines', 'Over-the-counter medicines',
+                  'Packaged herbal medicines', 'Supplements & cosmetics',
+                  'Medical supplies']
+WEB_DESCRIPTION_MAX = 200
+
+
+def _retail_fields(form: Any) -> Doc:
+    """Selling price and website fields from an add/edit product form."""
+    raw = (form.get('selling_price') or '').strip()
+    selling_price = float(raw) if raw else 0.0
+    if selling_price < 0:
+        raise ValueError('selling price cannot be negative')
+    rx_only = form.get('rx_only') == 'on'
+    web_category = form.get('web_category') or ''
+    if web_category not in WEB_CATEGORIES:
+        web_category = WEB_CATEGORIES[0] if rx_only else WEB_CATEGORIES[1]
+    return {
+        'selling_price': round(selling_price, 2),
+        'rx_only': rx_only,
+        'on_website': form.get('on_website') == 'on',
+        'web_category': web_category,
+        'description': (form.get('description') or '').strip()[:WEB_DESCRIPTION_MAX],
+    }
 
 
 def _category_filter(choice: str | None) -> Query:
@@ -2683,7 +2087,7 @@ def edit_loss() -> ResponseReturnValue:
             changes.append(f'quantity from {old_qty} to {new_qty} '
                            f'(stock on hand from {balance} to {balance - delta})')
         if abs(old_price - new_price) >= 0.0001:
-            changes.append(f'unit price from R{old_price:.4f} to R{new_price:.4f}')
+            changes.append(f'unit price from M{old_price:.4f} to M{new_price:.4f}')
         old_remarks = tx.get('remarks') or tx.get('reason') or ''
         if remarks_given and new_remarks != old_remarks:
             db['transactions'].update_one({'_id': tx['_id']},
@@ -2695,7 +2099,7 @@ def edit_loss() -> ResponseReturnValue:
         write_audit_entry('UPDATE', 'stock_loss',
                           f'{med_name} ({tx.get("type")})', '; '.join(changes))
         flash(f'{med_name}: loss corrected — {"; ".join(changes)}. '
-              f'Value now R{new_qty * new_price:.2f}.')
+              f'Value now M{new_qty * new_price:.2f}.')
     except ServerSelectionTimeoutError:
         flash('Database connection failed. Please try again later.')
     return back()
@@ -2753,9 +2157,9 @@ def remove_expired() -> ResponseReturnValue:
         write_audit_entry('UPDATE', 'expiry_removal', med_name,
                           f'{quantity} unit(s) written off as expired '
                           f'(balance {balance} -> {balance - quantity}, '
-                          f'value R{quantity * price:.2f})')
+                          f'value M{quantity * price:.2f})')
         flash(f'{med_name}: {quantity} unit(s) removed as expired. '
-              f'Balance is now {balance - quantity}. Value written off R{quantity * price:.2f}.')
+              f'Balance is now {balance - quantity}. Value written off M{quantity * price:.2f}.')
     except ServerSelectionTimeoutError:
         flash('Database connection failed. Please try again later.')
     return redirect(url_for('reports', report_type=report_type))
@@ -2827,7 +2231,7 @@ def remove_expired_bulk() -> ResponseReturnValue:
                               f'{quantity} unit(s) written off as expired in a '
                               f'bulk pass (balance {balance} -> '
                               f'{balance - quantity}, '
-                              f'value R{quantity * price:.2f})')
+                              f'value M{quantity * price:.2f})')
             removed.append(med_name)
             total_units += quantity
             total_value += quantity * price
@@ -2837,7 +2241,7 @@ def remove_expired_bulk() -> ResponseReturnValue:
             parts.append(f"{len(removed)} item{'' if len(removed) == 1 else 's'} "
                          f'written off, {total_units} unit'
                          f"{'' if total_units == 1 else 's'}, "
-                         f'value R{total_value:.2f}')
+                         f'value M{total_value:.2f}')
         if skipped:
             parts.append(f"not removed: {'; '.join(skipped)}")
         flash('. '.join(parts) + '.' if parts else 'Nothing was removed.',
@@ -3204,111 +2608,6 @@ def reports() -> ResponseReturnValue:
                                 {'expiry_date':    {'$regex': search, '$options': 'i'}},
                             ]
                         receive_list = list(transactions.find(base_query).sort('timestamp', 1).limit(10000))
-
-                    elif report_type == 'sick_leave':
-                        if not start_dt or not end_dt:
-                            raise ValueError('Start and end dates are required for this report type.')
-                        q: Query = {'type': 'dispense', 'outcome': 'Sick leave',
-                                    'timestamp': {'$gte': start_dt, '$lte': end_dt}}
-                        if search:
-                            q['$or'] = [
-                                {'patient':    {'$regex': search, '$options': 'i'}},
-                                {'company':    {'$regex': search, '$options': 'i'}},
-                                {'prescriber': {'$regex': search, '$options': 'i'}},
-                                {'diagnoses':  {'$regex': search, '$options': 'i'}},
-                            ]
-                        raw = list(transactions.find(q).sort('timestamp', -1).limit(3000))
-                        # One line per VISIT. A dispense writes one document per
-                        # medication, so listing rows would print the same
-                        # certificate once for every item on the prescription.
-                        seen, sick_leave = set(), []
-                        per_patient: dict[str, Doc] = {}
-                        for t in raw:
-                            tid = t.get('transaction_id')
-                            if tid in seen:
-                                continue
-                            seen.add(tid)
-                            days = t.get('outcome_days') or 0
-                            dx = t.get('diagnoses')
-                            sick_leave.append({
-                                'date': t.get('date') or t['timestamp'].strftime('%Y-%m-%d'),
-                                'patient': t.get('patient', ''),
-                                'company': t.get('company'),
-                                'days': days,
-                                'diagnoses': ', '.join(dx) if isinstance(dx, list) else (dx or ''),
-                                'prescriber': t.get('prescriber'),
-                                'dispenser': t.get('dispenser'),
-                            })
-                            entry = per_patient.setdefault(t.get('patient', ''),
-                                                       {'count': 0, 'days': 0})
-                            entry['count'] += 1
-                            entry['days'] += days
-                        total_days = sum(l['days'] for l in sick_leave)
-                        sick_leave_totals = {
-                            'patients': len(per_patient),
-                            'days': total_days,
-                            'average': (f'{total_days / len(sick_leave):.1f}'
-                                        if sick_leave else '-'),
-                            'longest': max((l['days'] for l in sick_leave), default=0),
-                            'repeat': sorted(
-                                ({'patient': k, **v} for k, v in per_patient.items()
-                                 if v['count'] > 1),
-                                key=lambda r: -r['days']),
-                        }
-                        report_title = 'Sick Leave Register'
-
-                    elif report_type == 'internal_issues':
-                        if not start_dt or not end_dt:
-                            raise ValueError('Start and end dates are required for this report type.')
-                        q = {'type': 'internal_issue',
-                             'timestamp': {'$gte': start_dt, '$lte': end_dt}}
-                        if search:
-                            q['$or'] = [
-                                {'med_name':   {'$regex': search, '$options': 'i'}},
-                                {'department': {'$regex': search, '$options': 'i'}},
-                                {'issued_to':  {'$regex': search, '$options': 'i'}},
-                                {'user':       {'$regex': search, '$options': 'i'}},
-                            ]
-                        issues = list(transactions.find(q).sort('timestamp', -1).limit(2000))
-                        by_dept: dict[str, Doc] = {}
-                        by_med: dict[str, Doc] = {}
-                        for i_ in issues:
-                            v = i_.get('line_value')
-                            if v is None:
-                                v = (i_.get('quantity', 0) or 0) * (i_.get('price', 0) or 0)
-                            dept = by_dept.setdefault(i_.get('department') or 'Unspecified',
-                                                   {'lines': 0, 'units': 0, 'value': 0.0})
-                            dept['lines'] += 1
-                            dept['units'] += i_.get('quantity', 0) or 0
-                            dept['value'] += v
-                            m_ = by_med.setdefault(i_.get('med_name', ''),
-                                                   {'lines': 0, 'units': 0, 'value': 0.0})
-                            m_['lines'] += 1
-                            m_['units'] += i_.get('quantity', 0) or 0
-                            m_['value'] += v
-                        issue_totals = {
-                            'lines': len(issues),
-                            'units': sum(v['units'] for v in by_dept.values()),
-                            'value': sum(v['value'] for v in by_dept.values()),
-                            'dept_count': len(by_dept),
-                            'by_dept': [{'name': k, **v} for k, v in
-                                        sorted(by_dept.items(), key=lambda kv: -kv[1]['value'])],
-                            'by_med': [{'name': k, **v} for k, v in
-                                       sorted(by_med.items(), key=lambda kv: -kv[1]['value'])][:20],
-                        }
-                        report_title = 'Internal Issues'
-
-                    elif report_type == 'duplicate_visits':
-                        # No date range: this is a hunt through the record for
-                        # something that should not be there, not a report on
-                        # a period. It looks back six months by default.
-                        duplicates = _duplicate_visits(transactions)
-                        if search:
-                            sl = search.lower()
-                            duplicates = [d for d in duplicates
-                                          if sl in (d['patient'] or '').lower()
-                                          or sl in (d['med_name'] or '').lower()]
-                        report_title = 'Possible double-dispensing'
 
                     elif report_type == 'unmet_demand':
                         if not start_dt or not end_dt:
@@ -3826,7 +3125,6 @@ def reports() -> ResponseReturnValue:
             monthly=monthly, writeoffs=writeoffs, writeoff_totals=writeoff_totals,
             unmet_list=unmet_list, unmet_totals=unmet_totals,
             duplicates=duplicates,
-            duplicate_window=DUPLICATE_WINDOW_MINUTES,
             issues=issues, issue_totals=issue_totals,
             sick_leave=sick_leave, sick_leave_totals=sick_leave_totals,
             start_date=start_date, end_date=end_date,
@@ -3856,7 +3154,7 @@ def reports() -> ResponseReturnValue:
             sick_leave=[], sick_leave_totals={'patients': 0, 'days': 0, 'average': '-', 'longest': 0, 'repeat': []},
             start_date=None, end_date=None,
             total_transactions=0, search=None, report_title=None,
-            duplicates=[], duplicate_window=DUPLICATE_WINDOW_MINUTES,
+            duplicates=[],
             is_admin=is_admin
         ), 500
 
@@ -4135,11 +3433,6 @@ def _requested_page() -> int:
         return 1
 
 
-# How far back a page looks when nobody has chosen dates. The key register is
-# read for patterns across the year - who keeps the key, how often weekends
-# run late - and the inventory report needs three months of issues before its
-# average monthly consumption, and so the amount to order, means anything.
-KEY_REGISTER_DEFAULT_MONTHS = 12
 INVENTORY_DEFAULT_MONTHS = 3
 
 
@@ -4216,18 +3509,10 @@ CSV_REPORTS = {
     'out_of_stock_list': ('Out of Stock', 'stock_data', [
         ('name', 'Medication'), ('balance', 'Balance'),
         ('expiry_date', 'Expiry Date'), ('batch', 'Batch')]),
-    'sick_leave': ('Sick Leave Register', 'sick_leave', [
-        ('date', 'Date'), ('patient', 'Name'), ('company', 'Company'),
-        ('days', 'Days Given'), ('diagnoses', 'Diagnosis'),
-        ('prescriber', 'Prescriber')]),
     'expiry_writeoffs': ('Losses', 'writeoffs', [
         ('date', 'Date'), ('med_name', 'Item Description'), ('quantity', 'Qty'),
         ('expiry_date', 'Expiry Date'), ('batch', 'Batch/Lot'),
         ('line_value', 'Total Cost'), ('remarks', 'Remarks')]),
-    'internal_issues': ('Internal Issues', 'issues', [
-        ('date', 'Date'), ('med_name', 'Medication'), ('quantity', 'Qty'),
-        ('department', 'Department'), ('issued_to', 'Received By'),
-        ('line_value', 'Value'), ('user', 'Issued By')]),
     'duplicate_visits': ('Possible Double-Dispensing', 'duplicates', [
         ('patient', 'Patient'), ('med_name', 'Medication'),
         ('quantity', 'Quantity'), ('first', 'First recorded'),
@@ -4316,133 +3601,32 @@ def _report_csv(report_type: str | None, ctx: Doc, is_admin: bool = False) -> tu
     return f'{name}-{stamp}.csv', out.getvalue()
 
 
-# One row per medication line, because that is how a dispense is recorded and
-# how a spreadsheet can count it. The visit's own details repeat down its
-# lines, and Visit Cost appears once per visit — on its first line, blank on
-# the rest — exactly as the screen's merged cell shows it. That way summing
-# either Line Cost or Visit Cost gives the right total instead of a figure
-# inflated by every extra medicine on a prescription.
-DISPENSE_CSV_COLUMNS = [
-    ('date', 'Date'), ('timestamp', 'Timestamp'), ('patient', 'Patient'),
-    ('company', 'Company'), ('position', 'Position'), ('gender', 'Gender'),
-    ('birth_decade', 'Born'), ('outcome', 'Outcome'),
-    ('outcome_days', 'Days'), ('diagnoses', 'Diagnoses'),
-    ('prescriber', 'Prescriber'), ('dispenser', 'Dispenser'),
-    ('med_name', 'Medication'), ('quantity', 'Quantity'),
-    ('price', 'Unit Cost'), ('line_cost', 'Line Cost'),
-    ('visit_cost', 'Visit Cost'), ('user', 'Recorded By'),
-    ('transaction_id', 'Visit ID'),
-]
-# A download is not a page, so it is not paged — it is everything the filter
-# matches. Past this many lines the date range is doing no work, and silently
-# handing over a truncated file would be worse than saying so.
-DISPENSE_CSV_MAX_LINES = 20000
 
 
-def _dispense_csv(transactions: Collection, base_query: Query) -> tuple[str, str] | None:
-    """(filename, csv text) for the dispensing record the filter matches.
-
-    Returns None if the match is too large to hand over in one file.
-    """
-    ids = [g['_id'] for g in transactions.aggregate([
-        {'$match': base_query},
-        {'$group': {'_id': '$transaction_id', 'ts': {'$max': '$timestamp'}}},
-        {'$sort': {'ts': -1}},
-    ])]
-    # A search that matches one line brings its whole visit, the same way the
-    # screen does — a record showing two of a patient's three medicines is
-    # not the record.
-    lines = list(transactions.find(
-        {'type': 'dispense', 'transaction_id': {'$in': ids}}))
-    if len(lines) > DISPENSE_CSV_MAX_LINES:
-        return None
-
-    grouped: dict[Any, Docs] = {}
-    for ln in lines:
-        grouped.setdefault(ln.get('transaction_id'), []).append(ln)
-
-    out = io.StringIO()
-    writer = csv.writer(out)
-    writer.writerow([label for _f, label in DISPENSE_CSV_COLUMNS])
-    for tid in ids:
-        rows = grouped.get(tid) or []
-        rows.sort(key=lambda r: (r.get('med_name') or ''))
-        visit_cost = sum(_line_value(r) for r in rows)
-        for n, r in enumerate(rows):
-            row = dict(r)
-            row['line_cost'] = f'{_line_value(r):.2f}'
-            row['visit_cost'] = f'{visit_cost:.2f}' if n == 0 else ''
-            ts = r.get('timestamp')
-            row['timestamp'] = ts.strftime('%Y-%m-%d %H:%M:%S') if ts else ''
-            if not row.get('date') and ts:
-                row['date'] = ts.strftime('%Y-%m-%d')
-            writer.writerow([_csv_value(row.get(f))
-                             for f, _lab in DISPENSE_CSV_COLUMNS])
-    stamp = local_now().strftime('%Y%m%d')
-    return f'dispensing-record-{stamp}.csv', out.getvalue()
 
 
-def _past_receivers(db: Database, limit: int = 40) -> list[str]:
-    """People who have taken stock for a department before.
-
-    Offered as suggestions rather than filled in: the right answer changes
-    with every transfer, so the app can shorten the typing but must not
-    choose.
-    """
-    try:
-        names = db['transactions'].distinct(
-            'issued_to', {'type': 'internal_issue',
-                          'issued_to': {'$nin': [None, '']}})
-        return sorted(names)[:limit]
-    except Exception:
-        return []
 
 
-def _new_visit_defaults(current_user: Doc) -> Doc:
-    """What a fresh dispensing form starts with.
-
-    Rendered into the form AND handed to the script that restores it after a
-    visit is saved, so a default cannot exist in one place and be forgotten in
-    the other. Add a field here and both follow.
-    """
-    return {
-        'date': local_now().strftime('%Y-%m-%d'),
-        'dispenser': current_user,
-        'outcome': 'Outpatient',
-    }
 
 
-def _birth_decades() -> list[int]:
-    """Decade options, most recent first — most patients are recent births."""
-    this = (datetime.utcnow().year // 10) * 10
-    return list(range(this, 1919, -10))
 
 
 def _clinical_by_month(transactions: Collection, window_start: datetime,
                        months: list[tuple[int, int]]) -> Doc:
-    """Outcomes and diagnoses per month, plus a period total per diagnosis.
+    """Sales (episodes) and distinct named customers in the window.
 
-    Counted per VISIT, not per dispensed line: a visit that produced three
-    medications is one referral, not three, and one episode of a diagnosis. The
-    dispense collection stores one document per medication line, so counting
-    rows here would multiply every clinical figure by the prescription size.
+    Counted per SALE, not per line: a sale of three items is one sale. The
+    dispense records are one document per line, so counting rows would
+    multiply the figure by the basket size.
     """
     idx = {ym: i for i, ym in enumerate(months)}
-    n = len(months)
-    outcomes: dict[str, Doc] = {}
-    dx_month: dict[str, list[int]] = {}
-    dx_total: dict[str, int] = {}
     seen, patients = set(), set()
     cursor = transactions.find(
         {'type': 'dispense', 'timestamp': {'$gte': window_start}},
-        {'_id': 0, 'timestamp': 1, 'transaction_id': 1, 'outcome': 1,
-         'outcome_days': 1, 'diagnoses': 1, 'patient': 1})
+        {'_id': 0, 'timestamp': 1, 'transaction_id': 1, 'patient': 1})
     for t in cursor:
         ts = t.get('timestamp')
-        if not isinstance(ts, datetime):
-            continue
-        i = idx.get((ts.year, ts.month))
-        if i is None:
+        if not isinstance(ts, datetime) or idx.get((ts.year, ts.month)) is None:
             continue
         tid = t.get('transaction_id')
         if tid in seen:
@@ -4450,45 +3634,7 @@ def _clinical_by_month(transactions: Collection, window_start: datetime,
         seen.add(tid)
         if t.get('patient'):
             patients.add(t['patient'])
-        oc = t.get('outcome')
-        if oc:
-            row = outcomes.setdefault(oc, {'counts': [0] * n, 'days': 0})
-            row['counts'][i] += 1
-            row['days'] += t.get('outcome_days') or 0
-        for d in (t.get('diagnoses') or []):
-            # Count under the name the diagnosis is called NOW. A visit from
-            # last month says "Injury"; the list calls it "Injury, site
-            # unspecified". Counted apart, both figures are half the truth and
-            # the trend below breaks in two. The record itself is untouched.
-            d = _canonical_diagnosis((d or '').strip())
-            if not d:
-                continue
-            dx_month.setdefault(d, [0] * n)[i] += 1
-            dx_total[d] = dx_total.get(d, 0) + 1
-    top = sorted(dx_total.items(), key=lambda kv: -kv[1])[:12]
-    return {
-        'outcomes': [{'name': k, 'counts': v['counts'], 'total': sum(v['counts']),
-                      'days': v['days']}
-                     for k, v in sorted(outcomes.items(), key=lambda kv: -sum(kv[1]['counts']))],
-        'diagnoses': [{'name': k, 'counts': dx_month[k], 'total': v,
-                       'trend': _dx_trend(dx_month[k])} for k, v in top],
-        'episodes': len(seen),
-        'patients': patients,
-    }
-
-
-def _dx_trend(counts: Sequence[int]) -> str:
-    """Compare the last completed month against the mean of the ones before."""
-    if len(counts) < 3:
-        return '-'
-    body, last = counts[:-2], counts[-2]
-    base = sum(body) / len(body) if body else 0
-    if base == 0:
-        return 'new' if last else '-'
-    pct = (last - base) / base * 100
-    if abs(pct) < 20:
-        return 'steady'
-    return f"{'up' if pct > 0 else 'down'} {abs(pct):.0f}%"
+    return {'episodes': len(seen), 'patients': patients}
 
 
 def _parse_expiry(raw: Any) -> date | None:
@@ -4507,164 +3653,9 @@ def _stdev(values: Sequence[float]) -> float:
     return (sum((v - mean) ** 2 for v in values) / len(values)) ** 0.5
 
 
-DEPARTMENTS = ['Emergency Department', 'Emergency Trolley', 'PHC', 'OHC',
-               'Lab', 'Testing Room', 'Tx Room', 'Doctor Consultation',
-               'Campaigns', 'Environment', 'Other']
-
-DAMAGE_REASONS = ['Broken / spilled', 'Contaminated', 'Cold chain failure',
-                  'Recalled by supplier', 'Lost / unaccounted', 'Other']
 
 
-@app.route('/internal-issue', methods=['GET', 'POST'])
-@login_required
-def internal_issue() -> ResponseReturnValue:
-    """Stock leaving the store other than to a patient.
 
-    Two actions, deliberately distinct:
-      internal_issue — CONSUMED by a department. Counts toward AMC; the order
-                       request replaces it.
-      damage         — LOST. Excluded from AMC, exactly like expiry, so a
-                       breakage never causes the app to reorder more.
-    """
-    current_user = session['user']['name']
-    flashed = get_flashed_messages()
-    message = flashed[0] if flashed else None
-    try:
-        db = get_mongo_client()['pharmacy_db']
-        medications, transactions = db['medications'], db['transactions']
-
-        if request.method == 'POST':
-            action = request.form.get('action')
-
-            if action == 'issue':
-                dept = (request.form.get('department') or '').strip()
-                if dept == 'Other':
-                    dept = (request.form.get('department_other') or '').strip() or 'Other'
-                issued_to = (request.form.get('issued_to') or '').strip()
-                note = (request.form.get('note') or '').strip()
-                if not dept or not issued_to:
-                    flash('Department and the person receiving are both required.')
-                    return redirect(url_for('internal_issue'))
-
-                names = request.form.getlist('med_name')
-                qtys = request.form.getlist('quantity')
-                issue_id = f"ISS-{datetime.utcnow().strftime('%Y%m%d')}-{uuid4().hex[:4].upper()}"
-                done, problems = [], []
-                for name, raw in zip(names, qtys):
-                    name = (name or '').strip()
-                    raw = (raw or '').strip()
-                    if not name or not raw:
-                        continue
-                    try:
-                        qty = int(raw)
-                    except ValueError:
-                        problems.append(f'{name}: quantity must be a whole number')
-                        continue
-                    if qty < 1:
-                        continue
-                    med = medications.find_one({'name': name})
-                    if not med:
-                        problems.append(f'"{name}" is not on file')
-                        continue
-                    available = med.get('balance', 0) or 0
-                    given = min(qty, available)
-                    if given <= 0:
-                        problems.append(f'{name}: nothing on hand')
-                        continue
-                    if given < qty:
-                        problems.append(f'{name}: only {given} of {qty} available')
-                    price = med.get('price', 0) or 0
-                    medications.update_one({'name': name}, {'$inc': {'balance': -given}})
-                    transactions.insert_one({
-                        'type': 'internal_issue', 'issue_id': issue_id,
-                        'med_name': name, 'quantity': given,
-                        'price': price, 'line_value': given * price,
-                        'department': dept, 'issued_to': issued_to, 'note': note,
-                        'batch': med.get('batch'), 'schedule': med.get('schedule'),
-                        'user': current_user, 'timestamp': datetime.utcnow(),
-                    })
-                    done.append(f'{name} x{given}')
-                if done:
-                    write_audit_entry('UPDATE', 'internal_issue', issue_id,
-                                      f'issued to {dept} ({issued_to}): {", ".join(done)}')
-                    msg = f'Issue to {dept} recorded: {", ".join(done)}.'
-                else:
-                    msg = 'Nothing was issued.'
-                if problems:
-                    msg += ' Problems: ' + '; '.join(problems)
-                flash(msg)
-                return redirect(url_for('internal_issue'))
-
-            if action == 'damage':
-                name = (request.form.get('med_name') or '').strip()
-                try:
-                    qty = int(request.form.get('quantity', ''))
-                except (TypeError, ValueError):
-                    flash('Quantity must be a whole number.')
-                    return redirect(url_for('internal_issue'))
-                reason = (request.form.get('reason') or '').strip()
-                if qty < 1 or not reason:
-                    flash('A quantity of at least 1 and a reason are both required.')
-                    return redirect(url_for('internal_issue'))
-                med = medications.find_one({'name': name})
-                if not med:
-                    flash(f'Medication "{name}" is not on file.')
-                    return redirect(url_for('internal_issue'))
-                balance = med.get('balance', 0) or 0
-                if qty > balance:
-                    flash(f'Cannot write off {qty} of "{name}" — only {balance} on hand.')
-                    return redirect(url_for('internal_issue'))
-                price = med.get('price', 0) or 0
-                medications.update_one({'name': name}, {'$inc': {'balance': -qty}})
-                transactions.insert_one({
-                    'type': 'damage', 'med_name': name,
-                    'quantity': -qty,                    # signed, like expiry
-                    'price': price, 'line_value': -qty * price,
-                    'reason': reason, 'note': (request.form.get('note') or '').strip(),
-                    'batch': med.get('batch'),
-                    # The register reports an expiry date against every line, so
-                    # capture it here too — expiry removals already did.
-                    'expiry_date': med.get('expiry_date'),
-                    'balance_before': balance,
-                    'user': current_user, 'timestamp': datetime.utcnow(),
-                })
-                write_audit_entry('UPDATE', 'damage', name,
-                                  f'{qty} unit(s) written off as {reason} '
-                                  f'(balance {balance} -> {balance - qty}, '
-                                  f'value R{qty * price:.2f})')
-                flash(f'Loss recorded: {name} x{qty} ({reason}). '
-                      f'Balance is now {balance - qty}. Value R{qty * price:.2f}.')
-                return redirect(url_for('internal_issue'))
-
-            flash('Unknown action.')
-            return redirect(url_for('internal_issue'))
-
-        recent = list(transactions.find(
-            {'type': {'$in': ['internal_issue', 'damage']}}
-        ).sort('timestamp', -1).limit(100))
-        return render_template(
-            'internal_issue.html', nav_links=get_nav_links(), message=message,
-            current_user=session['user']['name'],
-            past_receivers=_past_receivers(db),
-            departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=recent)
-    except ServerSelectionTimeoutError:
-        return render_template(
-            'internal_issue.html', nav_links=get_nav_links(),
-            message='Database connection failed. Please try again later.',
-            current_user=session.get('user', {}).get('name', ''),
-            past_receivers=[],
-            departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=[]), 500
-
-
-# =======================================================================
-# NEW (Temperature log): monthly max-min thermometer register.
-#
-# A max-min thermometer gives THREE figures at each check — the highest and
-# lowest it has seen since it was last reset, and the temperature right now.
-# All three are recorded, morning and afternoon, for each monitored location,
-# and the month's chart plots them as max (red), min (blue) and actual
-# (black), which is the form an inspector expects to see.
-# =======================================================================
 TEMP_LOCATIONS = ['Dispensary', 'Store 1', 'Store 2', 'Fridge']
 TEMP_SESSIONS = ['Morning', 'Afternoon']
 # Each room keeps its own instrument permanently, so the number is a property
@@ -4722,13 +3713,13 @@ TEMP_SCALES = {
 # The grid is the same height whatever the scale, so the chart keeps its
 # shape on paper; a scale with more degrees gets thinner rows.
 TEMP_GRID_H = 14 * 26
-# Rows on a store-room chart (30 down to 14).
-TEMP_ROWS = TEMP_SCALES['room']['top'] - TEMP_SCALES['room']['bottom'] + 1
 
 # The chart's own convention, printed in its legend: actual in black pen,
 # minimum in blue, maximum in red. Each series also carries its own marker
 # shape — these charts are photocopied, and once the colour is gone red and
 # blue are the same grey. Shape survives that; colour does not.
+TEMP_ROWS = TEMP_SCALES['room']['top'] - TEMP_SCALES['room']['bottom'] + 1
+
 TEMP_SERIES = [
     ('max', 'Maximum', '#cc0000', 'circle', 'Red'),
     ('min', 'Minimum', '#0047b3', 'square', 'Blue'),
@@ -5035,992 +4026,6 @@ def _temperature_chart(readings: Iterable[Doc], year: int, month: int, location:
 
     o.append('</svg>')
     return '\n'.join(o)
-
-
-# ---------------------------------------------------------------------------
-# Department requests. A department posts what it needs from its own login;
-# the pharmacy serves it from the queue. Serving IS the internal issue - the
-# same transactions the Internal Issues page writes - so nothing is entered
-# twice, and what could not be supplied for want of stock is recorded as
-# unmet demand, exactly as a short dispense is, so the next order covers it.
-#
-# A department account sees this page and nothing else: no dispensing, no
-# patients, no stock figures beyond what it asked for and what it was given.
-# ---------------------------------------------------------------------------
-REQ_PENDING = 'Pending'
-REQ_SERVED, REQ_PART, REQ_NONE = 'Served', 'Part served', 'Not supplied'
-REQ_DECLINED, REQ_CANCELLED = 'Declined', 'Cancelled'
-# Some lines served, the rest still to come. It stays in the queue.
-REQ_PROGRESS = 'In progress'
-REQ_OPEN = [REQ_PENDING, REQ_PROGRESS]          # waiting for the pharmacy
-
-
-def _line_done(ln: Doc) -> bool:
-    return ln.get('given') is not None
-
-
-def _final_status(lines: Docs) -> str:
-    """What a request is once every line has been dealt with."""
-    live = [l for l in lines if not l.get('declined')]
-    if not live:
-        return REQ_DECLINED
-    given = sum(l.get('given') or 0 for l in live)
-    if all((l.get('given') or 0) >= (l.get('requested') or 0) for l in live) and \
-            len(live) == len(lines):
-        return REQ_SERVED
-    return REQ_NONE if given == 0 else REQ_PART
-REQ_MAX_LINES = 30
-# Pages a department login may reach. Everything else sends it back to its
-# requests, so a typed address cannot open the dispensing register.
-DEPARTMENT_ENDPOINTS = {'department_requests', 'logout', 'login', 'change_expired_password',
-                        'static', 'api_session_ping', 'session_ping',
-                        'get_medication_options'}
-REQUEST_DEPARTMENTS = [d for d in DEPARTMENTS if d != 'Other']
-
-
-def _is_department(user: Doc | None = None) -> bool:
-    u = user if user is not None else (session.get('user') or {})
-    return u.get('role') == 'department'
-
-
-@app.before_request
-def keep_departments_to_requests() -> ResponseReturnValue | None:
-    if 'user' not in session or not _is_department():
-        return None
-    if request.endpoint in DEPARTMENT_ENDPOINTS:
-        return None
-    return redirect(url_for('department_requests'))
-
-
-def _pending_request_count() -> int:
-    try:
-        return get_mongo_client()['pharmacy_db']['dept_requests'].count_documents(
-            {'status': {'$in': REQ_OPEN}})
-    except Exception:
-        return 0
-
-
-def _request_row(doc: Doc, balances: dict[str, float] | None = None) -> Doc:
-    lines = []
-    for i, ln in enumerate(doc.get('lines') or []):
-        row = dict(ln)
-        row['i'] = i
-        if balances is not None:
-            on_hand = balances.get(ln.get('med_name', ''), 0) or 0
-            row['on_hand'] = _num(on_hand)
-            row['suggest'] = _num(max(0, min(ln.get('requested', 0) or 0, on_hand)))
-        lines.append(row)
-    return {
-        'id': str(doc['_id']), 'ref': doc.get('ref', ''),
-        'department': doc.get('department', ''),
-        'requested_by': doc.get('requested_by', ''),
-        'requested_at': doc.get('requested_at'),
-        'note': doc.get('note', ''), 'status': doc.get('status', ''),
-        'served_by': doc.get('served_by'), 'served_at': doc.get('served_at'),
-        'received_by': doc.get('received_by'),
-        'reason': doc.get('decline_reason') or doc.get('serve_note') or '',
-        'lines': lines,
-        'waiting': ((datetime.utcnow() - doc['requested_at'])
-                    if doc.get('requested_at') else None),
-    }
-
-
-def _num(v: Any) -> Any:
-    return int(v) if isinstance(v, float) and v.is_integer() else v
-
-
-def _waited(td: timedelta | None) -> str:
-    if td is None:
-        return ''
-    mins = int(td.total_seconds() // 60)
-    if mins < 60:
-        return f'{mins} min'
-    if mins < 60 * 24:
-        return f'{mins // 60} h {mins % 60:02d} min'
-    return f'{mins // (60 * 24)} day(s)'
-
-
-# ---------------------------------------------------------------------------
-# Standard lists. A department that keeps a fixed set of stock - the
-# emergency trolley above all - is topped up to that set rather than asking
-# item by item: it says what is there, and the request is the difference.
-#
-# The trolley quantities below are a starting estimate, made from the most
-# each item held on the trolley's own 2026 checklist and from what an adult
-# emergency trolley usually carries. They are seeded once and edited on the
-# Standard Lists page from then on; nothing here overwrites an edit.
-# (item, should hold, words that find it in the pharmacy list, note)
-# ---------------------------------------------------------------------------
-TROLLEY_STANDARD_SEED: list[tuple[str, int, list[str], str]] = [
-    ('Adrenalin 1 mg', 10, ['adrenalin', 'epinephrine'], ''),
-    ('Atropine', 5, ['atropine'], ''),
-    ('Amiodarone', 6, ['amiodarone'], ''),
-    ('Aminophylline 250 mg', 2, ['aminophyl'], ''),
-    ('Etomidate', 2, ['etomidate', 'atomidate'], 'listed on the checklist as "Atomidate"'),
-    ('Antivenom 10 ml', 4, ['antivenom', 'anti-venom', 'antivenin'], ''),
-    ('Charcoal 50 g', 1, ['charcoal'], ''),
-    ('Cimetidine', 2, ['cimetidine'], ''),
-    ('Dexamethasone', 4, ['dexamethasone'], ''),
-    ('Diazepam 10 mg', 5, ['diazepam'], ''),
-    ('Digoxin (tabs)', 10, ['digoxin'], ''),
-    ('Dopamine', 5, ['dopamine'], ''),
-    ('Ergometrine 0.2 mg', 2, ['ergometrine'], ''),
-    ('Furosemide 10 mg', 4, ['furosemide', 'frusemide'], ''),
-    ('Dextrose 50% 20 ml', 2, ['dextrose 50', '50% dextrose', 'glucose 50'], ''),
-    ('Heparin sodium', 2, ['heparin'], ''),
-    ('Hydralazine 20 mg', 2, ['hydralazine'], ''),
-    ('Hydrocortisone 100 mg', 5, ['hydrocortisone'], ''),
-    ('Isosorbide 5 mg (tabs)', 10, ['isosorbide'], ''),
-    ('Lignocaine 400 mg', 3, ['lignocaine 2', 'lidocaine 2', 'lignocaine inj', 'lidocaine inj'], ''),
-    ('Lorazepam', 2, ['lorazepam'], ''),
-    ('Magnesium sulphate', 5, ['magnesium sulph', 'magnesium sulf'], ''),
-    ('Methylprednisolone 40 mg', 2, ['methylprednisolone', 'solu-medrol'], ''),
-    ('Midazolam', 6, ['midazolam'], ''),
-    ('Sodium bicarbonate', 2, ['bicarbonate'], ''),
-    ('Naloxone', 4, ['naloxone'], ''),
-    ('Paracetamol IV (Pafalgan)', 2, ['pafalgan', 'perfalgan', 'paracetamol inf', 'paracetamol iv'], ''),
-    ('Phenytoin inj', 4, ['phenytoin'], ''),
-    ('Promethazine inj', 6, ['promethazine'], ''),
-    ('Oxytocin', 4, ['oxytocin'], ''),
-    ('Suxamethonium chloride', 2, ['suxamethonium'], ''),
-    ('Salbutamol inhaler', 1, ['salbutamol inh', 'salbutamol mdi', 'asthavent'], ''),
-    ('Rocuronium bromide 50 mg', 2, ['rocuronium'], ''),
-    ('Venteze solution 20 ml', 1, ['venteze', 'salbutamol neb', 'salbutamol resp', 'salbutamol sol'], ''),
-    ('Xylocaine spray', 1, ['xylocaine', 'lignocaine spray', 'lidocaine spray'], ''),
-    ('Water for injection', 10, ['water for inj'], ''),
-    ('Warfarin', 0, ['warfarin'], 'not an emergency drug; set to 0 until you decide it belongs'),
-    ('Ambubag', 1, [], 'equipment, not supplied from the pharmacy list'),
-]
-STANDARD_SEEDS = {'Emergency Trolley': TROLLEY_STANDARD_SEED}
-# Items on a standard list that have no expiry date to record.
-NO_EXPIRY_ITEMS = {'Ambubag'}
-# How close an expiry has to be before the watch list shows it, and before
-# it turns red. Ninety days is time to order a replacement; thirty is not.
-EXPIRY_WATCH_DAYS, EXPIRY_URGENT_DAYS = 90, 30
-
-
-# The trolley's own spreadsheet spells some items differently from the list.
-CHECKLIST_ALIASES = {
-    'Etomidate': ['atomidate'],
-    'Methylprednisolone 40 mg': ['methlprednisolone', 'methylpred'],
-    'Sodium bicarbonate': ['na bicarbonate', 'nabicarbonate', 'sodium bicarb'],
-    'Paracetamol IV (Pafalgan)': ['pafalgan', 'perfalgan'],
-    'Lignocaine 400 mg': ['lignocaine 400', 'lignocaine (topical)'],
-}
-CHECKLIST_MAX_BYTES = 5 * 1024 * 1024
-MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
-               'august', 'september', 'october', 'november', 'december']
-
-
-def _ck_key(s: str) -> str:
-    return re.sub(r'[^a-z0-9]', '', (s or '').lower())
-
-
-def _checklist_match(label: str, rows: Docs) -> Doc | None:
-    """The standard-list line a spreadsheet label is, or None.
-
-    Matched on the first seven letters, which is enough to tell dexamethasone
-    from dextrose and hydralazine from hydrocortisone, plus the spellings the
-    trolley's sheet uses for a few items.
-    """
-    key = _ck_key(label)
-    if len(key) < 4:
-        return None
-    hits = []
-    for r in rows:
-        names = [r['item']] + CHECKLIST_ALIASES.get(r['item'], [])
-        if any(key[:7] == _ck_key(n)[:7] for n in names):
-            hits.append(r)
-    if len(hits) > 1:
-        # "Lignocaine 400" and "Lignocaine (topical)": the number decides
-        exact = [r for r in hits if any(_ck_key(n) and key.startswith(_ck_key(n)[:len(key)])
-                                        for n in [r['item']] + CHECKLIST_ALIASES.get(r['item'], []))]
-        hits = exact or hits
-    return hits[0] if len(hits) == 1 else None
-
-
-def _checklist_head(ws: Any) -> tuple[int, int] | None:
-    """(row, column) of the EMERGENCY DRUGS heading, looked for near the top
-    left - April's sheet has it one column in from the others."""
-    for r in range(1, 4):
-        for c_ in range(1, 4):
-            try:
-                v = str(ws.cell(r, c_).value or '').strip().upper()
-            except Exception:
-                return None
-            if v.startswith('EMERGENCY DRUGS'):
-                return r, c_
-    return None
-
-
-def _checklist_sheets(wb: Any) -> list[str]:
-    """The drug sheets in a checklist workbook: the ones headed EMERGENCY DRUGS."""
-    out = []
-    for ws in wb.worksheets:
-        at = _checklist_head(ws)
-        if at and ws.max_row > at[0]:
-            out.append(ws.title)
-    return out
-
-
-def _checklist_date(v: Any) -> tuple[str | None, str | None]:
-    """(ISO date, problem) from an expiry cell as people actually fill them."""
-    if v is None or (isinstance(v, str) and not v.strip()):
-        return None, None
-    if isinstance(v, datetime):
-        return v.date().strftime('%Y-%m-%d'), None
-    if isinstance(v, date):
-        return v.strftime('%Y-%m-%d'), None
-    text = str(v).strip()
-    for fmt in ('%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%d.%m.%Y', '%m/%Y', '%b %Y', '%B %Y'):
-        try:
-            d = datetime.strptime(text, fmt).date()
-            return d.strftime('%Y-%m-%d'), None
-        except ValueError:
-            continue
-    return None, f'"{text}" is not a date'
-
-
-def _read_checklist(data: bytes, sheet: str | None, rows: Docs) -> Doc:
-    """Read one month of the trolley checklist against the standard list.
-
-    Takes the QTY and EXPIRY DATE columns - what the nurse wrote as the count
-    for the month - and leaves the day-by-day ticks alone.
-    """
-    import io
-    import openpyxl
-    wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=False)
-    sheets = _checklist_sheets(wb)
-    if not sheets:
-        raise ValueError('no sheet headed EMERGENCY DRUGS was found in that file')
-    if not sheet or sheet not in sheets:
-        month = MONTH_NAMES[local_now().month - 1]
-        sheet = next((t for t in sheets if t.lower().startswith(month[:3])), sheets[-1])
-    ws = wb[sheet]
-    hrow, hcol = _checklist_head(ws) or (1, 1)
-    lcol = hcol - 1                                   # 0-based, as in the rows
-    head = [str(c.value or '').strip().upper() for c in ws[hrow]]
-    qcol = next((i for i, h in enumerate(head) if h in ('QTY', 'QUANTITY')), lcol + 1)
-    ecol = next((i for i, h in enumerate(head) if h.startswith('EXPIRY')), lcol + 2)
-    values: dict[str, Doc] = {}
-    unmatched, notes = [], []
-    for row in ws.iter_rows(min_row=hrow + 1, values_only=True):
-        label = ' '.join(str(row[lcol] if len(row) > lcol and row[lcol] is not None else '').split())
-        if not label:
-            continue
-        r = _checklist_match(label, rows)
-        if not r:
-            unmatched.append(label)
-            continue
-        qv = row[qcol] if len(row) > qcol else None
-        have: int | None = None
-        if isinstance(qv, (int, float)) and not isinstance(qv, bool) and qv >= 0:
-            have = int(qv)
-        elif isinstance(qv, str) and qv.strip().isdigit():
-            have = int(qv.strip())
-        elif qv not in (None, ''):
-            notes.append(f'{r["item"]}: quantity "{qv}" left blank')
-        exp, bad = _checklist_date(row[ecol] if len(row) > ecol else None)
-        if bad:
-            notes.append(f'{r["item"]}: expiry {bad}, so it is left blank')
-        if have is None:
-            if qv in (None, ''):
-                notes.append(f'{r["item"]}: no quantity on the sheet, left blank')
-            continue
-        values[str(r['_id'])] = {'have': have, 'expiry': exp or ''}
-    return {'sheet': sheet, 'sheets': sheets, 'values': values,
-            'unmatched': unmatched, 'notes': notes}
-
-
-def _std_expires(r: Doc) -> bool:
-    return bool(r.get('expires', r.get('item') not in NO_EXPIRY_ITEMS))
-
-
-def _expiry_watch(db: Database, dept: str, today: date) -> Docs:
-    """Items on the department's list whose last recorded expiry is near or past."""
-    out = []
-    for r in db['dept_standards'].find({'department': dept}).sort('order', 1):
-        exp = r.get('last_expiry')
-        if not exp or not r.get('last_have'):
-            continue
-        try:
-            d = datetime.strptime(exp, '%Y-%m-%d').date()
-        except ValueError:
-            continue
-        left = (d - today).days
-        if left > EXPIRY_WATCH_DAYS:
-            continue
-        out.append({'item': r['item'], 'have': r.get('last_have'), 'expiry': d,
-                    'days': left, 'urgent': left <= EXPIRY_URGENT_DAYS, 'expired': left < 0,
-                    'checked_at': r.get('last_checked_at'), 'checked_by': r.get('last_checked_by')})
-    out.sort(key=lambda x: x['days'])
-    return out
-
-
-def _suggest_med(words: list[str], names: list[str]) -> list[str]:
-    """Pharmacy items matching any of these searches.
-
-    Each search matches when every word of it appears somewhere in the name,
-    in any order: "lignocaine spray" finds "Lignocaine 10% spray", which a
-    plain substring test missed.
-    """
-    out = []
-    for n in names:
-        low = n.lower()
-        if any(all(t in low for t in w.split()) for w in words if w.split()):
-            out.append(n)
-    return out
-
-
-def _standard_list(db: Database, dept: str) -> Docs:
-    """The department's standard list, seeded on first use.
-
-    A link to a pharmacy item is made automatically only when exactly one
-    item matches; anything ambiguous is left for the pharmacist to choose,
-    because topping a trolley up with the wrong strength is worse than not
-    topping it up at all.
-    """
-    col = db['dept_standards']
-    if not col.find_one({'department': dept}) and dept in STANDARD_SEEDS:
-        names = _medication_names()
-        for i, (item, qty, words, note) in enumerate(STANDARD_SEEDS[dept]):
-            found = _suggest_med(words, names)
-            col.insert_one({'department': dept, 'order': i, 'item': item,
-                            'required': qty, 'med_name': found[0] if len(found) == 1 else None,
-                            'words': words, 'note': note})
-    return list(col.find({'department': dept}).sort('order', 1))
-
-
-def _topup_rows(db: Database, dept: str, names: list[str], login: Any) -> tuple[Docs, Doc | None]:
-    """The count form's lines, filled from an imported checklist if there is one."""
-    draft = db['topup_drafts'].find_one({'login': login, 'department': dept})
-    vals = (draft or {}).get('values') or {}
-    out = []
-    for r in _standard_list(db, dept):
-        v = vals.get(str(r['_id'])) or {}
-        out.append({'id': str(r['_id']), 'item': r['item'],
-                    'required': r.get('required', 0) or 0,
-                    'linked': bool(r.get('med_name') and r['med_name'] in names),
-                    'expires': _std_expires(r),
-                    'prefill_have': '' if v.get('have') is None else v['have'],
-                    'last_expiry': (v.get('expiry') if draft and str(r['_id']) in vals
-                                    else r.get('last_expiry')) or ''})
-    return out, draft
-
-
-def _save_request(reqs: Collection, dept: str, user: Doc, lines: Docs,
-                  note: str, extra: Doc | None = None) -> str:
-    now = datetime.utcnow()
-    ref = f"REQ-{now:%Y%m%d}-{uuid4().hex[:4].upper()}"
-    reqs.insert_one({
-        'ref': ref, 'department': dept, 'requested_by': user.get('name', ''),
-        'requested_login': user.get('login'), 'requested_at': now,
-        'note': note[:300], 'status': REQ_PENDING, 'lines': lines, **(extra or {}),
-    })
-    write_audit_entry('CREATE', 'dept_request', ref,
-                      f'{dept} requested {len(lines)} item(s): '
-                      + ', '.join(f"{l['med_name']} x{l['requested']}" for l in lines))
-    return ref
-
-
-@app.route('/requests/standard', methods=['GET', 'POST'])
-@login_required
-def standard_lists() -> ResponseReturnValue:
-    """Admin: what each department with a standard list should hold."""
-    if session['user'].get('role') != 'admin':
-        flash('Access denied. Only admins can change a standard list.')
-        return redirect(url_for('department_requests'))
-    message_class, message = _flashed_banner()
-    dept = (request.values.get('department') or 'Emergency Trolley').strip()
-    if dept not in REQUEST_DEPARTMENTS:
-        dept = 'Emergency Trolley'
-    db = get_mongo_client()['pharmacy_db']
-    col = db['dept_standards']
-    names = _medication_names()
-    rows = _standard_list(db, dept)
-
-    if request.method == 'POST':
-        action = request.form.get('action')
-        if action == 'save':
-            problems, changes = [], []
-            for r in rows:
-                rid = str(r['_id'])
-                raw = (request.form.get(f'required__{rid}') or '').strip()
-                med = (request.form.get(f'med__{rid}') or '').strip() or None
-                try:
-                    req_q = int(raw)
-                    if req_q < 0:
-                        raise ValueError
-                except ValueError:
-                    problems.append(f"{r['item']}: should-hold must be a whole number")
-                    continue
-                if med and med not in names:
-                    problems.append(f'{r["item"]}: "{med}" is not on the pharmacy list')
-                    continue
-                if req_q != r.get('required') or med != r.get('med_name'):
-                    col.update_one({'_id': r['_id']}, {'$set': {'required': req_q, 'med_name': med}})
-                    changes.append(f"{r['item']} {r.get('required')}->{req_q}"
-                                   + (f' linked to {med}' if med != r.get('med_name') else ''))
-            if changes:
-                write_audit_entry('UPDATE', 'dept_standard', dept, '; '.join(changes))
-            msg = (f'{len(changes)} line(s) of the {dept} list updated.' if changes
-                   else 'Nothing was changed.')
-            if problems:
-                msg += ' Not saved: ' + '; '.join(problems) + '.'
-            flash(msg, 'partial' if problems or not changes else 'success')
-        elif action == 'add':
-            item = (request.form.get('item') or '').strip()
-            try:
-                qty = int(request.form.get('required') or '')
-            except ValueError:
-                qty = -1
-            med = (request.form.get('med_name') or '').strip() or None
-            if not item or qty < 0:
-                flash('Give the item a name and a whole-number quantity.')
-            elif med and med not in names:
-                flash(f'"{med}" is not on the pharmacy list.')
-            else:
-                last = col.find_one({'department': dept}, sort=[('order', -1)])
-                col.insert_one({'department': dept, 'order': (last or {}).get('order', -1) + 1,
-                                'item': item, 'required': qty, 'med_name': med,
-                                'words': [], 'note': ''})
-                write_audit_entry('CREATE', 'dept_standard', dept, f'added {item} x{qty}')
-                flash(f'{item} added to the {dept} list.', 'success')
-        elif action == 'remove':
-            try:
-                doc = col.find_one({'_id': ObjectId(request.form.get('row_id') or '')})
-            except (InvalidId, TypeError):
-                doc = None
-            if doc:
-                col.delete_one({'_id': doc['_id']})
-                write_audit_entry('DELETE', 'dept_standard', dept, f"removed {doc['item']}")
-                flash(f"{doc['item']} removed from the {dept} list.", 'success')
-        return redirect(url_for('standard_lists', department=dept))
-
-    shown = []
-    for r in rows:
-        shown.append({'id': str(r['_id']), 'item': r['item'], 'required': r.get('required', 0),
-                      'med_name': r.get('med_name') or '', 'note': r.get('note', ''),
-                      'suggest': ([] if r.get('med_name')
-                                  else _suggest_med(r.get('words') or [], names)[:6])})
-    lists = sorted(set(db['dept_standards'].distinct('department')) | set(STANDARD_SEEDS))
-    return render_template('standard_lists.html', nav_links=get_nav_links(),
-                           message=message, message_class=message_class,
-                           dept=dept, rows=shown, med_names=names,
-                           departments=REQUEST_DEPARTMENTS, lists=lists,
-                           unlinked=sum(1 for r in shown if not r['med_name'] and r['required']))
-
-
-@app.route('/requests', methods=['GET', 'POST'])
-@login_required
-def department_requests() -> ResponseReturnValue:
-    user = session['user']
-    me = user.get('name', '')
-    dept_user = _is_department(user)
-    my_dept = user.get('department') or ''
-    message_class, message = _flashed_banner()
-
-    try:
-        db = get_mongo_client()['pharmacy_db']
-        reqs, medications, transactions = (db['dept_requests'], db['medications'],
-                                           db['transactions'])
-
-        if request.method == 'POST':
-            action = request.form.get('action')
-
-            if action == 'post':
-                if dept_user:
-                    dept = my_dept
-                else:
-                    # Staff may post for a department that phoned it in.
-                    dept = (request.form.get('department') or '').strip()
-                if dept not in REQUEST_DEPARTMENTS:
-                    flash('This account is not linked to a department. Ask the '
-                          'pharmacist to set it up again.' if dept_user
-                          else 'Choose the department the request is for.')
-                    return redirect(url_for('department_requests'))
-                names = request.form.getlist('med_name')
-                qtys = request.form.getlist('quantity')
-                lines, problems, seen = [], [], set()
-                for raw_name, raw_qty in zip(names, qtys):
-                    name, raw_qty = (raw_name or '').strip(), (raw_qty or '').strip()
-                    if not name and not raw_qty:
-                        continue
-                    if not name:
-                        problems.append(f'a quantity of {raw_qty} has no item')
-                        continue
-                    try:
-                        qty = int(raw_qty)
-                    except ValueError:
-                        problems.append(f'{name}: the quantity must be a whole number')
-                        continue
-                    if qty < 1:
-                        problems.append(f'{name}: the quantity must be at least 1')
-                        continue
-                    med = medications.find_one({'name': name}, {'_id': 0, 'name': 1})
-                    if not med:
-                        problems.append(f'"{name}" is not on the pharmacy list - '
-                                        f'choose it from the suggestions')
-                        continue
-                    if name in seen:
-                        problems.append(f'{name} is on the request twice - put the '
-                                        f'total on one line')
-                        continue
-                    seen.add(name)
-                    lines.append({'med_name': name, 'requested': qty,
-                                  'given': None, 'unmet': None})
-                # Nothing is posted until the whole request is right, so the
-                # pharmacy never serves half of something the ward meant
-                # differently.
-                if problems:
-                    flash('The request was not sent: ' + '; '.join(problems) + '.')
-                    return redirect(url_for('department_requests'))
-                if not lines:
-                    flash('Add at least one item to the request.')
-                    return redirect(url_for('department_requests'))
-                if len(lines) > REQ_MAX_LINES:
-                    flash(f'A request can hold up to {REQ_MAX_LINES} items. '
-                          f'Split it into two.')
-                    return redirect(url_for('department_requests'))
-                ref = _save_request(reqs, dept, user, lines,
-                                    (request.form.get('note') or '').strip()[:200])
-                flash(f'Request {ref} sent to the pharmacy with {len(lines)} '
-                      f'item{"" if len(lines) == 1 else "s"}.', 'success')
-                return redirect(url_for('department_requests'))
-
-            if action == 'import_checklist':
-                # Fills the count form from the department's own spreadsheet
-                # for checking. Nothing is sent: the counts go into the form,
-                # and the request is made only when someone presses Send.
-                dept = my_dept if dept_user else (request.form.get('department') or '').strip()
-                back = url_for('department_requests', topup=None if dept_user else dept,
-                               _anchor='topup')
-                standard = _standard_list(db, dept) if dept in REQUEST_DEPARTMENTS else []
-                upload = request.files.get('checklist')
-                if not standard:
-                    flash('Choose a department with a standard list first.')
-                    return redirect(url_for('department_requests'))
-                if not upload or not upload.filename:
-                    flash('Choose the checklist spreadsheet to read.')
-                    return redirect(back)
-                if not upload.filename.lower().endswith(('.xlsx', '.xlsm')):
-                    flash('That is not an Excel workbook (.xlsx). Save the checklist as .xlsx and try again.')
-                    return redirect(back)
-                data = upload.read(CHECKLIST_MAX_BYTES + 1)
-                if len(data) > CHECKLIST_MAX_BYTES:
-                    flash('That file is too large to be the checklist.')
-                    return redirect(back)
-                try:
-                    found = _read_checklist(data, (request.form.get('sheet') or '').strip() or None,
-                                            standard)
-                except Exception as e:
-                    app.logger.warning(f'checklist import failed: {e}')
-                    flash(f'The checklist could not be read: {e}.' if isinstance(e, ValueError)
-                          else 'The checklist could not be read. Check it is the trolley '
-                               'checklist saved as .xlsx.')
-                    return redirect(back)
-                db['topup_drafts'].delete_many({'login': user.get('login'), 'department': dept})
-                db['topup_drafts'].insert_one({
-                    'login': user.get('login'), 'department': dept,
-                    'values': found['values'], 'sheet': found['sheet'],
-                    'sheets': found['sheets'], 'notes': found['notes'],
-                    'unmatched': found['unmatched'], 'created_at': datetime.utcnow()})
-                msg = (f"Filled from \"{found['sheet']}\": {len(found['values'])} of "
-                       f"{len(standard)} items. Nothing has been sent - check the counts "
-                       f"and dates below, then press Send Top-up Request.")
-                if found['notes']:
-                    msg += ' Check: ' + '; '.join(found['notes']) + '.'
-                if found['unmatched']:
-                    msg += (' On the sheet but not on the list, left out: '
-                            + ', '.join(found['unmatched']) + '.')
-                flash(msg, 'partial' if found['notes'] or found['unmatched'] else 'success')
-                return redirect(back)
-
-            if action == 'topup':
-                dept = my_dept if dept_user else (request.form.get('department') or '').strip()
-                if dept not in REQUEST_DEPARTMENTS:
-                    flash('Choose the department to top up.')
-                    return redirect(url_for('department_requests'))
-                standard = _standard_list(db, dept)
-                if not standard:
-                    flash(f'{dept} has no standard list.')
-                    return redirect(url_for('department_requests'))
-                on_file = set(_medication_names())
-                tlines: list[dict[str, Any]] = []
-                counts: dict[str, int] = {}
-                tproblems: list[str] = []
-                uncounted: list[str] = []
-                not_stocked: list[str] = []
-                expired_on: list[str] = []
-                expiries: dict[str, str] = {}
-                checked: list[tuple[Any, int, str | None]] = []
-                today_local = local_now().date()
-                for r in standard:
-                    raw = (request.form.get(f"have__{r['_id']}") or '').strip()
-                    if raw == '':
-                        if r.get('required'):
-                            uncounted.append(r['item'])
-                        continue
-                    try:
-                        have = int(raw)
-                        if have < 0:
-                            raise ValueError
-                    except ValueError:
-                        tproblems.append(f"{r['item']}: enter how many are there as a whole number")
-                        continue
-                    # The earliest expiry of what is there. Optional: a line
-                    # without one is still sent, it just cannot appear on the
-                    # expiry watch until a date is given.
-                    raw_exp = (request.form.get(f"expiry__{r['_id']}") or '').strip()
-                    exp_iso = None
-                    if have > 0 and _std_expires(r) and raw_exp:
-                        try:
-                            exp_d = datetime.strptime(raw_exp, '%Y-%m-%d').date()
-                        except ValueError:
-                            tproblems.append(f"{r['item']}: the expiry date is not a date")
-                            continue
-                        # A date picker cannot mistype, but it can land on the
-                        # wrong year; ten years either way is never right here.
-                        if abs((exp_d - today_local).days) > 3653:
-                            tproblems.append(f"{r['item']}: {exp_d:%d %b %Y} looks like the wrong year")
-                            continue
-                        exp_iso = exp_d.strftime('%Y-%m-%d')
-                        if exp_d < today_local:
-                            # Expired stock is not stock. It is asked for again
-                            # in full, and the trolley is told to take it off.
-                            expired_on.append(f"{r['item']} ({exp_d:%d %b %Y})")
-                            have_usable = 0
-                        else:
-                            have_usable = have
-                    else:
-                        have_usable = have
-                    counts[r['item']] = have
-                    if exp_iso:
-                        expiries[r['item']] = exp_iso
-                    checked.append((r['_id'], have, exp_iso))
-                    need = max(0, (r.get('required') or 0) - have_usable)
-                    if not need:
-                        continue
-                    med = r.get('med_name')
-                    if not med or med not in on_file:
-                        not_stocked.append(f"{r['item']} x{need}")
-                        continue
-                    if any(l['med_name'] == med for l in tlines):
-                        # two list tlines on one pharmacy item: add them up
-                        for l in tlines:
-                            if l['med_name'] == med:
-                                l['requested'] += need
-                        continue
-                    tlines.append({'med_name': med, 'requested': need, 'given': None,
-                                  'unmet': None, 'standard_item': r['item']})
-                # A blank box is a line not counted this time, and is left out
-                # - a busy shift can top up the few items it has checked. Only
-                # a box with something unreadable in it stops the request,
-                # and so does a form with nothing counted at all.
-                if not counts and not tproblems:
-                    tproblems.append('nothing was counted - enter what is there '
-                                     'for at least one item')
-                if tproblems:
-                    flash('The top-up was not sent: ' + '; '.join(tproblems) + '.')
-                    return redirect(url_for('department_requests',
-                                            topup=None if dept_user else dept,
-                                            _anchor='topup'))
-                # What the check found, kept on the list itself, so the expiry
-                # watch is current even when nothing needed topping up.
-                stamp = datetime.utcnow()
-                for rid, have_n, exp_iso in checked:
-                    db['dept_standards'].update_one({'_id': rid}, {'$set': {
-                        'last_have': have_n, 'last_expiry': exp_iso,
-                        'last_checked_at': stamp, 'last_checked_by': me}})
-                expired_msg = (' Expired, take off the trolley: ' + ', '.join(expired_on) + '.'
-                               if expired_on else '')
-                skipped = (f' {len(uncounted)} item{"" if len(uncounted) == 1 else "s"} '
-                           f'not counted this time {"was" if len(uncounted) == 1 else "were"} left out.'
-                           if uncounted else '')
-                if not tlines:
-                    msg = (f'Every item counted is at standard - nothing to top up.{skipped}'
-                           if uncounted else
-                           f'{dept} is at its standard list - nothing to top up.')
-                    msg += ' The count and expiry dates are recorded.' + expired_msg
-                    db['topup_drafts'].delete_many({'login': user.get('login'), 'department': dept})
-                    if not_stocked:
-                        msg += ' Short but not on the pharmacy list: ' + ', '.join(not_stocked) + '.'
-                    flash(msg, 'success' if not not_stocked else 'partial')
-                    return redirect(url_for('department_requests',
-                                            topup=None if dept_user else dept))
-                note = ('Top-up to standard list' if not uncounted else
-                        f'Top-up to standard list ({len(counts)} of '
-                        f'{len(counts) + len(uncounted)} items counted)')
-                extra_note = (request.form.get('note') or '').strip()
-                if extra_note:
-                    note += f' - {extra_note}'
-                if not_stocked:
-                    note += '. Also short, not on the pharmacy list: ' + ', '.join(not_stocked)
-                if expired_on:
-                    note += '. Expired on the trolley, replaced in full: ' + ', '.join(expired_on)
-                db['topup_drafts'].delete_many({'login': user.get('login'), 'department': dept})
-                ref = _save_request(reqs, dept, user, tlines, note,
-                                    {'kind': 'topup', 'topup_counts': counts,
-                                     'topup_expiry': expiries, 'topup_expired': expired_on})
-                flash(f'Top-up {ref} sent to the pharmacy: {len(tlines)} '
-                      f'item{"" if len(tlines) == 1 else "s"} to bring {dept} up to standard.'
-                      + (f' Not on the pharmacy list: {", ".join(not_stocked)}.' if not_stocked else '')
-                      + expired_msg + skipped, 'partial' if expired_on else 'success')
-                return redirect(url_for('department_requests'))
-
-            doc = None
-            try:
-                doc = reqs.find_one({'_id': ObjectId(request.form.get('request_id') or '')})
-            except (InvalidId, TypeError):
-                doc = None
-            if not doc:
-                flash('That request was not found.')
-                return redirect(url_for('department_requests'))
-
-            if action == 'cancel':
-                if dept_user and doc.get('department') != my_dept:
-                    flash('That request belongs to another department.')
-                    return redirect(url_for('department_requests'))
-                done = reqs.update_one({'_id': doc['_id'], 'status': REQ_PENDING},
-                                       {'$set': {'status': REQ_CANCELLED,
-                                                 'cancelled_by': me,
-                                                 'cancelled_at': datetime.utcnow()}})
-                if not done.modified_count:
-                    flash(f"{doc['ref']} has already been dealt with and cannot be "
-                          f"cancelled ({doc.get('status')}).")
-                    return redirect(url_for('department_requests'))
-                write_audit_entry('UPDATE', 'dept_request', doc['ref'], f'cancelled by {me}')
-                flash(f"Request {doc['ref']} cancelled.", 'success')
-                return redirect(url_for('department_requests'))
-
-            # Serving and declining are the pharmacy's to do.
-            if dept_user:
-                flash('Only the pharmacy can serve or decline a request.')
-                return redirect(url_for('department_requests'))
-
-            if action == 'decline':
-                reason = (request.form.get('reason') or '').strip()
-                if not reason:
-                    flash('Give the department a reason for declining.')
-                    return redirect(url_for('department_requests'))
-                # On a request already part-served, this declines only what is
-                # still waiting; what was given stays given.
-                lines = doc.get('lines') or []
-                left = [l for l in lines if not _line_done(l)]
-                dlines: Docs = [l if _line_done(l) else {**l, 'given': 0, 'unmet': 0, 'declined': True}
-                                for l in lines]
-                status = _final_status(dlines) if len(left) < len(lines) else REQ_DECLINED
-                done = reqs.update_one({'_id': doc['_id'], 'status': {'$in': REQ_OPEN}},
-                                       {'$set': {'status': status, 'lines': dlines,
-                                                 'decline_reason': reason[:200],
-                                                 'served_by': me,
-                                                 'served_at': datetime.utcnow()}})
-                if not done.modified_count:
-                    flash(f"{doc['ref']} is no longer waiting ({doc.get('status')}).")
-                    return redirect(url_for('department_requests'))
-                what = ('declined' if len(left) == len(lines)
-                        else f"remaining {len(left)} item(s) declined")
-                write_audit_entry('UPDATE', 'dept_request', doc['ref'], f'{what} by {me}: {reason}')
-                flash(f"Request {doc['ref']} from {doc['department']}: {what}.", 'partial')
-                return redirect(url_for('department_requests'))
-
-            if action == 'serve':
-                if doc.get('status') not in REQ_OPEN:
-                    flash(f"{doc['ref']} is no longer waiting - it has already been "
-                          f"dealt with ({doc.get('status')}).")
-                    return redirect(url_for('department_requests'))
-                received_by = (request.form.get('received_by') or '').strip()
-                if not received_by:
-                    flash('Enter who from the department is collecting the stock.')
-                    return redirect(url_for('department_requests', _anchor=doc['ref']))
-                lines = doc.get('lines') or []
-                # Which lines to serve now. The page sends pick=1 with a tick
-                # per line; a line left unticked stays waiting for later.
-                picking = bool(request.form.get('pick'))
-                plan, problems = [], []
-                for i, ln in enumerate(lines):
-                    if _line_done(ln):
-                        continue                    # served on an earlier visit
-                    if picking and not request.form.get(f'now__{i}'):
-                        continue                    # left for later
-                    raw = (request.form.get(f'give__{i}') or '').strip()
-                    try:
-                        give = int(raw or '0')
-                    except ValueError:
-                        problems.append(f"{ln['med_name']}: give a whole number")
-                        continue
-                    asked = ln.get('requested', 0) or 0
-                    med = medications.find_one({'name': ln['med_name']})
-                    on_hand = (med.get('balance', 0) or 0) if med else 0
-                    if give < 0:
-                        problems.append(f"{ln['med_name']}: cannot give a negative amount")
-                    elif give > asked:
-                        problems.append(f"{ln['med_name']}: {give} is more than the "
-                                        f"{asked} asked for")
-                    elif give > on_hand:
-                        problems.append(f"{ln['med_name']}: only {_num(on_hand)} on hand")
-                    plan.append((i, ln, med, give, asked, on_hand))
-                # All lines are checked before any stock moves, so a typing
-                # error on line 5 does not leave lines 1 to 4 issued.
-                if problems:
-                    flash(f"Nothing was issued for {doc['ref']}: " + '; '.join(problems) + '.')
-                    return redirect(url_for('department_requests', _anchor=doc['ref']))
-                if not plan:
-                    flash(f"Tick at least one item of {doc['ref']} to serve now.")
-                    return redirect(url_for('department_requests', _anchor=doc['ref']))
-                # Claim it first. Two people serving the same request from two
-                # screens would otherwise issue it twice.
-                was_status = doc.get('status')
-                claim = reqs.update_one({'_id': doc['_id'], 'status': {'$in': REQ_OPEN}},
-                                        {'$set': {'status': 'Serving', 'served_by': me}})
-                if not claim.modified_count:
-                    now_doc = reqs.find_one({'_id': doc['_id']}) or {}
-                    flash(f"{doc['ref']} is no longer waiting - it has just been "
-                          f"dealt with ({now_doc.get('status')}).")
-                    return redirect(url_for('department_requests'))
-                now = datetime.utcnow()
-                served_note = (request.form.get('serve_note') or '').strip()[:200]
-                new_lines: Docs = [dict(l) for l in lines]
-                issued, short = [], []
-                for i, ln, med, give, asked, on_hand in plan:
-                    # The part that could not be given for want of stock.
-                    # Giving less than is on the shelf is the pharmacist's
-                    # decision, not missing stock, so it is not demand unmet.
-                    unmet = max(0, asked - on_hand) if give < asked else 0
-                    price = (med or {}).get('price', 0) or 0
-                    if give > 0 and med:
-                        medications.update_one({'name': ln['med_name']},
-                                               {'$inc': {'balance': -give}})
-                        transactions.insert_one({
-                            'type': 'internal_issue', 'issue_id': doc['ref'],
-                            'request_ref': doc['ref'],
-                            'med_name': ln['med_name'], 'quantity': give,
-                            'price': price, 'line_value': give * price,
-                            'department': doc['department'], 'issued_to': received_by,
-                            'note': f"request {doc['ref']}" + (f' - {served_note}' if served_note else ''),
-                            'batch': med.get('batch'), 'schedule': med.get('schedule'),
-                            'user': me, 'timestamp': now,
-                        })
-                        issued.append(f"{ln['med_name']} x{give}")
-                    if unmet > 0:
-                        transactions.insert_one({
-                            'type': 'unmet_demand', 'request_ref': doc['ref'],
-                            'med_name': ln['med_name'],
-                            'quantity': 0,          # never moves stock
-                            'requested': asked, 'given': give, 'shortfall': unmet,
-                            'price': price, 'shortfall_value': unmet * price,
-                            'patient': '', 'department': doc['department'],
-                            'date': local_now().strftime('%Y-%m-%d'),
-                            'user': me, 'timestamp': now,
-                        })
-                        short.append(f"{ln['med_name']} {unmet} short")
-                    new_lines[i] = {**ln, 'given': give, 'unmet': unmet, 'served_by': me,
-                                    'served_at': now, 'received_by': received_by}
-                left = [l for l in new_lines if not _line_done(l)]
-                status = REQ_PROGRESS if left else _final_status(new_lines)
-                reqs.update_one({'_id': doc['_id']}, {'$set': {
-                    'status': status, 'lines': new_lines, 'served_by': me,
-                    'served_at': now, 'received_by': received_by,
-                    'serve_note': served_note}})
-                write_audit_entry('UPDATE', 'dept_request', doc['ref'],
-                                  f"{'part of it ' if left or was_status == REQ_PROGRESS else ''}"
-                                  f"served by {me} to {doc['department']} "
-                                  f"({received_by}): "
-                                  + (', '.join(issued) or 'nothing issued')
-                                  + (f"; unmet: {', '.join(short)}" if short else '')
-                                  + (f"; {len(left)} item(s) still waiting" if left else ''))
-                now_given = sum(p_[3] for p_ in plan)
-                now_asked = sum(p_[4] for p_ in plan)
-                if left:
-                    msg = (f"{doc['ref']} for {doc['department']}: {len(plan)} item"
-                           f"{'' if len(plan) == 1 else 's'} served ({now_given} of {now_asked} units). "
-                           f"{len(left)} still waiting - it stays in the list to finish later.")
-                else:
-                    total_asked = sum(l['requested'] for l in new_lines if not l.get('declined'))
-                    total_given = sum(l.get('given') or 0 for l in new_lines if not l.get('declined'))
-                    msg = (f"{doc['ref']} for {doc['department']}: {status.lower()} "
-                           f"({total_given} of {total_asked} units).")
-                if short:
-                    msg += ' Recorded as unmet demand: ' + '; '.join(short) + '.'
-                flash(msg, 'success' if status == REQ_SERVED else 'partial')
-                return redirect(url_for('department_requests'))
-
-            flash('Unknown action.')
-            return redirect(url_for('department_requests'))
-
-        # ---- GET ----------------------------------------------------------
-        names = _medication_names()
-        if dept_user:
-            mine = [_request_row(d) for d in
-                    reqs.find({'department': my_dept}).sort('requested_at', -1).limit(60)]
-            standard, draft = _topup_rows(db, my_dept, names, user.get('login'))
-            watch = {my_dept: _expiry_watch(db, my_dept, local_now().date())} if standard else {}
-            return render_template(
-                'requests.html', nav_links=get_nav_links(),
-                message=message, message_class=message_class,
-                standard=standard, watch=watch, watch_days=EXPIRY_WATCH_DAYS, draft=draft,
-                dept_user=True, my_dept=my_dept, med_names=names,
-                mine=mine, pending=[], history=[], departments=REQUEST_DEPARTMENTS,
-                waited=_waited, max_lines=REQ_MAX_LINES)
-
-        pending_docs = list(reqs.find({'status': {'$in': REQ_OPEN + ['Serving']}})
-                            .sort('requested_at', 1))
-        wanted = sorted({ln.get('med_name', '') for d in pending_docs
-                         for ln in d.get('lines') or []})
-        balances = {m['name']: m.get('balance', 0) for m in
-                    medications.find({'name': {'$in': wanted}}, {'_id': 0, 'name': 1, 'balance': 1})}
-        pending = [_request_row(d, balances) for d in pending_docs]
-        dept_filter = (request.args.get('department') or '').strip()
-        hq: Query = {'status': {'$nin': REQ_OPEN + ['Serving']}}
-        if dept_filter in REQUEST_DEPARTMENTS:
-            hq['department'] = dept_filter
-        history = [_request_row(d) for d in
-                   reqs.find(hq).sort('requested_at', -1).limit(100)]
-        # The count form, for a check done under a staff login. Seeding the
-        # trolley list here too means it is there the first time anyone opens
-        # this page, whichever login they use.
-        for seeded in STANDARD_SEEDS:
-            _standard_list(db, seeded)
-        topup_lists = sorted(d for d in db['dept_standards'].distinct('department')
-                             if d in REQUEST_DEPARTMENTS)
-        topup_dept = (request.args.get('topup') or '').strip()
-        if topup_dept not in topup_lists:
-            topup_dept = ('Emergency Trolley' if 'Emergency Trolley' in topup_lists
-                          else (topup_lists[0] if topup_lists else ''))
-        topup_standard, draft = (_topup_rows(db, topup_dept, names, user.get('login'))
-                                 if topup_dept else ([], None))
-        today_l = local_now().date()
-        watch = {d: w for d in topup_lists if (w := _expiry_watch(db, d, today_l))}
-        return render_template(
-            'requests.html', nav_links=get_nav_links(),
-            message=message, message_class=message_class,
-            topup_lists=topup_lists, topup_dept=topup_dept, topup_standard=topup_standard,
-            watch=watch, watch_days=EXPIRY_WATCH_DAYS, draft=draft,
-            # Open when someone asked for it: a department chosen, a checklist
-            # just read, or a count sent back to be put right.
-            topup_open=bool(request.args.get('topup') or draft),
-            stock={m['name']: _num(m.get('balance', 0) or 0)
-                   for m in medications.find({'name': {'$in': names}},
-                                             {'_id': 0, 'name': 1, 'balance': 1})},
-            dept_user=False, my_dept='', med_names=names,
-            mine=[], pending=pending, history=history,
-            departments=REQUEST_DEPARTMENTS, dept_filter=dept_filter,
-            past_receivers=_past_receivers(db),
-            waited=_waited, max_lines=REQ_MAX_LINES)
-    except Exception as e:
-        app.logger.error(f'requests failed: {e}')
-        if request.method == 'POST':
-            flash('That could not be saved. Please try again.')
-            return redirect(url_for('department_requests'))
-        # Not a redirect: for a department login every other page leads
-        # back here, so redirecting on an error would loop.
-        return render_template(
-            'requests.html', nav_links=get_nav_links(),
-            message='Could not load the requests. Please try again in a moment.',
-            message_class='error', dept_user=dept_user, my_dept=my_dept,
-            med_names=[], mine=[], pending=[], history=[],
-            departments=REQUEST_DEPARTMENTS, dept_filter='', past_receivers=[],
-            waited=_waited, max_lines=REQ_MAX_LINES), 500
 
 
 @app.route('/temperature', methods=['GET', 'POST'])
@@ -6419,808 +4424,6 @@ def temperature() -> ResponseReturnValue:
             charts=[], edit_reading=None, chart=''), 500
 
 
-# ============================================================================
-# EQUIPMENT LOANS — crutches, moon boots, arm slings
-# ============================================================================
-# These are NOT stock. A dispensed tablet is gone; a loaned crutch is still
-# owned by the pharmacy while it sits in a patient's house. That difference
-# drives every design decision here:
-#
-#   * Items live in their own register (loan_items), one document per physical
-#     item, so "who has CR-003 and since when" is answerable. A pool count
-#     cannot answer it, and a pool count is useless the moment something is
-#     six weeks overdue and you need to go and find it.
-#
-#   * Availability is DERIVED, never stored. loan_items.status holds only the
-#     shelf states (Available / Damaged / Retired / Lost). Whether an item is
-#     out is decided by the loans ledger alone. Storing an "on loan" flag as
-#     well would give two sources of truth that drift the first time a request
-#     fails halfway, and the register would start lying about what is on the
-#     shelf. This is the same rule the stock ledger follows.
-
-LOAN_ITEM_TYPES = ['Crutches', 'Moon Boot', 'Arm Sling',
-                   'Walking Frame', 'Wheelchair', 'Other']
-# Prefix for auto-generated item codes, so a code reads as what it is.
-LOAN_TYPE_PREFIX = {'Crutches': 'CR', 'Moon Boot': 'MB', 'Arm Sling': 'AS',
-                    'Walking Frame': 'WF', 'Wheelchair': 'WC', 'Other': 'EQ'}
-LOAN_CONDITIONS = ['Good', 'Fair', 'Damaged']
-# Shelf states. "On loan" is deliberately absent — see the note above.
-LOAN_SHELF_STATUSES = ['Available', 'Damaged', 'Retired', 'Lost']
-LOAN_STATUS_OUT, LOAN_STATUS_RETURNED = 'Out', 'Returned'
-LOAN_STATUS_LOST = 'Lost'
-LOAN_DEFAULT_DAYS = 14          # typical fracture follow-up interval
-LOAN_MAX_DAYS = 365
-
-LOAN_FIELD_LABELS = {
-    'patient_name': 'patient', 'patient_contact': 'contact',
-    'issued_date': 'issued', 'due_date': 'due',
-    'condition_out': 'condition out', 'note': 'note',
-}
-
-
-def _loan_dates_problem(issued: datetime, due: datetime, today: date) -> str | None:
-    """Why these loan dates cannot be right, or None. Shared by issue and edit."""
-    if issued.date() > today:
-        return 'A loan cannot be dated in the future.'
-    if due < issued:
-        return 'The due date cannot be before the issue date.'
-    if (due - issued).days > LOAN_MAX_DAYS:
-        return (f'A loan longer than {LOAN_MAX_DAYS} days is probably '
-                f'a typing error. Shorten it or write the item off.')
-    return None
-
-
-def _loan_show(v: Any) -> str:
-    """A loan field as a person reads it in a flash or audit line."""
-    if isinstance(v, datetime):
-        return f'{v:%Y-%m-%d}'
-    return f'"{v}"' if isinstance(v, str) else ('-' if v is None else str(v))
-
-
-def _loan_by_id(col: Collection, raw: Any) -> Doc | None:
-    try:
-        return col.find_one({'_id': ObjectId(raw or '')})
-    except (InvalidId, TypeError):
-        return None
-
-
-def _loan_next_code(items: Collection, item_type: str) -> str:
-    """Next free code for a type, e.g. CR-004.
-
-    Scans existing codes rather than keeping a counter, so a deleted or
-    manually-typed code can never cause a collision with a generated one.
-    """
-    prefix = LOAN_TYPE_PREFIX.get(item_type, 'EQ')
-    used = set()
-    for doc in items.find({'item_code': {'$regex': f'^{prefix}-'}},
-                          {'item_code': 1}):
-        tail = str(doc.get('item_code', '')).split('-', 1)[-1]
-        if tail.isdigit():
-            used.add(int(tail))
-    n = 1
-    while n in used:
-        n += 1
-    return f'{prefix}-{n:03d}'
-
-
-def _open_loans_by_code(loans: Collection) -> dict[str, Doc]:
-    """{item_code: open loan} — the single source of truth for 'is it out'."""
-    return {doc['item_code']: doc
-            for doc in loans.find({'status': LOAN_STATUS_OUT})}
-
-
-def _loan_rows(items: Collection, loans: Collection, today: date) -> Docs:
-    """The asset register with availability folded in.
-
-    One pass over each collection, so the page cost does not grow with the
-    number of items the way a per-item lookup would.
-    """
-    open_by_code = _open_loans_by_code(loans)
-    rows = []
-    for it in items.find().sort('item_code', 1):
-        code = it.get('item_code', '')
-        loan = open_by_code.get(code)
-        shelf = it.get('status', 'Available')
-        if loan:
-            due = loan.get('due_date')
-            overdue = bool(due and due.date() < today)
-            state = 'Overdue' if overdue else 'On loan'
-        else:
-            state = shelf
-            overdue = False
-        rows.append({
-            'code': code,
-            'item_type': it.get('item_type', ''),
-            'description': it.get('description', ''),
-            'size': it.get('size', ''),
-            'condition': it.get('condition', ''),
-            'shelf': shelf,
-            'state': state,
-            'overdue': overdue,
-            'loan': loan,
-            'note': it.get('note', ''),
-            'id': str(it['_id']),
-        })
-    return rows
-
-
-def _loan_available(items: Collection, loans: Collection) -> Docs:
-    """Items that can be lent right now: on the shelf AND not already out."""
-    out = set(_open_loans_by_code(loans))
-    return [it for it in items.find({'status': 'Available'}).sort('item_code', 1)
-            if it.get('item_code') not in out]
-
-
-def _loan_activity(loans: Collection, months: int = 6) -> Docs:
-    """Loans issued / returned / still out, by month, in one aggregation."""
-    today = datetime.utcnow().date()
-    first = today.replace(day=1)
-    span = []
-    y, m = first.year, first.month
-    for _ in range(months):
-        span.append((y, m))
-        m -= 1
-        if m == 0:
-            y, m = y - 1, 12
-    span.reverse()
-    start = datetime(span[0][0], span[0][1], 1)
-
-    issued: dict[tuple[int, int], int] = {}
-    returned: dict[tuple[int, int], int] = {}
-    days_out: dict[tuple[int, int], list[int]] = {}
-    for doc in loans.find({'issued_date': {'$gte': start}}):
-        d = doc.get('issued_date')
-        if not d:
-            continue
-        key = (d.year, d.month)
-        issued[key] = issued.get(key, 0) + 1
-    for doc in loans.find({'returned_date': {'$gte': start}}):
-        d = doc.get('returned_date')
-        if not d:
-            continue
-        key = (d.year, d.month)
-        returned[key] = returned.get(key, 0) + 1
-        iss = doc.get('issued_date')
-        if iss:
-            days_out.setdefault(key, []).append((d - iss).days)
-
-    rows = []
-    for key in span:
-        spans = days_out.get(key, [])
-        rows.append({
-            'label': datetime(key[0], key[1], 1).strftime('%b %Y'),
-            'issued': issued.get(key, 0),
-            'returned': returned.get(key, 0),
-            'avg_days': round(sum(spans) / len(spans), 1) if spans else None,
-        })
-    return rows
-
-
-@app.route('/loan-items', methods=['GET', 'POST'])
-@login_required
-def loan_items() -> ResponseReturnValue:
-    if session['user'].get('role') != 'admin':
-        flash('Access denied. Only admins can change the equipment register.')
-        return redirect(url_for('loans'))
-
-    message_class, message = _flashed_banner()
-    today = datetime.utcnow().date()
-
-    try:
-        db = get_mongo_client()['pharmacy_db']
-        items, loans_col = db['loan_items'], db['loans']
-
-        if request.method == 'POST':
-            action = request.form.get('action')
-
-            if action == 'add_item':
-                item_type = (request.form.get('item_type') or '').strip()
-                if item_type not in LOAN_ITEM_TYPES:
-                    flash('Choose a valid item type.')
-                    return redirect(url_for('loan_items'))
-                condition = (request.form.get('condition') or 'Good').strip()
-                if condition not in LOAN_CONDITIONS:
-                    condition = 'Good'
-                code = (request.form.get('item_code') or '').strip().upper()
-                if not code:
-                    code = _loan_next_code(items, item_type)
-                # A duplicate code would give two physical items one identity,
-                # and every loan against it would be ambiguous from then on.
-                if items.find_one({'item_code': code}):
-                    flash(f'Item code {code} is already in the register.')
-                    return redirect(url_for('loan_items'))
-                items.insert_one({
-                    'item_code': code,
-                    'item_type': item_type,
-                    'size': (request.form.get('size') or '').strip(),
-                    'condition': condition,
-                    'status': 'Damaged' if condition == 'Damaged' else 'Available',
-                    'note': (request.form.get('note') or '').strip(),
-                    'created_by': session['user']['name'],
-                    'created_at': datetime.utcnow(),
-                })
-                write_audit_entry('CREATE', 'loan_item', code,
-                                  f'added {item_type} condition {condition}')
-                flash(f'{item_type} {code} added to the register.', 'success')
-                return redirect(url_for('loan_items'))
-
-            if action == 'set_status':
-                try:
-                    doc = items.find_one({'_id': ObjectId(request.form.get('item_id', ''))})
-                except (InvalidId, TypeError):
-                    doc = None
-                if not doc:
-                    flash('That item was not found.')
-                    return redirect(url_for('loan_items'))
-                new_status = (request.form.get('status') or '').strip()
-                if new_status not in LOAN_SHELF_STATUSES:
-                    flash('Choose a valid status.')
-                    return redirect(url_for('loan_items'))
-                # An item that is physically with a patient cannot be retired
-                # or marked available — its state is the loan's to decide until
-                # it comes back.
-                if loans_col.find_one({'item_code': doc['item_code'],
-                                       'status': LOAN_STATUS_OUT}):
-                    flash(f"{doc['item_code']} is out on loan. Take it back in "
-                          f'first, then change its status.')
-                    return redirect(url_for('loan_items'))
-                was = doc.get('status', 'Available')
-                items.update_one({'_id': doc['_id']},
-                                 {'$set': {'status': new_status}})
-                write_audit_entry('UPDATE', 'loan_item', doc['item_code'],
-                                  f'status {was} -> {new_status}')
-                flash(f"{doc['item_code']} set to {new_status}.", 'success')
-                return redirect(url_for('loan_items'))
-
-            if action == 'edit_item':
-                doc = _loan_by_id(items, request.form.get('item_id'))
-                if not doc:
-                    flash('That item was not found.')
-                    return redirect(url_for('loan_items'))
-                back = redirect(url_for('loan_items', edit=str(doc['_id'])))
-                item_type = (request.form.get('item_type') or '').strip()
-                if item_type not in LOAN_ITEM_TYPES:
-                    flash('Choose a valid item type.')
-                    return back
-                condition = (request.form.get('condition') or '').strip()
-                if condition not in LOAN_CONDITIONS:
-                    condition = doc.get('condition') or 'Good'
-                code = (request.form.get('item_code') or '').strip().upper() or doc['item_code']
-                wanted = {
-                    'item_code': code,
-                    'item_type': item_type,
-                    'size': (request.form.get('size') or '').strip(),
-                    'condition': condition,
-                    'note': (request.form.get('note') or '').strip(),
-                }
-                changes = {k: v for k, v in wanted.items() if (doc.get(k) or '') != v}
-                if not changes:
-                    flash('Nothing was changed.', 'partial')
-                    return redirect(url_for('loan_items'))
-                if 'item_code' in changes:
-                    # Loans find their item by its code. Renaming an item
-                    # that has been lent would cut its history off from it.
-                    if loans_col.find_one({'item_code': doc['item_code']}):
-                        flash(f"{doc['item_code']} has loans recorded against it, "
-                              f'so its code cannot change.')
-                        return back
-                    if items.find_one({'item_code': code}):
-                        flash(f'Item code {code} is already in the register.')
-                        return back
-                trail = {'at': datetime.utcnow(), 'by': session['user']['name'],
-                         'changes': {k: {'from': doc.get(k), 'to': v}
-                                     for k, v in changes.items()}}
-                items.update_one({'_id': doc['_id']},
-                                 {'$set': changes, '$push': {'corrections': trail}})
-                said = '; '.join(f'{k.replace("item_", "")} {_loan_show(doc.get(k))} '
-                                 f'-> {_loan_show(v)}' for k, v in changes.items())
-                write_audit_entry('UPDATE', 'loan_item', code, f'corrected: {said}')
-                flash(f'{code} corrected: {said}.', 'success')
-                return redirect(url_for('loan_items'))
-
-            if action == 'delete_item':
-                doc = _loan_by_id(items, request.form.get('item_id'))
-                if not doc:
-                    flash('That item was not found.')
-                    return redirect(url_for('loan_items'))
-                # Only an item entered by mistake. Once it has been lent its
-                # loans point at it; retire it instead, which keeps the record.
-                if loans_col.find_one({'item_code': doc['item_code']}):
-                    flash(f"{doc['item_code']} has been lent before, so it cannot be "
-                          f'deleted. Set it to Retired instead.')
-                    return redirect(url_for('loan_items'))
-                items.delete_one({'_id': doc['_id']})
-                write_audit_entry('DELETE', 'loan_item', doc['item_code'],
-                                  f"deleted {doc.get('item_type', '')} "
-                                  f"{doc.get('size') or ''}".rstrip()
-                                  + f", condition {doc.get('condition', '')}, never lent")
-                flash(f"{doc['item_code']} removed from the register.", 'success')
-                return redirect(url_for('loan_items'))
-
-            flash('Unknown action.')
-            return redirect(url_for('loan_items'))
-
-        edit_item = None
-        if request.args.get('edit'):
-            doc = _loan_by_id(items, request.args.get('edit'))
-            if doc:
-                edit_item = {'id': str(doc['_id']), 'item_code': doc.get('item_code', ''),
-                             'item_type': doc.get('item_type', ''),
-                             'size': doc.get('size', ''),
-                             'condition': doc.get('condition') or 'Good',
-                             'note': doc.get('note', '')}
-        lent = set(loans_col.distinct('item_code'))
-        rows = _loan_rows(items, loans_col, today)
-        for r in rows:
-            r['ever_lent'] = r['code'] in lent
-        if edit_item:
-            edit_item['ever_lent'] = edit_item['item_code'] in lent
-
-        return render_template(
-            'loan_items.html',
-            nav_links=get_nav_links(),
-            message=message, message_class=message_class,
-            edit_item=edit_item,
-            rows=rows,
-            item_types=LOAN_ITEM_TYPES,
-            conditions=LOAN_CONDITIONS,
-            shelf_statuses=LOAN_SHELF_STATUSES,
-        )
-    except Exception as e:
-        app.logger.error(f'loan_items failed: {e}')
-        flash('Could not load the equipment register.')
-        return redirect(url_for('loans'))
-
-
-@app.route('/loans', methods=['GET', 'POST'])
-@login_required
-def loans() -> ResponseReturnValue:
-    current_user = session['user']['name']
-    message_class, message = _flashed_banner()
-    is_admin = session['user'].get('role') == 'admin'
-    today = datetime.utcnow().date()
-
-    try:
-        db = get_mongo_client()['pharmacy_db']
-        items, loans_col = db['loan_items'], db['loans']
-
-        if request.method == 'POST':
-            action = request.form.get('action')
-
-            if action == 'issue':
-                # One issue may lend several items - a crutch pair is two
-                # items on the register, and both go to the same patient on
-                # the same day. Each still gets its own row, so each can be
-                # returned on its own, but they share one issue reference.
-                codes = list(dict.fromkeys(
-                    c.strip().upper() for c in request.form.getlist('item_code')
-                    if c and c.strip()))
-                if not codes:
-                    flash('Choose at least one item to lend.')
-                    return redirect(url_for('loans'))
-                # All or nothing. Every item is checked before any is lent,
-                # because half a pair recorded is worse than none: the
-                # register would show a patient holding one crutch.
-                problems, chosen = [], []
-                for code in codes:
-                    item = items.find_one({'item_code': code})
-                    if not item:
-                        problems.append(f'{code} is not in the equipment register')
-                    elif item.get('status') != 'Available':
-                        problems.append(f"{code} is marked {item.get('status')}")
-                    # The double-issue guard. Without it a refreshed POST, or
-                    # two staff at two screens, lends one physical item to two
-                    # patients and the register can never be reconciled again.
-                    elif loans_col.find_one({'item_code': code,
-                                             'status': LOAN_STATUS_OUT}):
-                        problems.append(f'{code} is already out on loan')
-                    else:
-                        chosen.append(item)
-                if problems:
-                    flash('Nothing was issued: ' + '; '.join(problems) + '.')
-                    return redirect(url_for('loans'))
-
-                patient = (request.form.get('patient_name') or '').strip()
-                if not patient:
-                    flash('A patient name is required — the loan has to be '
-                          'traceable to someone.')
-                    return redirect(url_for('loans'))
-                try:
-                    issued = datetime.strptime(request.form['issued_date'], '%Y-%m-%d')
-                    due = datetime.strptime(request.form['due_date'], '%Y-%m-%d')
-                except (KeyError, ValueError):
-                    flash('Enter valid issue and due dates.')
-                    return redirect(url_for('loans'))
-                problem = _loan_dates_problem(issued, due, today)
-                if problem:
-                    flash(problem)
-                    return redirect(url_for('loans'))
-
-                condition_out = (request.form.get('condition_out') or 'Good').strip()
-                if condition_out not in LOAN_CONDITIONS:
-                    condition_out = 'Good'
-                base = f"LN-{datetime.utcnow():%Y%m%d}-{uuid4().hex[:4].upper()}"
-                contact = (request.form.get('patient_contact') or '').strip()
-                note = (request.form.get('note') or '').strip()
-                refs = []
-                for i, item in enumerate(chosen, start=1):
-                    code = item['item_code']
-                    # A single item keeps the plain reference; a set is
-                    # numbered under it, so the rows read as one issue.
-                    ref = base if len(chosen) == 1 else f'{base}-{i}'
-                    loans_col.insert_one({
-                        'loan_ref': ref,
-                        'issue_ref': base,
-                        'item_code': code,
-                        'item_type': item.get('item_type', ''),
-                        'patient_name': patient,
-                        'patient_contact': contact,
-                        'issued_date': issued,
-                        'due_date': due,
-                        'issued_by': current_user,
-                        'condition_out': condition_out,
-                        'returned_date': None,
-                        'returned_to': None,
-                        'condition_in': None,
-                        'status': LOAN_STATUS_OUT,
-                        'note': note,
-                        'created_at': datetime.utcnow(),
-                    })
-                    write_audit_entry('CREATE', 'loan', ref,
-                                      f'{code} issued to {patient}, due {due:%Y-%m-%d}'
-                                      + (f' (issue {base}, {len(chosen)} items)'
-                                         if len(chosen) > 1 else ''))
-                    refs.append(code)
-                listed = (refs[0] if len(refs) == 1
-                          else ', '.join(refs[:-1]) + ' and ' + refs[-1])
-                flash(f'{listed} issued to {patient}. Due back {due:%Y-%m-%d}. '
-                      f'Reference {base}.', 'success')
-                return redirect(url_for('loans'))
-
-            if action == 'return':
-                try:
-                    loan = loans_col.find_one({'_id': ObjectId(request.form.get('loan_id', ''))})
-                except (InvalidId, TypeError):
-                    loan = None
-                if not loan:
-                    flash('That loan was not found.')
-                    return redirect(url_for('loans'))
-                if loan.get('status') != LOAN_STATUS_OUT:
-                    flash(f"That loan is already closed ({loan.get('status')}).")
-                    return redirect(url_for('loans'))
-                condition_in = (request.form.get('condition_in') or 'Good').strip()
-                if condition_in not in LOAN_CONDITIONS:
-                    condition_in = 'Good'
-                now = datetime.utcnow()
-                loans_col.update_one({'_id': loan['_id']}, {'$set': {
-                    'returned_date': now,
-                    'returned_to': current_user,
-                    'condition_in': condition_in,
-                    'status': LOAN_STATUS_RETURNED,
-                }})
-                # An item that comes back broken must not fall straight back
-                # into the available pool, or it gets lent to the next patient.
-                shelf = 'Damaged' if condition_in == 'Damaged' else 'Available'
-                items.update_one({'item_code': loan['item_code']},
-                                 {'$set': {'status': shelf,
-                                           'condition': condition_in}})
-                days = (now - loan['issued_date']).days
-                write_audit_entry('UPDATE', 'loan', loan['loan_ref'],
-                                  f"returned by {loan['patient_name']} after "
-                                  f'{days} days, condition {condition_in}')
-                extra = (' It is marked damaged and will not be offered for '
-                         'loan until you clear it.' if condition_in == 'Damaged' else '')
-                flash(f"{loan['item_code']} returned after {days} days.{extra}",
-                      'success' if condition_in != 'Damaged' else 'partial')
-                return redirect(url_for('loans'))
-
-            if action == 'mark_lost':
-                if not is_admin:
-                    flash('Access denied. Only admins can write an item off as lost.')
-                    return redirect(url_for('loans'))
-                try:
-                    loan = loans_col.find_one({'_id': ObjectId(request.form.get('loan_id', ''))})
-                except (InvalidId, TypeError):
-                    loan = None
-                if not loan:
-                    flash('That loan was not found.')
-                    return redirect(url_for('loans'))
-                if loan.get('status') != LOAN_STATUS_OUT:
-                    flash(f"That loan is already closed ({loan.get('status')}).")
-                    return redirect(url_for('loans'))
-                now = datetime.utcnow()
-                loans_col.update_one({'_id': loan['_id']}, {'$set': {
-                    'returned_date': None,
-                    'status': LOAN_STATUS_LOST,
-                    'closed_date': now,
-                    'closed_by': current_user,
-                }})
-                items.update_one({'item_code': loan['item_code']},
-                                 {'$set': {'status': 'Lost'}})
-                write_audit_entry('UPDATE', 'loan', loan['loan_ref'],
-                                  f"written off as lost with {loan['patient_name']}")
-                flash(f"{loan['item_code']} written off as lost.", 'partial')
-                return redirect(url_for('loans'))
-
-            if action == 'edit_loan':
-                # A correction, not a rewrite. Each changed field is kept as
-                # from/to in the loan's own history, and the person who issued
-                # it stays the person who issued it. The item itself is not
-                # editable here: lending the wrong crutch is put right by
-                # deleting the loan and issuing the right one, so the
-                # equipment ledger never shows an item out that was not.
-                if not is_admin:
-                    flash('Access denied. Only admins can correct a loan.')
-                    return redirect(url_for('loans'))
-                loan = _loan_by_id(loans_col, request.form.get('loan_id'))
-                if not loan:
-                    flash('That loan was not found.')
-                    return redirect(url_for('loans'))
-                patient = (request.form.get('patient_name') or '').strip()
-                if not patient:
-                    flash('A patient name is required.')
-                    return redirect(url_for('loans', edit=str(loan['_id'])))
-                try:
-                    issued = datetime.strptime(request.form['issued_date'], '%Y-%m-%d')
-                    due = datetime.strptime(request.form['due_date'], '%Y-%m-%d')
-                except (KeyError, ValueError):
-                    flash('Enter valid issue and due dates.')
-                    return redirect(url_for('loans', edit=str(loan['_id'])))
-                problem = _loan_dates_problem(issued, due, today)
-                ret = loan.get('returned_date')
-                if not problem and ret and issued.date() > ret.date():
-                    problem = 'The issue date cannot be after the item came back.'
-                if problem:
-                    flash(problem)
-                    return redirect(url_for('loans', edit=str(loan['_id'])))
-                condition_out = (request.form.get('condition_out') or '').strip()
-                if condition_out not in LOAN_CONDITIONS:
-                    condition_out = loan.get('condition_out') or 'Good'
-                # Keep the time of day of the original entry when only the
-                # date is unchanged, so an untouched date is not a change.
-                old_issued = loan.get('issued_date')
-                if old_issued and old_issued.date() == issued.date():
-                    issued = old_issued
-                old_due = loan.get('due_date')
-                if old_due and old_due.date() == due.date():
-                    due = old_due
-                wanted = {
-                    'patient_name': patient,
-                    'patient_contact': (request.form.get('patient_contact') or '').strip(),
-                    'issued_date': issued,
-                    'due_date': due,
-                    'condition_out': condition_out,
-                    'note': (request.form.get('note') or '').strip(),
-                }
-                changes = {k: v for k, v in wanted.items()
-                           if (loan.get(k) or '') != (v or '')}
-                if not changes:
-                    flash('Nothing was changed.', 'partial')
-                    return redirect(url_for('loans'))
-                now = datetime.utcnow()
-                trail = {'at': now, 'by': current_user,
-                         'changes': {k: {'from': loan.get(k), 'to': v}
-                                     for k, v in changes.items()}}
-                loans_col.update_one({'_id': loan['_id']},
-                                     {'$set': changes,
-                                      '$push': {'corrections': trail}})
-                said = '; '.join(
-                    f"{LOAN_FIELD_LABELS[k]} {_loan_show(loan.get(k))} -> {_loan_show(v)}"
-                    for k, v in changes.items())
-                write_audit_entry('UPDATE', 'loan', loan['loan_ref'], f'corrected: {said}')
-                # A pair lent together shares a patient and dates. Fixing the
-                # name on one crutch and not the other would leave the same
-                # patient under two spellings. Condition and note stay per item.
-                also = []
-                if request.form.get('whole_issue') and loan.get('issue_ref'):
-                    shared = ('patient_name', 'patient_contact', 'issued_date', 'due_date')
-                    for sib in loans_col.find({'issue_ref': loan['issue_ref'],
-                                               '_id': {'$ne': loan['_id']}}):
-                        sib_changes = {k: changes[k] for k in shared
-                                       if k in changes and (sib.get(k) or '') != (changes[k] or '')}
-                        sret = sib.get('returned_date')
-                        if ('issued_date' in sib_changes and sret
-                                and issued.date() > sret.date()):
-                            continue
-                        if not sib_changes:
-                            continue
-                        loans_col.update_one({'_id': sib['_id']}, {
-                            '$set': sib_changes,
-                            '$push': {'corrections': {
-                                'at': now, 'by': current_user,
-                                'changes': {k: {'from': sib.get(k), 'to': v}
-                                            for k, v in sib_changes.items()}}}})
-                        write_audit_entry('UPDATE', 'loan', sib['loan_ref'], 'corrected: ' + '; '.join(
-                            f"{LOAN_FIELD_LABELS[k]} {_loan_show(sib.get(k))} -> {_loan_show(v)}"
-                            for k, v in sib_changes.items()) + f" (with {loan['loan_ref']})")
-                        also.append(sib['item_code'])
-                tail = f" Also corrected on {', '.join(also)}." if also else ''
-                flash(f"Loan {loan['loan_ref']} corrected: {said}.{tail}", 'success')
-                return redirect(url_for('loans'))
-
-            if action == 'delete_loan':
-                # For a loan that should never have been entered. The audit
-                # entry carries everything the row held, because once it is
-                # gone that entry is the only record it existed.
-                if not is_admin:
-                    flash('Access denied. Only admins can delete a loan.')
-                    return redirect(url_for('loans'))
-                loan = _loan_by_id(loans_col, request.form.get('loan_id'))
-                if not loan:
-                    flash('That loan was not found.')
-                    return redirect(url_for('loans'))
-                loans_col.delete_one({'_id': loan['_id']})
-                freed = ''
-                if loan.get('status') == LOAN_STATUS_LOST:
-                    # Writing it off marked the item Lost. If the write-off
-                    # itself was the mistake, the item is back on the shelf.
-                    items.update_one({'item_code': loan['item_code'],
-                                      'status': 'Lost'},
-                                     {'$set': {'status': 'Available'}})
-                    freed = f" {loan['item_code']} is back to Available."
-                elif loan.get('status') == LOAN_STATUS_OUT:
-                    freed = f" {loan['item_code']} is free to lend again."
-                write_audit_entry(
-                    'DELETE', 'loan', loan['loan_ref'],
-                    f"deleted {loan.get('status', '')} loan of {loan['item_code']} to "
-                    f"{loan.get('patient_name', '')}, issued "
-                    f"{_loan_show(loan.get('issued_date'))} by {loan.get('issued_by', '')}, "
-                    f"due {_loan_show(loan.get('due_date'))}"
-                    + (f", returned {_loan_show(loan.get('returned_date'))}"
-                       if loan.get('returned_date') else ''))
-                flash(f"Loan {loan['loan_ref']} deleted.{freed}", 'success')
-                return redirect(url_for('loans'))
-
-            flash('Unknown action.')
-            return redirect(url_for('loans'))
-
-        # ---- GET ----------------------------------------------------------
-        q = (request.args.get('q') or '').strip()
-        status_filter = (request.args.get('status') or '').strip()
-
-        edit_loan = None
-        if is_admin and request.args.get('edit'):
-            doc = _loan_by_id(loans_col, request.args.get('edit'))
-            if doc:
-                edit_loan = {
-                    'id': str(doc['_id']),
-                    'loan_ref': doc.get('loan_ref', ''),
-                    'item_code': doc.get('item_code', ''),
-                    'status': doc.get('status', ''),
-                    'patient_name': doc.get('patient_name', ''),
-                    'patient_contact': doc.get('patient_contact', ''),
-                    'issued_date': (doc['issued_date'].strftime('%Y-%m-%d')
-                                    if doc.get('issued_date') else ''),
-                    'due_date': (doc['due_date'].strftime('%Y-%m-%d')
-                                 if doc.get('due_date') else ''),
-                    'condition_out': doc.get('condition_out') or 'Good',
-                    'note': doc.get('note', ''),
-                    # The other items lent in the same issue - a crutch pair.
-                    'siblings': [d['item_code'] for d in loans_col.find(
-                        {'issue_ref': doc['issue_ref'], '_id': {'$ne': doc['_id']}})
-                        ] if doc.get('issue_ref') else [],
-                }
-
-        rows = _loan_rows(items, loans_col, today)
-        out_rows = []
-        for doc in loans_col.find({'status': LOAN_STATUS_OUT}).sort('due_date', 1):
-            due = doc.get('due_date')
-            overdue = bool(due and due.date() < today)
-            out_rows.append({
-                'id': str(doc['_id']),
-                'loan_ref': doc.get('loan_ref', ''),
-                'item_code': doc.get('item_code', ''),
-                'item_type': doc.get('item_type', ''),
-                'patient_name': doc.get('patient_name', ''),
-                'patient_contact': doc.get('patient_contact', ''),
-                'patient_id': doc.get('patient_id', ''),
-                # Guarded for the same reason as the dispensing register: one
-                # old record without this field must not take the page down.
-                'issued_date': doc.get('issued_date'),
-                'due_date': due,
-                'issued_by': doc.get('issued_by', ''),
-                'days_out': (datetime.utcnow() - doc['issued_date']).days,
-                'days_over': (today - due.date()).days if overdue else 0,
-                'overdue': overdue,
-            })
-
-        query: Query = {}
-        if status_filter in (LOAN_STATUS_OUT, LOAN_STATUS_RETURNED, LOAN_STATUS_LOST):
-            query['status'] = status_filter
-        if q:
-            rx = {'$regex': re.escape(q), '$options': 'i'}
-            query['$or'] = [{'patient_name': rx}, {'item_code': rx},
-                            {'patient_id': rx}, {'loan_ref': rx}]
-        history = []
-        for doc in loans_col.find(query).sort('issued_date', -1).limit(300):
-            ret = doc.get('returned_date')
-            fixes = doc.get('corrections') or []
-            history.append({
-                'id': str(doc['_id']),
-                'corrected_by': fixes[-1].get('by') if fixes else None,
-                'loan_ref': doc.get('loan_ref', ''),
-                'item_code': doc.get('item_code', ''),
-                'patient_name': doc.get('patient_name', ''),
-                'issued_date': doc.get('issued_date'),
-                'due_date': doc.get('due_date'),
-                'returned_date': ret,
-                'days': ((ret - doc['issued_date']).days
-                         if ret and doc.get('issued_date') else None),
-                'condition_out': doc.get('condition_out'),
-                'condition_in': doc.get('condition_in'),
-                'status': doc.get('status', ''),
-                'issued_by': doc.get('issued_by', ''),
-                'note': doc.get('note', ''),
-            })
-
-        tiles = {
-            'available': sum(1 for r in rows if r['state'] == 'Available'),
-            'out': sum(1 for r in rows if r['loan']),
-            'overdue': sum(1 for r in rows if r['overdue']),
-            'unusable': sum(1 for r in rows
-                            if not r['loan'] and r['shelf'] in ('Damaged', 'Retired', 'Lost')),
-        }
-
-        if request.values.get('export') == 'csv':
-            # history already holds every loan the filter matches, out and
-            # returned alike; out_rows is a subset of it shown separately on
-            # screen, so adding both listed the open loans twice.
-            return _register_csv_response('loans', history)
-
-        return render_template(
-            'loans.html',
-            nav_links=get_nav_links(),
-            message=message, message_class=message_class,
-            is_admin=is_admin,
-            today=today.strftime('%Y-%m-%d'),
-            default_due=(today + timedelta(days=LOAN_DEFAULT_DAYS)).strftime('%Y-%m-%d'),
-            available=_loan_available(items, loans_col),
-            conditions=LOAN_CONDITIONS,
-            out_rows=out_rows,
-            overdue_count=tiles['overdue'],
-            history=history,
-            activity=_loan_activity(loans_col),
-            tiles=tiles,
-            q=q, status_filter=status_filter,
-            edit_loan=edit_loan,
-        )
-    except Exception as e:
-        app.logger.error(f'loans failed: {e}')
-        flash('Could not load the loans page.')
-        return redirect('/reports')
-
-
-# ---------------------------------------------------------------------------
-# The pharmacist is away from Friday late morning until Monday midday, and the
-# store key stays with whichever nursing officer locks up. That is the normal
-# arrangement, not an exception, so the register must not raise an alarm every
-# single weekend — an alarm that cries wolf weekly is one nobody reads.
-#
-# Any key issued on a Friday, Saturday or Sunday is therefore expected back
-# when he returns, and only counts as overdue after that. The cost of this is
-# that a Friday-MORNING issue is not chased until Monday either; that is the
-# deliberate trade, because he is still on the premises until he leaves and
-# would see it himself, whereas a false alarm every weekend costs the flag its
-# meaning. Public holidays are not modelled.
-# ---------------------------------------------------------------------------
-# Seeded on first use so the roster is usable immediately. Everyone here is
-# marked an officer in charge EXCEPT the Nurse Assistant, who may operate the
-# app but is not in charge. These names were taken from the staff already
-# named elsewhere in the app, so the roles are a starting guess — an admin
-# edits them on the page.
-# How each kind of movement affects a controlled drug balance.
-#
-# This used to be inferred from the SIGN stored on the transaction, and the
-# signs are not consistent: a dispense and an internal issue are stored
-# positive, while a damage and an expiry removal are stored negative. The
-# register added anything that was not a receipt or a dispense, so issuing
-# morphine to a department made the register's running balance go UP. Checked
-# against a seeded month, the register ended at 85 where the shelf said 55.
-#
-# A controlled drug register is a legal document. The direction of a movement
-# is therefore stated here once, by type, and the quantity is taken as a
-# magnitude — so no change to a storage convention anywhere else in this file
-# can silently invert a morphine balance again.
 CONTROLLED_DIRECTION = {
     'opening_balance': +1,
     'receive': +1,
@@ -7253,802 +4456,22 @@ def _controlled_delta(tx: Doc) -> float:
     return direction * abs(qty)
 
 
-# One roster, one person, three jobs.
-#
-# The same people were listed in FOUR places: a prescribers list and a
-# dispensers list written into the dispensing page, this key-register roster,
-# and the login accounts. They already disagreed — the roster had seven names
-# and the other two had nine each — and adding a nurse meant editing all four.
-# Miss one and someone who can log in cannot be selected as the dispenser, so
-# their visit is recorded under another person's name or not at all.
-#
-# The flags below are what the old lists contained, person for person, so
-# nothing changes about who may do what. The collection is still called
-# key_officers because that is what it is called in every pharmacy database
-# already running; renaming it would be a migration for no gain.
-#
-#   name, role, in charge of the key, may prescribe, may dispense
-STAFF_SEED = [
-    ('Dr. T. Khothatso', 'Doctor', False, True, False),
-    ('Letlotlo Hlaoli', 'Pharmacist', False, False, True),
-    ('Locum Doctor', 'Doctor', False, True, False),
-    ('Locum Nurse', 'Nursing Officer', True, True, True),
-    ('Locum Pharmacist', 'Pharmacist', False, False, True),
-    ('Malesoetsa Leohla', 'Nursing Officer', True, True, True),
-    ('Mamosa Seetsa', 'Nurse Assistant', False, True, True),
-    ('Mamosaase Nqosa', 'Nursing Officer', True, True, True),
-    ('Mapalo Mapesela', 'Nursing Officer', True, True, True),
-    ('Mathuto Kutoane', 'Nursing Officer', True, True, True),
-    ('Thapelo Mphole', 'Nursing Officer', True, True, True),
-]
-# Kept for the tests and anything that still refers to it.
-KEY_OFFICER_SEED = [(n, r, c) for n, r, c, _p, _d in STAFF_SEED]
 
 
-def _seed_key_officers(officers: Collection) -> None:
-    """Put the roster in place, and fill in anything it has not got yet.
 
-    This runs on a pharmacy that has been using the app for months, so it
-    must never overwrite a decision an administrator has already made. It
-    adds people who are missing, and sets a job flag only where that flag
-    has never been set at all. Somebody marked inactive stays inactive.
-    """
-    try:
-        existing = {o.get('name'): o for o in officers.find(
-            {}, {'name': 1, 'prescriber': 1, 'dispenser': 1})}
-    except Exception as e:
-        app.logger.warning(f'staff roster unavailable: {e}')
-        return
-    to_add, to_set = [], []
-    for name, role, in_charge, prescriber, dispenser in STAFF_SEED:
-        found = existing.get(name)
-        if found is None:
-            to_add.append({'name': name, 'role': role, 'in_charge': in_charge,
-                           'prescriber': prescriber, 'dispenser': dispenser,
-                           'active': True, 'created_at': datetime.utcnow(),
-                           'seeded': True})
-            continue
-        fill = {}
-        if 'prescriber' not in found:
-            fill['prescriber'] = prescriber
-        if 'dispenser' not in found:
-            fill['dispenser'] = dispenser
-        if fill:
-            to_set.append((found['_id'], fill))
-    try:
-        if to_add:
-            officers.insert_many(to_add)
-        for _id, fill in to_set:
-            officers.update_one({'_id': _id}, {'$set': fill})
-    except Exception as e:
-        app.logger.warning(f'staff roster could not be completed: {e}')
 
 
-def _staff_named_for(db: Database | None, job: str) -> list[str]:
-    """Everyone on the roster who may do this job, in name order.
 
-    Asked of the roster rather than written into the page, so adding a nurse
-    is one entry in one place and she appears everywhere she should.
-    """
-    try:
-        if db is None:
-            raise ServerSelectionTimeoutError('no database on this path')
-        officers = db['key_officers']
-        _seed_key_officers(officers)
-        return sorted(
-            (o['name'] for o in officers.find(
-                {'active': True, job: True}, {'name': 1})
-             if o.get('name')),
-            key=str.lower)
-    except Exception as e:
-        app.logger.warning(f'staff list for {job} unavailable: {e}')
-        # Better a usable form with the roster as it was last known than a
-        # dispensing page nobody can fill in.
-        return sorted((n for n, _r, _c, p, d in STAFF_SEED
-                       if (p if job == 'prescriber' else d)), key=str.lower)
 
 
-def _officer_names(officers: Collection, in_charge_only: bool = True) -> list[str]:
-    q = {'active': True}
-    if in_charge_only:
-        q['in_charge'] = True
-    return [d['name'] for d in officers.find(q).sort('name', 1)]
 
 
-def _is_in_charge(officers: Collection, name: str | None) -> bool:
-    """Is this person an officer in charge? Unknown names are not."""
-    if not name:
-        return False
-    doc = officers.find_one({'name': name, 'active': True})
-    return bool(doc and doc.get('in_charge'))
 
 
-def _user_in_charge(officers: Collection, name: str | None, is_admin: bool) -> bool:
-    """Whether the logged-in user may be named as the officer in charge.
 
-    The roster decides for anybody on it — that is the point of the flag, and
-    it must hold even if such a person also has an admin login. Somebody not
-    on the roster at all falls back to their role, so the pharmacist and
-    managers are not locked out of their own key register for want of a
-    roster entry.
-    """
-    doc = officers.find_one({'name': name, 'active': True})
-    if doc:
-        return bool(doc.get('in_charge'))
-    return bool(is_admin)
 
 
-# Taking the key and taking it back are not the same job, and for a while the
-# app asked the same question for both.
-#
-# "In charge" means the nursing officer who holds the store key while the
-# pharmacist is away. The pharmacist is deliberately not one of those — he is
-# the one handing it over — so he is on the roster with the flag off, which is
-# right. But the return form used that same flag to decide who could be named
-# as RECEIVING the key back, and receiving it back is precisely the
-# pharmacist's job. The result was that the pharmacist could not find his own
-# name anywhere on the return, and the one-click button was hidden from him:
-# locked out of his own register by a correct entry on the roster.
-#
-# So receiving is its own question. Anyone who may hold the key may also take
-# it back — an officer in charge can receive it from another over a long
-# weekend — and so may a pharmacist. Nobody who could name themselves before
-# has lost anything; the pharmacist has been added.
-def _is_pharmacist(doc: Doc | None) -> bool:
-    return bool(doc) and 'pharmacist' in str((doc or {}).get('role', '')).lower()
 
-
-def _key_receiver_names(officers: Collection) -> list[str]:
-    """Who may be named as receiving the key back, or as the pharmacist on it."""
-    return sorted(
-        {d['name'] for d in officers.find({'active': True})
-         if d.get('name') and (d.get('in_charge') or _is_pharmacist(d))},
-        key=str.lower)
-
-
-def _user_may_receive(officers: Collection, name: str | None,
-                      is_admin: bool) -> bool:
-    """Whether the logged-in user may be named as receiving the key back."""
-    doc = officers.find_one({'name': name, 'active': True})
-    if doc:
-        return bool(doc.get('in_charge')) or _is_pharmacist(doc)
-    return bool(is_admin)
-
-
-KEY_AWAY_WEEKDAY = 4          # Friday (Monday = 0)
-KEY_RETURN_WEEKDAY = 0        # Monday
-KEY_AWAY_TIME = (11, 30)      # he leaves
-KEY_RETURN_TIME = (12, 0)     # he is back
-
-
-def _key_due_back(issued_at: datetime) -> datetime:
-    """When an issue is expected back."""
-    wd = issued_at.weekday()
-    if wd in (KEY_AWAY_WEEKDAY, 5, 6):           # Fri, Sat, Sun
-        days_ahead = {KEY_AWAY_WEEKDAY: 3, 5: 2, 6: 1}[wd]
-        monday = issued_at + timedelta(days=days_ahead)
-        return monday.replace(hour=KEY_RETURN_TIME[0], minute=KEY_RETURN_TIME[1],
-                              second=0, microsecond=0)
-    # Any other day: back before the day is out.
-    return issued_at.replace(hour=23, minute=59, second=59, microsecond=0)
-
-
-def _key_is_weekend_hold(issued_at: datetime) -> bool:
-    """True when this issue spans the pharmacist's absence."""
-    return issued_at.weekday() in (KEY_AWAY_WEEKDAY, 5, 6)
-
-
-def _held_for(since: datetime, now: datetime) -> str:
-    """Plain-language gap, e.g. '4h 20m' or '2 days 3h'."""
-    secs = max(0, int((now - since).total_seconds()))
-    days, rem = divmod(secs, 86400)
-    hours, rem = divmod(rem, 3600)
-    mins = rem // 60
-    if days:
-        return f"{days} day{'' if days == 1 else 's'} {hours}h"
-    if hours:
-        return f'{hours}h {mins}m'
-    return f'{mins}m'
-
-
-# ---------------------------------------------------------------------------
-# The register writes itself from who is logged in.
-#
-# In practice nobody fills this form in. The pharmacist logs out on Friday,
-# whoever logs in next is holding the key, and when he comes back he clicks
-# Returned. So the login and logout are the handover, and the register simply
-# records what they already say.
-#
-# Everything here is best-effort and wrapped: a key register that could stop
-# somebody logging in would be a far worse problem than a missing row, so a
-# failure in here is logged and swallowed.
-# ---------------------------------------------------------------------------
-def _key_control(db: Database) -> Collection:
-    return db['key_control']
-
-
-def _key_arm_handover(user_name: str) -> None:
-    """The pharmacist has logged out, so the key is up for handover."""
-    try:
-        db = get_mongo_client()['pharmacy_db']
-        if db['key_register'].find_one({'status': 'Out'}):
-            return                      # already with somebody
-        _key_control(db).update_one(
-            {'_id': 'state'},
-            {'$set': {'armed': True, 'armed_by': user_name,
-                      'armed_at': local_now()}},
-            upsert=True)
-    except Exception as e:
-        app.logger.warning(f'key handover arm failed: {e}')
-
-
-# How long the pharmacist can go without using the app before a login by
-# somebody else is taken as the key changing hands. The browser already signs
-# an idle screen out after this long, so by then he has, in effect, left.
-KEY_IDLE_MINUTES = 30
-
-
-def _key_note_pharmacist_seen(user_name: str) -> None:
-    """Remember when the pharmacist last used the app.
-
-    Called on his requests, at most once a minute, so it costs one small
-    write a minute while he is working and nothing at all when he is not.
-    """
-    try:
-        db = get_mongo_client()['pharmacy_db']
-        _key_control(db).update_one(
-            {'_id': 'state'},
-            {'$set': {'pharmacist_seen_at': local_now(),
-                      'pharmacist_seen_by': user_name}},
-            upsert=True)
-    except Exception as e:
-        app.logger.warning(f'key register: could not note pharmacist activity: {e}')
-
-
-def _key_pharmacist_idle(state: Doc, now: datetime) -> bool:
-    """Has the pharmacist been away from the app long enough to have left?
-
-    The weekday gap: he closes the browser instead of pressing Logout, which
-    will happen, and on a weekday nothing else marked the key as handed over.
-    So a login by somebody else, with the key in and him idle this long, is
-    the handover.
-
-    No record of him at all counts as NOT idle. The record only starts once
-    this version is running and he has used it; until then the app does not
-    know, and a key row nobody asked for is worse than the gap.
-    """
-    seen = state.get('pharmacist_seen_at')
-    if not isinstance(seen, datetime):
-        return False
-    return now - seen >= timedelta(minutes=KEY_IDLE_MINUTES)
-
-
-def _key_in_away_window(now: datetime) -> bool:
-    """Between the pharmacist leaving on Friday and returning on Monday.
-
-    A safety net for the Friday he closes the browser instead of logging out,
-    which will happen. Without it the weekend handover simply would not be
-    recorded, which is the one it most matters for.
-    """
-    wd = now.weekday()
-    if wd == KEY_AWAY_WEEKDAY:
-        return (now.hour, now.minute) >= KEY_AWAY_TIME
-    if wd in (5, 6):
-        return True
-    if wd == KEY_RETURN_WEEKDAY:
-        return (now.hour, now.minute) < KEY_RETURN_TIME
-    return False
-
-
-def _key_open_issue(keys: Collection, officers: Collection, holder: str, pharmacist: str,
-                    now: datetime, source: str) -> str:
-    """Start a row for `holder`, filled in from what the login already says."""
-    ref = f"KEY-{now:%Y%m%d}-{uuid4().hex[:4].upper()}"
-    keys.insert_one({
-        'ref': ref,
-        'issued_date': datetime(now.year, now.month, now.day),
-        'issued_time': now.strftime('%H:%M'),
-        'issued_at': now,
-        'pharmacist': pharmacist,
-        'recipient_name': holder,
-        'returned_date': None, 'returned_time': None, 'returned_at': None,
-        'returning_officer': None, 'receiving_officer': None,
-        'return_pharmacist': None,
-        'comments': '',
-        'status': 'Out',
-        'issued_by_user': holder,
-        'due_back': _key_due_back(now),
-        'weekend_hold': _key_is_weekend_hold(now),
-        'recipient_off_roster': not _is_in_charge(officers, holder),
-        'auto_source': source,
-        'created_at': datetime.utcnow(),
-    })
-    write_audit_entry('CREATE', 'store_key', ref,
-                      f'key recorded to {holder} automatically ({source}) '
-                      f'at {now:%Y-%m-%d %H:%M}')
-    return ref
-
-
-def _key_on_login(user_name: str, is_admin: bool) -> None:
-    """Called once per successful login. Keeps the register in step."""
-    try:
-        db = get_mongo_client()['pharmacy_db']
-        keys, officers = db['key_register'], db['key_officers']
-        _seed_key_officers(officers)
-        now = local_now()
-        open_doc = keys.find_one({'status': 'Out'})
-
-        if open_doc:
-            holder = open_doc.get('recipient_name')
-            if holder == user_name:
-                return                  # same person, still holding it
-            if is_admin:
-                # He is back. The key is not his again until he says so, so
-                # the row stays open and he closes it with one click.
-                return
-            # Somebody else has come on duty. One issue covers the whole
-            # absence, so the row stays as it is and is NOT split: the key
-            # was handed over once, when the pharmacist left.
-            #
-            # Their name is still noted against that row, though. The app
-            # knows they were on duty, and quietly dropping it would leave
-            # the register asserting that one person held the key for three
-            # days when it knows others were there too.
-            already = open_doc.get('also_on_duty') or []
-            if user_name not in already:
-                keys.update_one(
-                    {'_id': open_doc['_id']},
-                    {'$addToSet': {'also_on_duty': user_name}})
-                write_audit_entry(
-                    'UPDATE', 'store_key', open_doc.get('ref', ''),
-                    f'{user_name} also on duty during this issue '
-                    f'(key remains recorded to {holder})')
-            return
-
-        # Key is not out.
-        state = _key_control(db).find_one({'_id': 'state'}) or {}
-        if is_admin:
-            # He is here, so he has it; nothing is outstanding.
-            if state.get('armed'):
-                _key_control(db).update_one({'_id': 'state'},
-                                            {'$set': {'armed': False}})
-            _key_note_pharmacist_seen(user_name)
-            return
-        if state.get('armed'):
-            source = 'login'                  # he pressed Logout
-        elif _key_in_away_window(now):
-            source = 'away-window'            # Friday 11:30 to Monday 12:00
-        elif _key_pharmacist_idle(state, now):
-            source = 'pharmacist-idle'        # a weekday, browser just closed
-        else:
-            source = ''
-        if source:
-            _key_open_issue(keys, officers, user_name,
-                            state.get('armed_by') or state.get('pharmacist_seen_by')
-                            or _key_last_pharmacist(keys),
-                            now, source)
-            _key_control(db).update_one({'_id': 'state'},
-                                        {'$set': {'armed': False}}, upsert=True)
-    except Exception as e:
-        app.logger.warning(f'key register login hook failed: {e}')
-
-
-def _key_last_pharmacist(keys: Collection) -> str:
-    """Whoever last handed the key over, for filling the pharmacist column."""
-    last = keys.find_one({'pharmacist': {'$nin': [None, '']}},
-                         sort=[('issued_at', -1)])
-    return (last or {}).get('pharmacist', '')
-
-
-@app.route('/key-register', methods=['GET', 'POST'])
-@login_required
-def key_register() -> ResponseReturnValue:
-    current_user = session['user']['name']
-    message_class, message = _flashed_banner()
-    is_admin = session['user'].get('role') == 'admin'
-
-    try:
-        db = get_mongo_client()['pharmacy_db']
-        keys = db['key_register']
-        officers = db['key_officers']
-        _seed_key_officers(officers)
-        # Whoever is logged in may be entering the record without being an
-        # officer in charge. Their name is kept as the person who typed it,
-        # but it is never dropped into a field that asserts authority.
-        user_in_charge = _user_in_charge(officers, current_user, is_admin)
-        # Receiving the key back is a different question from holding it.
-        user_may_receive = _user_may_receive(officers, current_user, is_admin)
-
-        if request.method == 'POST':
-            action = request.form.get('action')
-            now = local_now()
-
-            if action == 'issue_key':
-                # There is ONE physical key. If it is out, it cannot be given
-                # to a second person — and a register that allowed it would be
-                # unreconcilable afterwards, with two people each believing
-                # they held it. This is the whole control.
-                open_doc = keys.find_one({'status': 'Out'})
-                if open_doc:
-                    flash(f"The key is already out with "
-                          f"{open_doc.get('recipient_name')} since "
-                          f"{open_doc['issued_date']:%Y-%m-%d} "
-                          f"{open_doc.get('issued_time')}. Record its return "
-                          f"before issuing it again.")
-                    return redirect(url_for('key_register'))
-
-                recipient = (request.form.get('recipient_name') or '').strip()
-                if recipient == '__other__':
-                    recipient = (request.form.get('recipient_other') or '').strip()
-                if not recipient:
-                    flash('A recipient name is required — the key has to be '
-                          'traceable to someone.')
-                    return redirect(url_for('key_register'))
-                # Only default the pharmacist to the logged-in user when that
-                # user is actually an officer in charge. Otherwise the field
-                # must be filled in explicitly, so a Nurse Assistant entering
-                # the record is never recorded as the one in charge of it.
-                pharmacist = (request.form.get('pharmacist') or '').strip()
-                if not pharmacist:
-                    if user_in_charge:
-                        pharmacist = current_user
-                    else:
-                        flash('Name the officer in charge who handed the key '
-                              'over — your own name cannot be used, because '
-                              'you are not on the roster as in charge.')
-                        return redirect(url_for('key_register'))
-                off_roster = not _is_in_charge(officers, recipient)
-
-                ref = f"KEY-{now:%Y%m%d}-{uuid4().hex[:4].upper()}"
-                keys.insert_one({
-                    'ref': ref,
-                    'issued_date': datetime(now.year, now.month, now.day),
-                    'issued_time': now.strftime('%H:%M'),
-                    'issued_at': now,
-                    'pharmacist': pharmacist,
-                    'recipient_name': recipient,
-                    'returned_date': None, 'returned_time': None,
-                    'returned_at': None,
-                    'returning_officer': None, 'receiving_officer': None,
-                    'return_pharmacist': None,
-                    'comments': (request.form.get('comments') or '').strip(),
-                    'status': 'Out',
-                    'issued_by_user': current_user,
-                    'due_back': _key_due_back(now),
-                    'weekend_hold': _key_is_weekend_hold(now),
-                    'recipient_off_roster': off_roster,
-                    'created_at': datetime.utcnow(),
-                })
-                write_audit_entry('CREATE', 'store_key', ref,
-                                  f'key issued to {recipient} by {pharmacist} '
-                                  f'at {now:%Y-%m-%d %H:%M}'
-                                  + (f' [entered by {current_user}]'
-                                     if current_user != pharmacist else ''))
-                note = ''
-                if off_roster:
-                    note = (f' {recipient} is not on the roster as an officer '
-                            f'in charge — this entry is flagged for review.')
-                if _key_is_weekend_hold(now):
-                    due = _key_due_back(now)
-                    flash(f'Key issued to {recipient} at {now:%H:%M} as a '
-                          f'weekend handover, due back {due:%A} '
-                          f'{due:%H:%M}.{note}',
-                          'partial' if off_roster else 'success')
-                else:
-                    flash(f'Key issued to {recipient} at {now:%H:%M}.{note}',
-                          'partial' if off_roster else 'success')
-                return redirect(url_for('key_register'))
-
-            if action == 'return_key':
-                try:
-                    doc = keys.find_one({'_id': ObjectId(request.form.get('entry_id', ''))})
-                except (InvalidId, TypeError):
-                    doc = None
-                if not doc:
-                    flash('That key register entry was not found.')
-                    return redirect(url_for('key_register'))
-                if doc.get('status') != 'Out':
-                    flash('That entry is already closed — the key was already '
-                          'recorded as returned.')
-                    return redirect(url_for('key_register'))
-
-                returning = (request.form.get('returning_officer') or '').strip() \
-                    or doc.get('recipient_name', '')
-                # Same rule as on issue: the logged-in user is only defaulted
-                # into an officer field when they are an officer in charge.
-                receiving = (request.form.get('receiving_officer') or '').strip()
-                ret_pharm = (request.form.get('return_pharmacist') or '').strip()
-                if not receiving or not ret_pharm:
-                    if user_in_charge:
-                        receiving = receiving or current_user
-                        ret_pharm = ret_pharm or current_user
-                    else:
-                        flash('Name the officer in charge receiving the key — '
-                              'your own name cannot be used, because you are '
-                              'not on the roster as in charge.')
-                        return redirect(url_for('key_register'))
-                extra = (request.form.get('comments') or '').strip()
-                comments = '; '.join(x for x in (doc.get('comments'), extra) if x)
-
-                keys.update_one({'_id': doc['_id']}, {'$set': {
-                    'returned_date': datetime(now.year, now.month, now.day),
-                    'returned_time': now.strftime('%H:%M'),
-                    'returned_at': now,
-                    'returning_officer': returning,
-                    'receiving_officer': receiving,
-                    'return_pharmacist': ret_pharm,
-                    'comments': comments,
-                    'status': 'Returned',
-                    'returned_by_user': current_user,
-                }})
-                held = _held_for(doc.get('issued_at') or doc['issued_date'], now)
-                write_audit_entry('UPDATE', 'store_key', doc.get('ref', ''),
-                                  f'key returned by {returning}, received by '
-                                  f'{receiving} after {held}')
-                flash(f'Key returned by {returning} at {now:%H:%M}, '
-                      f'out for {held}.', 'success')
-                return redirect(url_for('key_register'))
-
-            if action == 'edit_entry':
-                # An entry made by whoever was at the counter may need the
-                # officer names put right afterwards. Admin only, and the
-                # before-and-after goes to the audit log so the correction is
-                # itself on the record.
-                if not is_admin:
-                    flash('Access denied. Only admins can correct a register entry.')
-                    return redirect(url_for('key_register'))
-                try:
-                    doc = keys.find_one({'_id': ObjectId(request.form.get('entry_id', ''))})
-                except (InvalidId, TypeError):
-                    doc = None
-                if not doc:
-                    flash('That key register entry was not found.')
-                    return redirect(url_for('key_register'))
-
-                fields = ['pharmacist', 'recipient_name', 'returning_officer',
-                          'receiving_officer', 'return_pharmacist', 'comments']
-                updates: Doc = {}
-                changes: list[str] = []
-                for f in fields:
-                    if f not in request.form:
-                        continue
-                    new_val = (request.form.get(f) or '').strip()
-                    old_val = doc.get(f) or ''
-                    if new_val != old_val:
-                        updates[f] = new_val or None
-                        changes.append(f"{f}: '{old_val}' -> '{new_val}'")
-                for f, label in (('issued_time', 'issued time'),
-                                 ('returned_time', 'returned time')):
-                    if f not in request.form:
-                        continue
-                    new_val = (request.form.get(f) or '').strip()[:5]
-                    old_val = doc.get(f) or ''
-                    if new_val != old_val:
-                        updates[f] = new_val or None
-                        changes.append(f"{label}: '{old_val}' -> '{new_val}'")
-
-                if not updates:
-                    flash('Nothing was changed.')
-                    return redirect(url_for('key_register'))
-                if 'recipient_name' in updates:
-                    updates['recipient_off_roster'] = not _is_in_charge(
-                        officers, updates['recipient_name'])
-                updates['corrected_by'] = current_user
-                updates['corrected_at'] = datetime.utcnow()
-                keys.update_one({'_id': doc['_id']}, {'$set': updates})
-                write_audit_entry('UPDATE', 'store_key', doc.get('ref', ''),
-                                  'entry corrected — ' + '; '.join(changes))
-                flash(f"Entry corrected: {'; '.join(changes)}.", 'success')
-                return redirect(url_for('key_register'))
-
-            if action == 'add_officer':
-                if not is_admin:
-                    flash('Access denied. Only admins can change the roster.')
-                    return redirect(url_for('key_register'))
-                name = (request.form.get('officer_name') or '').strip()
-                if not name:
-                    flash('A name is required.')
-                    return redirect(url_for('key_register'))
-                if officers.find_one({'name': name}):
-                    flash(f'{name} is already on the roster.')
-                    return redirect(url_for('key_register'))
-                in_charge = request.form.get('in_charge') == 'yes'
-                prescriber = request.form.get('prescriber') == 'yes'
-                dispenser = request.form.get('dispenser') == 'yes'
-                officers.insert_one({
-                    'name': name,
-                    'role': (request.form.get('officer_role') or '').strip()
-                            or ('Nursing Officer' if in_charge else 'Nurse Assistant'),
-                    'in_charge': in_charge,
-                    'prescriber': prescriber, 'dispenser': dispenser,
-                    'active': True,
-                    'created_by': current_user, 'created_at': datetime.utcnow(),
-                })
-                write_audit_entry(
-                    'CREATE', 'key_officer', name,
-                    f"added, in charge: {'yes' if in_charge else 'no'}, "
-                    f"prescribes: {'yes' if prescriber else 'no'}, "
-                    f"dispenses: {'yes' if dispenser else 'no'}")
-                jobs = [j for j, on in (('hold the key', in_charge),
-                                        ('prescribe', prescriber),
-                                        ('dispense', dispenser)) if on]
-                flash(f"{name} added to the roster"
-                      + (f" &mdash; may {', '.join(jobs)}." if jobs
-                         else ', with no jobs ticked yet.'),
-                      'success')
-                return redirect(url_for('key_register'))
-
-            if action == 'set_officer':
-                if not is_admin:
-                    flash('Access denied. Only admins can change the roster.')
-                    return redirect(url_for('key_register'))
-                try:
-                    doc = officers.find_one({'_id': ObjectId(request.form.get('officer_id', ''))})
-                except (InvalidId, TypeError):
-                    doc = None
-                if not doc:
-                    flash('That person was not found on the roster.')
-                    return redirect(url_for('key_register'))
-                in_charge = request.form.get('in_charge') == 'yes'
-                active = request.form.get('active') == 'yes'
-                prescriber = request.form.get('prescriber') == 'yes'
-                dispenser = request.form.get('dispenser') == 'yes'
-                officers.update_one({'_id': doc['_id']},
-                                    {'$set': {'in_charge': in_charge,
-                                              'prescriber': prescriber,
-                                              'dispenser': dispenser,
-                                              'active': active}})
-                write_audit_entry(
-                    'UPDATE', 'key_officer', doc['name'],
-                    f"in charge {doc.get('in_charge')} -> {in_charge}, "
-                    f"prescribes {doc.get('prescriber')} -> {prescriber}, "
-                    f"dispenses {doc.get('dispenser')} -> {dispenser}, "
-                    f"active {doc.get('active')} -> {active}")
-                flash(f"{doc['name']} updated.", 'success')
-                return redirect(url_for('key_register'))
-
-            if action == 'delete_entry':
-                if not is_admin:
-                    flash('Access denied. Only admins can delete a register entry.')
-                    return redirect(url_for('key_register'))
-                try:
-                    doc = keys.find_one({'_id': ObjectId(request.form.get('entry_id', ''))})
-                except (InvalidId, TypeError):
-                    doc = None
-                if not doc:
-                    flash('That key register entry was not found.')
-                else:
-                    keys.delete_one({'_id': doc['_id']})
-                    write_audit_entry(
-                        'DELETE', 'store_key', doc.get('ref', ''),
-                        f"removed entry: key to {doc.get('recipient_name')} on "
-                        f"{doc['issued_date']:%Y-%m-%d}")
-                    flash(f"Entry for {doc.get('recipient_name')} deleted.", 'success')
-                return redirect(url_for('key_register'))
-
-            flash('Unknown action.')
-            return redirect(url_for('key_register'))
-
-        # ----- GET --------------------------------------------------------
-        now = local_now()
-        today = now.date()
-        raw_start = (request.args.get('start_date') or '').strip()
-        raw_end = (request.args.get('end_date') or '').strip()
-        try:
-            start = datetime.strptime(raw_start, '%Y-%m-%d')
-        except ValueError:
-            back = _months_back(today, KEY_REGISTER_DEFAULT_MONTHS)
-            start = datetime(back.year, back.month, back.day)
-        try:
-            end = datetime.strptime(raw_end, '%Y-%m-%d')
-        except ValueError:
-            end = datetime(today.year, today.month, today.day)
-        if end < start:
-            start, end = end, start
-        q = (request.args.get('q') or '').strip()
-
-        query: Query = {'issued_date': {'$gte': start, '$lt': end + timedelta(days=1)}}
-        if q:
-            rx = {'$regex': re.escape(q), '$options': 'i'}
-            query['$or'] = [{'recipient_name': rx}, {'pharmacist': rx},
-                            {'returning_officer': rx}, {'receiving_officer': rx},
-                            {'ref': rx}]
-
-        entries, still_out_count = [], 0
-        for doc in keys.find(query).sort('issued_at', -1).limit(500):
-            out = doc.get('status') == 'Out'
-            # Overdue is measured against when the key was actually expected
-            # back, which over a weekend is Monday midday, not the same night.
-            issued_at = doc.get('issued_at') or doc['issued_date']
-            due = doc.get('due_back') or _key_due_back(issued_at)
-            weekend = doc.get('weekend_hold')
-            if weekend is None:
-                weekend = _key_is_weekend_hold(issued_at)
-            overdue = out and now > due
-            if out:
-                still_out_count += 1
-            entries.append({
-                'id': str(doc['_id']),
-                'ref': doc.get('ref', ''),
-                'issued_date': doc['issued_date'],
-                'issued_time': doc.get('issued_time', ''),
-                'pharmacist': doc.get('pharmacist', ''),
-                'recipient_name': doc.get('recipient_name', ''),
-                'returned_date': doc.get('returned_date'),
-                'returned_time': doc.get('returned_time'),
-                'returning_officer': doc.get('returning_officer'),
-                'receiving_officer': doc.get('receiving_officer'),
-                'return_pharmacist': doc.get('return_pharmacist'),
-                'comments': doc.get('comments', ''),
-                'status': doc.get('status', ''),
-                'overdue': overdue,
-                'weekend': weekend,
-                'due_back': due,
-                'entered_by': doc.get('issued_by_user', ''),
-                'auto_source': doc.get('auto_source', ''),
-                'auto_closed': doc.get('auto_closed', ''),
-                'also_on_duty': doc.get('also_on_duty') or [],
-                'off_roster': doc.get('recipient_off_roster', False),
-                'corrected_by': doc.get('corrected_by', ''),
-                'issued_time_raw': doc.get('issued_time', ''),
-                'returned_time_raw': doc.get('returned_time', ''),
-            })
-
-        open_doc = keys.find_one({'status': 'Out'})
-        open_entry = None
-        if open_doc:
-            since = open_doc.get('issued_at') or open_doc['issued_date']
-            due = open_doc.get('due_back') or _key_due_back(since)
-            weekend = open_doc.get('weekend_hold')
-            if weekend is None:
-                weekend = _key_is_weekend_hold(since)
-            open_entry = {
-                'id': str(open_doc['_id']),
-                'recipient_name': open_doc.get('recipient_name', ''),
-                'issued_date': open_doc['issued_date'],
-                'issued_time': open_doc.get('issued_time', ''),
-                'pharmacist': open_doc.get('pharmacist', ''),
-                'held_for': _held_for(since, now),
-                'overdue': now > due,
-                'weekend': weekend,
-                'due_back': due,
-                'off_roster': open_doc.get('recipient_off_roster', False),
-            }
-
-        last_return = ''
-        if not open_doc:
-            last = keys.find_one({'status': 'Returned'}, sort=[('returned_at', -1)])
-            if last and last.get('returned_date'):
-                last_return = (f"{last['returned_date']:%a %d %b} at "
-                               f"{last.get('returned_time', '')} by "
-                               f"{last.get('returning_officer', '')}")
-
-        edit_entry = None
-        raw_edit = (request.args.get('edit') or '').strip()
-        if raw_edit and is_admin:
-            edit_entry = next((e for e in entries if e['id'] == raw_edit), None)
-
-        if request.values.get('export') == 'csv':
-            return _register_csv_response('key_register', entries)
-
-        return render_template(
-            'key_register.html', nav_links=get_nav_links(),
-            message=message, message_class=message_class, is_admin=is_admin,
-            current_user=current_user, user_in_charge=user_in_charge,
-            user_may_receive=user_may_receive,
-            officer_names=_officer_names(officers),
-            receiver_names=_key_receiver_names(officers),
-            roster=list(officers.find().sort([('in_charge', -1), ('name', 1)])),
-            open_entry=open_entry, last_return=last_return,
-            entries=entries, still_out_count=still_out_count,
-            edit_entry=edit_entry,
-            start_date=start.strftime('%Y-%m-%d'),
-            end_date=end.strftime('%Y-%m-%d'), q=q)
-
-    except Exception as e:
-        app.logger.error(f'key_register failed: {e}')
-        flash('Could not load the key register.')
-        return redirect('/reports')
 
 
 @app.route('/dashboard', methods=['GET'])
@@ -8220,7 +4643,7 @@ def dashboard() -> ResponseReturnValue:
         # two months is counted once — the same basis as the period report.
         patient_total = len(clinical.get('patients') or ())
         dispensed_money = sum(totals['val_dispensed'])
-        cost_per_patient_label = (f'R{dispensed_money / patient_total:,.2f}'
+        cost_per_patient_label = (f'M{dispensed_money / patient_total:,.2f}'
                                   if patient_total else '-')
         totals['val_dispensed'] = [f"{v:,.0f}" for v in totals['val_dispensed']]
         totals['val_received']  = [f"{v:,.0f}" for v in totals['val_received']]
@@ -8257,9 +4680,9 @@ def dashboard() -> ResponseReturnValue:
              'bg': '#f8d7da' if under_one else '#eef2f7', 'fg': '#721c24' if under_one else '#1a3a5c'},
             {'label': 'Expired on shelf', 'value': len(expired_now), 'sub': 'remove from stock',
              'bg': '#f8d7da' if expired_now else '#eef2f7', 'fg': '#721c24' if expired_now else '#1a3a5c'},
-            {'label': 'Expiring in 90 days', 'value': len(expiring_90), 'sub': f'R{at_risk:,.2f} at risk',
+            {'label': 'Expiring in 90 days', 'value': len(expiring_90), 'sub': f'M{at_risk:,.2f} at risk',
              'bg': '#fff3cd' if expiring_90 else '#eef2f7', 'fg': '#856404' if expiring_90 else '#1a3a5c'},
-            {'label': 'Stock value', 'value': f'R{stock_value:,.0f}', 'sub': 'balance x unit price',
+            {'label': 'Stock value', 'value': f'M{stock_value:,.0f}', 'sub': 'balance x unit price',
              'bg': '#eef2f7', 'fg': '#1a3a5c'},
             {'label': 'Cost per patient', 'value': cost_per_patient_label,
              'sub': f'{patient_total:,} patient(s) over the period',
@@ -8372,7 +4795,7 @@ def dashboard() -> ResponseReturnValue:
             search=search, category='pharmaceutical',
             category_label=CATEGORY_LABELS['pharmaceutical'],
             tiles=[], totals=empty, act=act_empty, rows=[], total_items=0,
-            clinical={'outcomes': [], 'diagnoses': [], 'episodes': 0, 'patients': set()},
+            clinical={'episodes': 0, 'patients': set()},
             expiring=[], st_totals=st_empty, top_discrepancies=[], never_counted=[],
         ), 500
 
@@ -9011,45 +5434,39 @@ def audit_log() -> ResponseReturnValue:
         ), 500
 
 
-@app.route('/delete-dispense', methods=['POST'])
+@app.route('/sales/void', methods=['POST'])
 @login_required
-def delete_dispense() -> ResponseReturnValue:
+def void_sale() -> ResponseReturnValue:
+    """Admin only: cancel a sale, put its stock back, keep the receipt on file.
+
+    The receipt stays (marked VOIDED, with who and why) so the sequence of
+    receipt numbers has no gaps an auditor would have to explain. Its stock
+    lines are removed, so every report reads as if the sale never happened.
+    """
     if session['user'].get('role') != 'admin':
-        flash('Only admins can delete dispense transactions.', 'error')
-        return redirect(url_for('dispense'))
-
-    tx_id = request.form.get('transaction_id')
-    if not tx_id:
-        flash('No transaction selected.', 'error')
-        return redirect(url_for('dispense'))
-
-    try:
-        client = get_mongo_client()
-        db = client['pharmacy_db']
-        transactions = db['transactions']
-        medications  = db['medications']
-
-        tx_rows = list(transactions.find({'transaction_id': tx_id, 'type': 'dispense'}))
-        if not tx_rows:
-            flash('Transaction not found.', 'error')
-            write_app_warning(
-                'transaction_not_found',
-                f'Dispense transaction "{tx_id}" not found when attempting to delete.',
-                {'transaction_id': tx_id}
-            )
-            return redirect(url_for('dispense'))
-
-        for row in tx_rows:
-            medications.update_one({'name': row['med_name']}, {'$inc': {'balance': row['quantity']}})
-        transactions.delete_many({'transaction_id': tx_id})
-        flash('Dispense transaction deleted – stock restored.', 'success')
-    except Exception as e:
-        flash(f'Delete failed: {str(e)}', 'error')
-
-    return redirect(url_for('dispense',
-                            start_date=request.form.get('start_date'),
-                            end_date=request.form.get('end_date'),
-                            search=request.form.get('search')))
+        flash('Only an admin can void a sale.', 'error')
+        return redirect(url_for('sales'))
+    receipt_no = request.form.get('receipt_no') or ''
+    reason = (request.form.get('reason') or '').strip()[:200]
+    if not reason:
+        flash('Give a reason for voiding the sale.', 'error')
+        return redirect(url_for('receipt', receipt_no=receipt_no))
+    db = get_mongo_client()['pharmacy_db']
+    sale = db['sales'].find_one_and_update(
+        {'receipt_no': receipt_no, 'status': 'completed'},
+        {'$set': {'status': 'voided', 'voided_by': session['user']['name'],
+                  'voided_at': datetime.utcnow(), 'void_reason': reason}})
+    if not sale:
+        flash('That sale was not found or is already voided.', 'error')
+        return redirect(url_for('sales'))
+    for tx in db['transactions'].find({'transaction_id': sale['transaction_id'], 'type': 'dispense'}):
+        db['medications'].update_one({'name': tx['med_name']}, {'$inc': {'balance': tx['quantity']}})
+    db['transactions'].delete_many({'transaction_id': sale['transaction_id'], 'type': 'dispense'})
+    write_audit_entry('VOID', 'sale', receipt_no,
+                      f'voided by {session["user"]["name"]}: {reason}; '
+                      f'M{sale.get("total", 0):.2f} returned to stock')
+    flash(f'Sale {receipt_no} voided and its stock returned.', 'success')
+    return redirect(url_for('receipt', receipt_no=receipt_no))
 
 
 @app.route('/edit-receive/<receive_id>', methods=['GET', 'POST'])
@@ -9295,55 +5712,6 @@ def delete_receive() -> ResponseReturnValue:
 # API endpoints
 # -----------------------------------------------------------------------
 
-DIAGNOSIS_SUGGESTION_LIMIT = 10
-
-
-def _diagnosis_matches(query: str, limit: int = DIAGNOSIS_SUGGESTION_LIMIT) -> list[str]:
-    """The standard diagnoses worth offering for what has been typed.
-
-    Ranked, because the old version returned the first ten entries in list
-    order that contained the text anywhere — so typing "cold" offered
-    "Alcohol intoxication" before "Common cold", and the standard term was
-    further away than typing one of your own.
-
-    Order: an entry whose name starts with what you typed, then one where a
-    WORD starts with it, then one that merely contains it, then the same
-    three again for its other search terms. Shorter names win ties, because
-    the short name is nearly always the everyday one.
-    """
-    q = (query or '').strip().lower()
-    if not q:
-        return []
-    # One or two letters match far too much in the middle of a word: "tb"
-    # offered GERD, because one of its search terms is "heartburn". For a
-    # query this short, only the start of a word counts.
-    loose = len(q) >= 3
-    scored = []
-    for label in DIAGNOSES_OPTIONS:
-        best = None
-        terms = [(label.lower(), 0)] + [
-            (t, 1) for t in DIAGNOSIS_SEARCH_TERMS.get(label, ())]
-        for text, offset in terms:
-            if text.startswith(q):
-                rank = 0
-            elif re.search(r'\b' + re.escape(q), text):
-                rank = 1
-            elif loose and q in text:
-                rank = 2
-            else:
-                continue
-            rank += offset
-            best = rank if best is None else min(best, rank)
-        if best is not None:
-            scored.append((best, len(label), label.lower(), label))
-    scored.sort()
-    return [label for _r, _n, _l, label in scored[:limit]]
-
-
-# Every register answers the same question on paper: "can I have this as a
-# file?" The reports page and the dispensing page already could. These are
-# the rest of them, through one helper so they behave identically and a sixth
-# register costs four lines rather than forty.
 REGISTER_CSV = {
     'audit': ('Audit Log', [
         ('timestamp', 'When'), ('user', 'User'), ('action', 'Action'),
@@ -9409,75 +5777,8 @@ def _register_csv_response(kind: str, rows: Iterable[Doc]) -> Response:
     return resp
 
 
-# ---------------------------------------------------------------------
-# Visits that look like the same visit recorded twice.
-#
-# Until today a partial dispense left the whole visit sitting in the form —
-# the message said "Partial", not "successfully", and only the word
-# "successfully" cleared it. The medicines that HAD dispensed were already
-# recorded and their stock already deducted, so pressing Dispense again, the
-# natural thing to do when a form looks unsubmitted, dispensed them a second
-# time. The form is fixed; the records it made are still there, with the
-# stock counted out twice.
-#
-# Matching is deliberately narrow: same patient, same medication, same
-# quantity, minutes apart. A patient genuinely coming back the same day for
-# the same drug at the same dose within a few minutes does not happen.
-# ---------------------------------------------------------------------
-DUPLICATE_WINDOW_MINUTES = 10
 
 
-def _duplicate_visits(transactions: Collection, days: int = 180, limit: int = 200) -> Docs:
-    """Visits that are probably one visit recorded twice.
-
-    Returns a list of {patient, med_name, quantity, first, second, minutes,
-    units, value, ids} — never a verdict. The pharmacist decides; this only
-    says where to look.
-    """
-    since = datetime.utcnow() - timedelta(days=days)
-    try:
-        rows = list(transactions.find(
-            {'type': 'dispense', 'timestamp': {'$gte': since}},
-            {'patient': 1, 'med_name': 1, 'quantity': 1, 'price': 1,
-             'line_value': 1, 'timestamp': 1, 'transaction_id': 1,
-             'dispenser': 1}).sort('timestamp', 1))
-    except Exception as e:
-        app.logger.warning(f'duplicate scan unavailable: {e}')
-        return []
-
-    by_key: dict[tuple[Any, ...], Docs] = {}
-    for r in rows:
-        key = ((r.get('patient') or '').strip().lower(),
-               (r.get('med_name') or '').strip().lower(),
-               r.get('quantity'))
-        by_key.setdefault(key, []).append(r)
-
-    out = []
-    window = timedelta(minutes=DUPLICATE_WINDOW_MINUTES)
-    for (_pat, _med, _qty), group in by_key.items():
-        if len(group) < 2:
-            continue
-        for a, b in zip(group, group[1:]):
-            ta, tb = a.get('timestamp'), b.get('timestamp')
-            if not ta or not tb or (tb - ta) > window:
-                continue
-            # Two lines of the SAME visit are not a duplicate: a prescription
-            # can legitimately repeat a medicine across its own lines.
-            if a.get('transaction_id') and a.get('transaction_id') == b.get('transaction_id'):
-                continue
-            out.append({
-                'patient': b.get('patient', ''),
-                'med_name': b.get('med_name', ''),
-                'quantity': b.get('quantity', 0),
-                'first': ta, 'second': tb,
-                'minutes': round((tb - ta).total_seconds() / 60, 1),
-                'dispenser': b.get('dispenser', ''),
-                'units': b.get('quantity', 0) or 0,
-                'value': _line_value(b),
-                'ids': [a.get('transaction_id'), b.get('transaction_id')],
-            })
-    out.sort(key=lambda d: d['second'], reverse=True)
-    return out[:limit]
 
 
 # ---------------------------------------------------------------------
@@ -9498,10 +5799,9 @@ def _duplicate_visits(transactions: Collection, days: int = 180, limit: int = 20
 # the person who needs it will be having a bad day and may not be you.
 # ---------------------------------------------------------------------
 BACKUP_COLLECTIONS = [
-    'medications', 'transactions', 'deliveries', 'stock_takes',
-    'stock_take_counts', 'temperature_logs', 'loan_items', 'loans',
-    'key_register', 'key_officers', 'key_control', 'users', 'audit_log',
-    'app_warnings', 'error_logs',
+    'medications', 'transactions', 'sales', 'counters', 'deliveries',
+    'stock_takes', 'stock_take_counts', 'temperature_logs', 'users',
+    'audit_log', 'app_warnings', 'error_logs',
 ]
 
 
@@ -9519,7 +5819,7 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-BACKUP_README = """NMC Pharmacy — full database backup
+BACKUP_README = """The Healing Hub Pharmacy — full database backup
 ===================================
 
 Taken : {when}
@@ -9542,7 +5842,7 @@ KEEP IT SOMEWHERE ELSE
     backup. Put a copy somewhere that would survive losing this computer.
 
     Passwords are stored only as one-way hashes and cannot be read out of
-    this file, but it still holds patient names and their diagnoses. Treat
+    this file, but it still holds patient names and prescription details. Treat
     it exactly as you would the paper register: it is confidential.
 
 PUTTING IT BACK
@@ -9591,7 +5891,7 @@ def _backup_archive(db: Database, taken_by: str) -> tuple[str, bytes]:
             'format': 'one JSON document per line (mongoimport)',
         }, indent=1))
     stamp = local_now().strftime('%Y%m%d-%H%M')
-    return f'nmc-pharmacy-backup-{stamp}.zip', buf.getvalue()
+    return f'healing-hub-backup-{stamp}.zip', buf.getvalue()
 
 
 @app.route('/backup', methods=['GET'])
@@ -9617,85 +5917,10 @@ def backup_download() -> ResponseReturnValue:
     return resp
 
 
-# The companies whose staff the pharmacy serves, and the jobs they do.
-# These SEED the suggestions; the live list is whatever has actually been
-# recorded, so a new contractor appears the first time one of its employees
-# is seen rather than when someone remembers to edit this file.
-COMPANY_SEED = [
-    'BLW', 'BUSY BEE', 'CMS', 'Consulmet', 'Eminence', 'Enaex', 'ER24',
-    'Government', 'IFS', 'LD', 'LISELO', 'LMPS', 'Mendi', 'MGC', 'MINOPEX',
-    'NMC', 'Other', 'PLATO', 'Public', 'THOLO', 'TOMRA', 'UL4', 'UNITRANS',
-]
-POSITION_SEED = [
-    'Administration', 'Artisan', 'Blasting', 'Boiler Maker', 'Chef', 'CI',
-    'Cleaner', 'Controller', 'Diesel Depo', 'Director', 'Drilling', 'Drivers',
-    'Electricians', 'Emergency Coordinator', 'Environmnet', 'Finance',
-    'Fitters', 'Food Service Attendant', 'General Worker', 'Geologist', 'Hse',
-    'Housekeeping', 'Intern', 'IT', 'Kitchen', 'Lab Technologist',
-    'Maintenance', 'Management', 'Manager', 'Mechanics', 'Medical Doctor',
-    'Metallurgy', 'Mining', 'Nurse', 'Operator', 'Other', 'Pharmacist', 'PHC',
-    'Plant Operator', 'Police', 'Procurement', 'Process', 'Production',
-    'Public', 'Recovery', 'Rope Access', 'Security', 'Sorting', 'Storekeeper',
-    'Supervisor', 'Survey', 'Technician', 'Tourist', 'Training', 'Treatment',
-    'Tyreman', 'UNITRANS', 'Visitor', 'Water Works', 'Welder',
-    'Workshop Cleaners', 'X-Ray Technologist',
-]
-PEOPLE_OPTION_LIMIT = 400
 
 
-def _recorded_values(transactions: Collection, field: str, seed: Iterable[str]) -> list[str]:
-    """What has been recorded in this field, plus the standing list.
-
-    Case-folded so "Unitrans" and "UNITRANS" do not both appear: the first
-    spelling seen wins, which keeps whatever the pharmacy actually writes
-    rather than imposing a house style on their own records.
-    """
-    out, seen = [], set()
-    for name in sorted(seed, key=str.lower):
-        if name.strip() and name.strip().lower() not in seen:
-            seen.add(name.strip().lower())
-            out.append(name.strip())
-    try:
-        for value in transactions.distinct(field, {'type': 'dispense'}):
-            v = (value or '').strip()
-            if v and v.lower() not in seen:
-                seen.add(v.lower())
-                out.append(v)
-    except Exception as e:
-        app.logger.warning(f'{field} suggestions unavailable: {e}')
-    return sorted(out, key=str.lower)[:PEOPLE_OPTION_LIMIT]
 
 
-@app.route('/api/people-options', methods=['GET'])
-@login_required
-def people_options() -> ResponseReturnValue:
-    """Companies and positions to suggest, as JSON."""
-    try:
-        transactions = get_mongo_client()['pharmacy_db']['transactions']
-        return jsonify({
-            'companies': _recorded_values(transactions, 'company', COMPANY_SEED),
-            'positions': _recorded_values(transactions, 'position', POSITION_SEED),
-        })
-    except Exception as e:
-        app.logger.warning(f'people options unavailable: {e}')
-        return jsonify({'companies': sorted(COMPANY_SEED, key=str.lower),
-                        'positions': sorted(POSITION_SEED, key=str.lower)})
-
-
-@app.route('/api/diagnoses', methods=['GET'])
-@login_required
-def get_diagnosis_suggestions() -> ResponseReturnValue:
-    return jsonify(_diagnosis_matches(request.args.get('query', '')))
-
-
-# These names SEED an empty database. They are not the suggestion list any
-# more: that comes from the medications collection, which already knows what
-# is on file (see _medication_names). Keeping a hand-edited list as the
-# suggestions meant editing this file whenever stock changed, and when the two
-# drifted apart the app offered names that did not exist — so a prescription
-# could be typed out in full and then fail with "item not on file". This list
-# is therefore only a fallback for a pharmacy with nothing on file yet, and it
-# does not need updating as stock changes.
 MEDICATION_SEED_NAMES = [
     # Taken 2026-10-20 from the pharmacy's own Stock on Hand listing.
     '3HP 300/300mg',
@@ -10021,50 +6246,6 @@ def session_ping() -> ResponseReturnValue:
     return jsonify({'ok': True, 'timeout_minutes': SESSION_TIMEOUT_MINUTES})
 
 
-@app.route('/api/patient-lookup', methods=['GET'])
-@login_required
-def patient_lookup() -> ResponseReturnValue:
-    """What this patient's last visit recorded about them.
-
-    Company, position, birth decade and gender are facts about a person, not
-    about a visit, so a returning patient should not have to supply them
-    again. Matched on the exact name, case-insensitively: anything looser
-    would attach one person's employer to another's record, which is worse
-    than typing it out.
-
-    The date of the visit it came from is returned too, because two people
-    genuinely can share a name. The form says where the details came from so
-    a wrong match is visible rather than silently believed.
-    """
-    name = (request.args.get('name') or '').strip()
-    if not name:
-        return jsonify({})
-    try:
-        db = get_mongo_client()['pharmacy_db']
-        doc = db['transactions'].find_one(
-            {'type': 'dispense',
-             'patient': {'$regex': f'^{re.escape(name)}$', '$options': 'i'}},
-            {'_id': 0, 'patient': 1, 'company': 1, 'position': 1,
-             'birth_decade': 1, 'gender': 1, 'timestamp': 1, 'date': 1},
-            sort=[('timestamp', -1)])
-        if not doc:
-            return jsonify({})
-        when = doc.get('date') or ''
-        if not when and doc.get('timestamp'):
-            when = doc['timestamp'].strftime('%Y-%m-%d')
-        return jsonify({
-            'patient': doc.get('patient', ''),
-            'company': doc.get('company', ''),
-            'position': doc.get('position', ''),
-            'birth_decade': doc.get('birth_decade', ''),
-            'gender': doc.get('gender', ''),
-            'last_visit': when,
-        })
-    except Exception as e:
-        app.logger.warning(f'patient lookup failed: {e}')
-        return jsonify({})
-
-
 @app.route('/api/medication-defaults', methods=['GET'])
 @login_required
 def get_medication_defaults() -> ResponseReturnValue:
@@ -10162,6 +6343,49 @@ def get_medication_options() -> ResponseReturnValue:
     so a medication added in one tab appears in the next page that loads.
     """
     return jsonify(_medication_names())
+
+
+# ---------------------------------------------------------------------------
+# Public product feed for the Healing Hub website.
+#
+# The only page in this app that needs no login, so it says as little as it
+# can: no stock quantities (only in stock / out of stock), no costs, and no
+# price for anything sold on prescription. Only items an admin has ticked
+# "Show on website" appear. The website caches it for a few minutes, so a
+# busy day of browsing costs the database almost nothing.
+# ---------------------------------------------------------------------------
+PUBLIC_FEED_MAX_AGE = 300
+
+
+@app.route('/api/public/products', methods=['GET'])
+def public_products() -> ResponseReturnValue:
+    try:
+        meds = get_mongo_client()['pharmacy_db']['medications'].find(
+            _active({'on_website': True}),
+            {'_id': 0, 'name': 1, 'web_category': 1, 'description': 1,
+             'selling_price': 1, 'rx_only': 1, 'schedule': 1, 'balance': 1})
+        items = []
+        for m in _by_name(meds):
+            rx = bool(m.get('rx_only')) or m.get('schedule') == 'controlled'
+            price = _money(m.get('selling_price'))
+            items.append({
+                'name': m['name'],
+                'category': m.get('web_category') or (WEB_CATEGORIES[0] if rx else WEB_CATEGORIES[1]),
+                'description': m.get('description') or '',
+                'prescription_only': rx,
+                'price': None if rx or not price else price,
+                'in_stock': (m.get('balance', 0) or 0) > 0,
+            })
+        body = {'currency': 'LSL', 'updated': datetime.utcnow().replace(microsecond=0).isoformat() + 'Z',
+                'categories': WEB_CATEGORIES, 'products': items}
+        resp = jsonify(body)
+        resp.headers['Cache-Control'] = f'public, max-age={PUBLIC_FEED_MAX_AGE}'
+    except Exception as e:
+        app.logger.warning(f'public product feed failed: {e}')
+        resp = jsonify({'error': 'Product list unavailable'})
+        resp.status_code = 503
+    resp.headers['Access-Control-Allow-Origin'] = os.environ.get('WEBSITE_ORIGIN', '*')
+    return resp
 
 
 # FIX (Bug, regression): init_audit() must run at module level, not inside

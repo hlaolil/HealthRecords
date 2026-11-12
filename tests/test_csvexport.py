@@ -196,31 +196,6 @@ for rt, name, expect in [
           str([x[0] for x in rows[1:] if x]))
 
 print('\n--- 5. Registers keep the columns the paper form has ---')
-r = download('sick_leave', **RANGE)
-rows = rows_of(r)
-check('sick leave headers match the register',
-      rows[0] == ['Date', 'Name', 'Company', 'Days Given', 'Diagnosis',
-                  'Prescriber'], str(rows[0]))
-sl = [x for x in rows[1:] if x and x[1] == 'Thabo Moeti']
-check('the sick leave entry is there', len(sl) == 1, str(rows[1:]))
-if sl:
-    check('days given came through', sl[0][3] == '3', sl[0][3])
-    check('a list of diagnoses became one readable cell',
-          sl[0][4] == 'URTI, Fever', sl[0][4])
-    check('only sick leave is in the sick leave register',
-          not any(x and x[1] == 'Lineo Phiri' for x in rows[1:]),
-          str([x[1] for x in rows[1:] if x]))
-
-r = download('internal_issues', **RANGE)
-rows = rows_of(r)
-check('internal issues name both sides of the transfer',
-      rows[0] == ['Date', 'Medication', 'Qty', 'Department', 'Received By',
-                  'Value', 'Issued By'], str(rows[0]))
-iss = [x for x in rows[1:] if x]
-check('the receiver and the issuer are different columns',
-      iss and iss[0][4] == 'Sr. Mokoena' and iss[0][6] == 'Letlotlo Hlaoli',
-      str(iss[:1]))
-
 r = download('expiry_writeoffs', **RANGE)
 rows = rows_of(r)
 check('losses carry batch, expiry and cost',
@@ -314,131 +289,6 @@ if amox:
           f'{recon} != {row["Current Balance"]} in {row}')
 login()
 
-print('\n--- 10. The dispensing record downloads from its own page ---')
-reset()
-login()
-meds.insert_many([
-    {'name': 'Paracetamol, 500 mg', 'balance': 500, 'price': 0.4,
-     'expiry_date': '2028-01-31', 'batch': 'PC2', 'category': 'general',
-     'pack_size': 1000, 'pack_price': 400.0},
-    {'name': 'Amoxicillin, 250 mg', 'balance': 200, 'price': 1.5,
-     'expiry_date': '2027-03-31', 'batch': 'AX1', 'category': 'general',
-     'pack_size': 100, 'pack_price': 150.0},
-])
-t0 = A.local_now().replace(hour=9, minute=0, second=0, microsecond=0)
-# One visit, two medications - the case a flat row-per-line file has to get
-# right without inflating the money.
-txs.insert_many([
-    {'type': 'dispense', 'transaction_id': 'V-1', 'med_name': 'Paracetamol, 500 mg',
-     'quantity': 10, 'price': 0.4, 'line_value': 4.0, 'patient': 'Thabo Mokoena',
-     'company': 'Letseng Diamonds', 'position': 'Driver', 'gender': 'Male',
-     'birth_decade': 1980, 'outcome': 'Sick leave', 'outcome_days': 3,
-     'diagnoses': ['URTI', 'Fever'], 'prescriber': 'Dr. T. Khothatso',
-     'dispenser': 'Letlotlo Hlaoli', 'user': 'Letlotlo Hlaoli',
-     'date': t0.strftime('%Y-%m-%d'), 'timestamp': t0},
-    {'type': 'dispense', 'transaction_id': 'V-1', 'med_name': 'Amoxicillin, 250 mg',
-     'quantity': 4, 'price': 1.5, 'line_value': 6.0, 'patient': 'Thabo Mokoena',
-     'company': 'Letseng Diamonds', 'position': 'Driver', 'gender': 'Male',
-     'birth_decade': 1980, 'outcome': 'Sick leave', 'outcome_days': 3,
-     'diagnoses': ['URTI', 'Fever'], 'prescriber': 'Dr. T. Khothatso',
-     'dispenser': 'Letlotlo Hlaoli', 'user': 'Letlotlo Hlaoli',
-     'date': t0.strftime('%Y-%m-%d'), 'timestamp': t0},
-    # a second visit, and an older record with no line_value stored
-    {'type': 'dispense', 'transaction_id': 'V-2', 'med_name': 'Paracetamol, 500 mg',
-     'quantity': 20, 'price': 0.4, 'patient': 'Palesa Nkoe',
-     'company': 'Lesotho Highlands', 'position': 'Clerk', 'gender': 'Female',
-     'birth_decade': 1990, 'outcome': 'Outpatient',
-     'prescriber': 'Dr. T. Khothatso', 'dispenser': 'Letlotlo Hlaoli',
-     'user': 'Letlotlo Hlaoli', 'date': t0.strftime('%Y-%m-%d'),
-     'timestamp': t0 - timedelta(days=1)},
-])
-
-body = c.get('/dispense').data.decode()
-check('the dispensing page offers the download',
-      'name="export" value="csv"' in body)
-check('it sits on the filter form, so it obeys the dates and search',
-      body.index('name="export"') > body.index('class="filter-form"')
-      and body.index('name="export"') < body.index('</form>', body.index('class="filter-form"')))
-check('and the page says the download is not just this page',
-      'not just this page' in body)
-
-r = c.get('/dispense?export=csv')
-check('it comes back as a CSV',
-      r.headers.get('Content-Type', '').startswith('text/csv'),
-      r.headers.get('Content-Type'))
-check('named for the record and the day',
-      f'dispensing-record-{A.local_now().strftime("%Y%m%d")}.csv'
-      in r.headers.get('Content-Disposition', ''),
-      r.headers.get('Content-Disposition'))
-rows = rows_of(r)
-check('the header matches the record on screen', rows[0] == [
-    'Date', 'Timestamp', 'Patient', 'Company', 'Position', 'Gender', 'Born',
-    'Outcome', 'Days', 'Diagnoses', 'Prescriber', 'Dispenser', 'Medication',
-    'Quantity', 'Unit Cost', 'Line Cost', 'Visit Cost', 'Recorded By',
-    'Visit ID'], str(rows[0]))
-data = [dict(zip(rows[0], x)) for x in rows[1:] if x]
-check('every medication line is a row of its own', len(data) == 3, str(len(data)))
-v1 = [x for x in data if x['Visit ID'] == 'V-1']
-check('both medicines of the one visit are there', len(v1) == 2, str(v1))
-check('the visit details repeat down its rows',
-      all(x['Patient'] == 'Thabo Mokoena' and x['Company'] == 'Letseng Diamonds'
-          for x in v1), str(v1))
-check('the sick leave days come through', all(x['Days'] == '3' for x in v1),
-      str([x['Days'] for x in v1]))
-check('a list of diagnoses becomes one readable cell',
-      all(x['Diagnoses'] == 'URTI; Fever' for x in v1),
-      str([x['Diagnoses'] for x in v1]))
-check('the medication name keeps its own comma',
-      any(x['Medication'] == 'Amoxicillin, 250 mg' for x in v1),
-      str([x['Medication'] for x in v1]))
-
-# The money has to be summable. Repeating the visit total on every line of a
-# two-medicine visit would double it.
-check('line cost is on every row',
-      sorted(x['Line Cost'] for x in v1) == ['4.00', '6.00'],
-      str([x['Line Cost'] for x in v1]))
-check('the visit total appears once per visit, not once per medicine',
-      sorted(x['Visit Cost'] for x in v1) == ['', '10.00'],
-      str([x['Visit Cost'] for x in v1]))
-check('so summing either column gives the same answer',
-      round(sum(float(x['Line Cost']) for x in data), 2)
-      == round(sum(float(x['Visit Cost']) for x in data if x['Visit Cost']), 2),
-      str([(x['Line Cost'], x['Visit Cost']) for x in data]))
-v2 = [x for x in data if x['Visit ID'] == 'V-2'][0]
-check('a record with no stored line value is still costed',
-      v2['Line Cost'] == '8.00', v2['Line Cost'])
-
-print('\n--- 11. The download obeys the filter, and brings whole visits ---')
-r = c.get('/dispense?export=csv&search=Amoxicillin')
-data = [dict(zip(rows_of(r)[0], x)) for x in rows_of(r)[1:] if x]
-check('a search narrows the download',
-      all(x['Visit ID'] == 'V-1' for x in data), str(data))
-check('but a match on one medicine brings the WHOLE visit',
-      len(data) == 2,
-      str([x['Medication'] for x in data]) + ' — half a prescription is not '
-      'the record')
-
-r = c.get('/dispense?export=csv&start_date='
-          + (t0 - timedelta(days=1)).strftime('%Y-%m-%d')
-          + '&end_date=' + (t0 - timedelta(days=1)).strftime('%Y-%m-%d'))
-data = [dict(zip(rows_of(r)[0], x)) for x in rows_of(r)[1:] if x]
-check('a date range narrows it too',
-      len(data) == 1 and data[0]['Patient'] == 'Palesa Nkoe', str(data))
-
-print('\n--- 12. Too much to hand over at once is said, not truncated ---')
-_was = A.DISPENSE_CSV_MAX_LINES
-A.DISPENSE_CSV_MAX_LINES = 1
-try:
-    r = c.get('/dispense?export=csv', follow_redirects=True)
-    check('an oversized download is refused, not quietly cut short',
-          not r.headers.get('Content-Type', '').startswith('text/csv'),
-          r.headers.get('Content-Type'))
-    check('and it says what to do about it',
-          'Narrow the date range' in r.data.decode())
-finally:
-    A.DISPENSE_CSV_MAX_LINES = _was
-check('the limit is restored', A.DISPENSE_CSV_MAX_LINES == _was)
-
 print('\n--- 13. The other registers download too ---')
 # Reports and dispensing could already. These are the rest, through one
 # helper so a sixth register costs four lines rather than forty.
@@ -453,22 +303,9 @@ db['temperature_logs'].insert_one({
     'date': NOW2, 'session': 'Morning', 'location': 'Dispensary',
     'thermometer': '1', 'temp': 22.4, 'initials': 'LH',
     'check_time': '08:30', 'user': 'Letlotlo Hlaoli', 'timestamp': NOW2})
-db['key_register'].insert_one({
-    'ref': 'K-001', 'issued_date': NOW2, 'issued_time': '11:30',
-    'recipient_name': 'Malesoetsa Leohla', 'recipient_role': 'Nursing Officer',
-    'purpose': 'Weekend cover', 'returned_date': NOW2, 'returned_time': '12:00',
-    'pharmacist': 'Letlotlo Hlaoli', 'user': 'Letlotlo Hlaoli'})
-db['loans'].insert_one({
-    'loan_ref': 'L-001', 'item_code': 'CR-01', 'item_type': 'Crutches',
-    'patient_name': 'Mpho Letsie', 'issued_date': NOW2,
-    'due_date': NOW2 + timedelta(days=14), 'issued_by': 'Letlotlo Hlaoli',
-    'status': A.LOAN_STATUS_OUT})
-
 for path, name, must in [
         ('/audit?export=csv', 'audit-log', 'Amoxicillin, 250 mg'),
-        ('/temperature?export=csv', 'temperature-register', 'Dispensary'),
-        ('/key-register?export=csv', 'key-register', 'Malesoetsa Leohla'),
-        ('/loans?export=csv', 'equipment-loans', 'Mpho Letsie')]:
+        ('/temperature?export=csv', 'temperature-register', 'Dispensary')]:
     r = c.get(path)
     check(f'{name} downloads',
           r.headers.get('Content-Type', '').startswith('text/csv'),
@@ -497,40 +334,6 @@ rows = rows_of(r)
 check('with its column headings', rows and rows[0][0] == 'When', str(rows[:1]))
 check('and no rows pretending to be records',
       len([x for x in rows[1:] if x]) == 0, str(rows[1:]))
-
-print('\n--- 15. Companies and positions come from the record ---')
-# Written into the page, the two lists went stale the moment a new contractor
-# arrived: the name was not offered, so it got typed three ways and the
-# sick-leave-by-company report split across all three.
-reset()
-login()
-txs.insert_many([
-    {'type': 'dispense', 'company': 'Letseng Diamonds', 'position': 'Shift Boss',
-     'med_name': 'X', 'quantity': 1, 'timestamp': NOW2},
-    {'type': 'dispense', 'company': 'UNITRANS', 'position': 'Drivers',
-     'med_name': 'X', 'quantity': 1, 'timestamp': NOW2},
-    {'type': 'dispense', 'company': 'unitrans', 'position': 'drivers',
-     'med_name': 'X', 'quantity': 1, 'timestamp': NOW2},
-])
-opts = json.loads(c.get('/api/people-options').data)
-check('a company seen once is offered from then on',
-      'Letseng Diamonds' in opts['companies'], str(opts['companies'][:5]))
-check('and so is a position', 'Shift Boss' in opts['positions'])
-check('the standing list is still there',
-      'MINOPEX' in opts['companies'] and 'Nurse' in opts['positions'])
-check('the same name in another case is not offered twice',
-      len([x for x in opts['companies'] if x.lower() == 'unitrans']) == 1,
-      str([x for x in opts['companies'] if x.lower() == 'unitrans']))
-check('both lists are sorted',
-      opts['companies'] == sorted(opts['companies'], key=str.lower)
-      and opts['positions'] == sorted(opts['positions'], key=str.lower))
-check('the names are no longer written into the page',
-      'var companyOptions = [];' in page_source('dispense.html'),
-      'the lists should start empty and be fetched')
-check('and the page fetches them',
-      '/api/people-options' in page_source('dispense.html'))
-check('it is behind the login like everything else',
-      A.app.test_client().get('/api/people-options').status_code in (302, 401, 403))
 
 print(f"\n=========  {len(PASS)} passed, {len(FAIL)} failed  =========")
 if FAIL:

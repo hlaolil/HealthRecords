@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Edit Medication &middot; NMC Pharmacy{% endblock %}
+{% block title %}Edit Medication &middot; The Healing Hub Pharmacy{% endblock %}
 {% block heading %}Edit Medication{% endblock %}
 {% block content %}{% if message %}
     <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
@@ -41,7 +41,7 @@ balance, run a stock take and enter the physical count.</p>
                    value="{{ med_data.get('pack_size', 1) if med_data else 1 }}" required>
         </div>
         <div>
-            <label>Price per Pack (R):</label>
+            <label>Price per Pack (M):</label>
             <input name="pack_price" type="number" step="0.01" min="0"
                    value="{{ med_data.get('pack_price', med_data.price) if med_data else '' }}" required>
         </div>
@@ -58,6 +58,8 @@ balance, run a stock take and enter the physical count.</p>
             </select>
         </div>
     </div>
+    {% set m = med_data %}{% include '_retail_fields.html' %}
+
     <div class="form-buttons">
         <input type="submit" value="Update Medication">
         <a href="{{ url_for('reports', report_type='stock_on_hand') }}"><button type="button">Cancel</button></a>

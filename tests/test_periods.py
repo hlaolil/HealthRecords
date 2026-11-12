@@ -18,7 +18,7 @@ meds, txs = db['medications'], db['transactions']
 c = A.app.test_client()
 # The app refuses a POST without its CSRF token; this makes the
 # test client send it, so these checks exercise the real path.
-from test_support import arm_csrf
+from test_support import arm_csrf, sell
 arm_csrf(c)
 PASS, FAIL = [], []
 
@@ -46,36 +46,31 @@ def add(name, balance=100000, price=2.5):
 
 
 def dispense(patient, qty=10):
-    return c.post('/dispense', data={
-        'patient': patient, 'company': 'C', 'position': 'P', 'birth_year': '1985',
-        'gender': 'M', 'outcome': '', 'outcome_days': '', 'diagnoses': 'flu',
-        'prescriber': 'Dr X', 'dispenser': 'D',
-        'date': datetime.utcnow().strftime('%Y-%m-%d'),
-        'med_names': ['Paracetamol, 500 mg'], 'quantities': [str(qty)]},
-        follow_redirects=True)
+    return sell(c, db, [('Paracetamol, 500 mg', qty)], customer=patient)
 
 
-print('\n--- 1. A dispense appears immediately ---')
+print('\n--- 1. A sale lands on its receipt straight away ---')
 reset()
 login()
 add('Paracetamol, 500 mg')
 r = dispense('Thabo M', 10)
-body = r.data.decode()
-check('the new entry is in the list straight away', 'Thabo M' in body, )
-check('the confirmation is shown', 'successfully' in body)
+check('the sale redirects to its receipt', r.status_code == 302 and '/sales/' in r.headers['Location'])
+body = c.get(r.headers['Location']).data.decode()
+check('the receipt names the customer', 'Thabo M' in body)
+check('the confirmation is shown', 'recorded' in body)
 r = dispense('Palesa N', 5)
-body = r.data.decode()
-check('the second entry also appears immediately', 'Palesa N' in body)
+body = c.get('/sales').data.decode()
+check('the second sale is listed', 'Palesa N' in body)
 check('and the first is still there', 'Thabo M' in body)
 
-print('\n--- 2. Refreshing after a dispense does not dispense again ---')
+print('\n--- 2. Refreshing after a sale does not sell again ---')
 before = meds.find_one({})['balance']
 # a redirect means the browser lands on a GET; re-issuing it changes nothing
-c.get('/dispense')
-c.get('/dispense')
+c.get('/sell')
+c.get('/sales')
 check('re-loading the page does not deduct stock again',
       meds.find_one({})['balance'] == before, str(meds.find_one({})['balance']))
-check('only two dispenses exist', txs.count_documents({'type': 'dispense'}) == 2)
+check('only two sales exist', txs.count_documents({'type': 'dispense'}) == 2 and db['sales'].count_documents({}) == 2)
 
 print('\n--- 3. Edit Medication can no longer move stock ---')
 reset()
@@ -125,30 +120,30 @@ def period(kind, start='2026-05-20'):
 
 
 b, v = period('day')
-check('day covers only that date', v == 'R25.00', str(v))
+check('day covers only that date', v == 'M25.00', str(v))
 check('the day is named', 'Wednesday, 20 May 2026' in b, )
 b, v = period('week')
-check('week runs Monday to Sunday and includes both', v == 'R75.00', str(v))
+check('week runs Monday to Sunday and includes both', v == 'M75.00', str(v))
 check('the week is labelled by its range', 'Week of 18 May' in b, )
 b, v = period('month')
-check('month covers all of May', v == 'R175.00', str(v))
+check('month covers all of May', v == 'M175.00', str(v))
 check('the month is named', 'May 2026' in b)
 b, v = period('quarter')
-check('Q2 covers April to June only', v == 'R175.00', str(v))
+check('Q2 covers April to June only', v == 'M175.00', str(v))
 check('the quarter is named', 'Q2 2026' in b)
 b, v = period('year')
-check('year covers all of 2026', v == 'R375.00', str(v))
+check('year covers all of 2026', v == 'M375.00', str(v))
 check('the year is named', '>2026' in b or 'Report &mdash; 2026' in b)
 check('the covered range is stated', '2026-01-01 to 2026-12-31' in b)
 
 b, v = period('quarter', '2026-02-10')
-check('a February date selects Q1', 'Q1 2026' in b and v == 'R200.00', str(v))
+check('a February date selects Q1', 'Q1 2026' in b and v == 'M200.00', str(v))
 b, v = period('year', '2025-05-20')
-check('the previous year is separate', v == 'R400.00', str(v))
+check('the previous year is separate', v == 'M400.00', str(v))
 
 print('\n--- 5. Period edge cases ---')
 b, v = period('day', '2026-12-31')
-check('the last day of a year works', b.count('Period Report') >= 0 and v == 'R0.00', str(v))
+check('the last day of a year works', b.count('Period Report') >= 0 and v == 'M0.00', str(v))
 b, _ = period('quarter', '2026-11-15')
 check('Q4 rolls into the next year correctly', 'Q4 2026' in b)
 b, _ = period('week', '2026-01-01')
@@ -172,18 +167,13 @@ today = datetime.utcnow().strftime('%Y-%m-%d')
 
 
 def visit(patient, qty):
-    return c.post('/dispense', data={
-        'patient': patient, 'company': 'C', 'position': 'P', 'birth_decade': '1980',
-        'gender': 'M', 'outcome': 'Outpatient', 'outcome_days': '', 'diagnoses': 'flu',
-        'prescriber': 'Dr X', 'dispenser': 'D', 'date': today,
-        'med_names': ['Paracetamol, 500 mg'], 'quantities': [str(qty)]},
-        follow_redirects=True)
+    return sell(c, db, [('Paracetamol, 500 mg', qty)], customer=patient)
 
 
-# 2 patients, 3 visits, R750 total at R2.50/unit
-visit('Thabo M', 100)      # R250
-visit('Thabo M', 100)      # R250 — same patient, second visit
-visit('Palesa N', 100)     # R250
+# 2 patients, 3 visits, M750 total at M2.50/unit
+visit('Thabo M', 100)      # M250
+visit('Thabo M', 100)      # M250 — same patient, second visit
+visit('Palesa N', 100)     # M250
 b = c.post('/reports', data={'report_type': 'monthly_report', 'period': 'month',
                              'start_date': today, 'end_date': today}).data.decode()
 
@@ -197,12 +187,12 @@ def prow(body, label):
 check('cost per patient is reported', prow(b, 'Average cost per patient') is not None)
 check('3 visits recorded', prow(b, 'Visits') == '3', prow(b, 'Visits'))
 check('2 distinct patients', prow(b, 'Patients seen') == '2', prow(b, 'Patients seen'))
-check('total cost R750.00', prow(b, 'Total cost dispensed') == 'R750.00',
+check('total cost M750.00', prow(b, 'Total cost dispensed') == 'M750.00',
       prow(b, 'Total cost dispensed'))
-check('cost per visit is R250.00', prow(b, 'Average cost per visit') == 'R250.00',
+check('cost per visit is M250.00', prow(b, 'Average cost per visit') == 'M250.00',
       prow(b, 'Average cost per visit'))
-check('cost per PATIENT is R375.00, not R250.00',
-      prow(b, 'Average cost per patient') == 'R375.00',
+check('cost per PATIENT is M375.00, not M250.00',
+      prow(b, 'Average cost per patient') == 'M375.00',
       prow(b, 'Average cost per patient'))
 check('the two measures are genuinely different',
       prow(b, 'Average cost per visit') != prow(b, 'Average cost per patient'))
@@ -219,7 +209,7 @@ add('Paracetamol, 500 mg')
 b = c.post('/reports', data={'report_type': 'monthly_report', 'period': 'month',
                              'start_date': today, 'end_date': today}).data.decode()
 check('no divide-by-zero with no patients',
-      prow(b, 'Average cost per patient') == 'R0.00',
+      prow(b, 'Average cost per patient') == 'M0.00',
       prow(b, 'Average cost per patient'))
 check('visits per patient shows a dash', prow(b, 'Visits per patient') == '-')
 check('the dashboard handles an empty period',

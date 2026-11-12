@@ -65,7 +65,7 @@ _markup = re.findall(r'^\s*<(?:div|table|tr|td|th|form|p|h[1-6]|style|script|inp
                      r'|select|label|span|ul|li|button)\b', APP, re.M)
 check('app.py is the application again, not a page of HTML',
       len(_markup) < 40, f'{len(_markup)} lines of markup')
-check('there are nineteen pages', len(PAGES) == 19, str(len(PAGES)))
+check('there are sixteen pages', len(PAGES) == 16, str(len(PAGES)))
 
 print('\n--- 2. Every template Jinja can actually compile ---')
 # A template that does not parse is a 500 on whichever page uses it, and
@@ -120,21 +120,13 @@ for f in PAGES:
     check(f'{f} puts its content in the content block',
           '{% block content %}' in s and '{% endblock %}' in s)
 
-print('\n--- 6. The document reference is written once ---')
-# It is printed on the form. Seventeen copies is seventeen places to miss
-# when a revision changes.
-check('base.html carries the reference',
-      'LD-HSE/NMC/HRD/6.1.3.3' in base)
-carriers = [f for f in PAGES if 'LD-HSE/NMC/HRD/6.1.3.3' in text(f)]
+print("\n--- 6. The pharmacy's name is written once ---")
+check('base.html carries the company line',
+      'The Healing Hub Pharmacy (Pty) Ltd' in base)
+carriers = [f for f in PAGES if 'The Healing Hub Pharmacy (Pty) Ltd' in text(f)]
 check('and no page repeats it', not carriers, str(carriers))
-check('the Store Key register overrides it, being a different form',
-      '{% block doc_ref %}' in text('key_register.html')
-      and 'LD-HSE/NMC/PSKR/6.1.3.3' in text('key_register.html'))
-check('with its revision intact',
-      'Revision 2 of 2018' in text('key_register.html'))
-overriders = [f for f in PAGES if '{% block doc_ref %}' in text(f)]
-check('and it is the only page that does',
-      overriders == ['key_register.html'], str(overriders))
+check('no page carries the old clinic reference',
+      not [f for f in FILES if 'LD-HSE' in text(f) or 'NMC' in text(f)])
 
 print('\n--- 7. The pagination bar is one file, not two copies ---')
 # It was 1,214 characters of macro, byte for byte the same in the dispensing
@@ -143,20 +135,19 @@ check('there is a partial for it', os.path.exists(os.path.join(TDIR, '_pagebar.h
 check('it defines the macro once', text('_pagebar.html').count('{% macro pagebar') == 1)
 definers = [f for f in FILES if '{% macro pagebar' in text(f)]
 check('and nothing else defines it', definers == ['_pagebar.html'], str(definers))
-for f in ('dispense.html', 'receive.html'):
+for f in ('sales.html', 'receive.html'):
     check(f'{f} imports it',
           '{% from "_pagebar.html" import pagebar' in text(f))
 check('it is imported with context, because it builds links with url_for',
-      'with context %}' in text('dispense.html')
+      'with context %}' in text('sales.html')
       and 'url_for' in text('_pagebar.html'))
 
 print('\n--- 8. The medication loader is one file too ---')
 check('there is a partial', os.path.exists(os.path.join(TDIR, '_medication_options.html')))
 includers = [f for f in PAGES
              if '{% include "_medication_options.html" %}' in text(f)]
-check('included by the four pages with a medication picker',
-      sorted(includers) == ['add_medication.html', 'dispense.html',
-                            'internal_issue.html', 'receive.html'],
+check('included by the pages with a medication picker',
+      sorted(includers) == ['add_medication.html', 'receive.html', 'write_off.html'],
       str(sorted(includers)))
 check('and the list still comes from the endpoint, not the page',
       '/api/medications' in text('_medication_options.html'))
@@ -176,8 +167,8 @@ check('the titles are distinct, so two open tabs can be told apart',
       str([t for t in titles.values()
            if list(titles.values()).count(t) > 1]))
 check('and each one still says which app it is',
-      all('NMC Pharmacy' in t for t in titles.values()),
-      str([t for t in titles.values() if 'NMC Pharmacy' not in t]))
+      all('The Healing Hub Pharmacy' in t for t in titles.values()),
+      str([t for t in titles.values() if 'The Healing Hub Pharmacy' not in t]))
 
 print('\n--- 10. Page styling sits in the head ---')
 # A <style> in the body is not where a stylesheet goes. It still has to come

@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}Point of Sale &middot; The Healing Hub Pharmacy{% endblock %}
+{% block heading %}Point of Sale{% endblock %}
+{% block page_styles %}
+<style>
+    .pos-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: 20px; align-items: start; }
+    @media (max-width: 800px) { .pos-grid { grid-template-columns: 1fr; } }
+    .basket td input { width: 100%; box-sizing: border-box; }
+    .basket td.num, .basket th.num { text-align: right; white-space: nowrap; }
+    .pos-total { font-size: 28px; font-weight: 700; margin: 6px 0 14px; }
+    .pos-panel { border: 1px solid #ccc; border-radius: 6px; padding: 14px; background: #fafafa; }
+    .pos-panel label { display: block; margin-top: 10px; font-weight: 600; }
+    .pos-panel input, .pos-panel select { width: 100%; box-sizing: border-box; }
+    .tag { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 8px; background: #fde2c8; color: #7a3e00; margin-left: 4px; }
+    .stock-note { font-size: 12px; color: #555; }
+    .stock-note.low { color: #b3422e; font-weight: 600; }
+    .hide { display: none; }
+</style>
+{% endblock %}
+{% block content %}
+{% if message %}<p class="message {{ message_class or 'error' }}">{{ message }}</p>{% endif %}
+
+<form method="POST" action="{{ url_for('sell') }}" id="pos-form" autocomplete="off">
+<div class="pos-grid">
+    <div>
+        <h2>Basket</h2>
+        <datalist id="pos-products"></datalist>
+        <div class="table-scroll"><table class="basket">
+            <thead><tr><th>Item</th><th class="num" style="width:90px">Qty</th>
+                <th class="num">Unit (M)</th><th class="num">Line (M)</th><th></th></tr></thead>
+            <tbody id="basket-rows"></tbody>
+        </table></div>
+        <button type="button" id="add-row">+ Add item</button>
+        <p class="stock-note">Start typing an item name and pick it from the list. Prices and
+        stock come from the stock system; an item marked <span class="tag">Rx</span>
+        needs a prescription.</p>
+    </div>
+
+    <div class="pos-panel">
+        <div>Total</div>
+        <div class="pos-total" id="pos-total">M0.00</div>
+
+        <label for="payment_method">Payment</label>
+        <select name="payment_method" id="payment_method" required>
+            {% for m in payment_methods %}
+            <option value="{{ m }}" {% if form.get('payment_method', 'Cash') == m %}selected{% endif %}>{{ m }}</option>
+            {% endfor %}
+        </select>
+
+        <div id="cash-box">
+            <label for="amount_tendered">Amount tendered (M)</label>
+            <input type="number" step="0.01" min="0" name="amount_tendered" id="amount_tendered"
+                   value="{{ form.get('amount_tendered', '') }}">
+            <div class="stock-note">Change: <strong id="change">M0.00</strong></div>
+        </div>
+
+        <div id="aid-box" class="hide">
+            <label for="aid_scheme">Medical aid scheme</label>
+            <input name="aid_scheme" id="aid_scheme" value="{{ form.get('aid_scheme', '') }}">
+            <label for="aid_member">Member number</label>
+            <input name="aid_member" id="aid_member" value="{{ form.get('aid_member', '') }}">
+        </div>
+
+        <label for="customer">Customer / patient name <span id="cust-req" class="hide">*</span></label>
+        <input name="customer" id="customer" value="{{ form.get('customer', '') }}">
+
+        <div id="rx-box" class="hide">
+            <label for="prescription_no">Prescription number *</label>
+            <input name="prescription_no" id="prescription_no" value="{{ form.get('prescription_no', '') }}">
+            <label for="prescriber">Prescriber <span id="presc-req" class="hide">* (controlled item)</span></label>
+            <input name="prescriber" id="prescriber" value="{{ form.get('prescriber', '') }}">
+        </div>
+
+        <p style="margin-top:16px;"><input type="submit" value="Complete sale" id="complete"></p>
+    </div>
+</div>
+</form>
+
+<script>
+(function () {
+    const saved = {{ {'names': form.getlist('med_names') if form else [], 'qtys': form.getlist('quantities') if form else []} | tojson }};
+    let products = {};
+    const rows = document.getElementById('basket-rows');
+    const fmt = v => 'M' + (Math.round(v * 100) / 100).toFixed(2);
+
+    function addRow(name, qty) {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+            '<td><input name="med_names" list="pos-products" required></td>' +
+            '<td class="num"><input name="quantities" type="number" min="1" step="1" value="1" required></td>' +
+            '<td class="num unit">&ndash;</td><td class="num line">&ndash;</td>' +
+            '<td><button type="button" class="remove" aria-label="Remove item">&times;</button></td>';
+        tr.querySelector('[name=med_names]').value = name || '';
+        tr.querySelector('[name=quantities]').value = qty || 1;
+        tr.querySelector('.remove').addEventListener('click', () => {
+            tr.remove();
+            if (!rows.children.length) addRow();
+            update();
+        });
+        tr.addEventListener('input', update);
+        rows.appendChild(tr);
+        return tr;
+    }
+
+    function update() {
+        let total = 0, rx = false, controlled = false;
+        for (const tr of rows.children) {
+            const name = tr.querySelector('[name=med_names]').value.trim();
+            const qty = parseInt(tr.querySelector('[name=quantities]').value, 10) || 0;
+            const p = products[name];
+            const nameCell = tr.querySelector('td');
+            let note = nameCell.querySelector('.stock-note');
+            if (!note) { note = document.createElement('div'); note.className = 'stock-note'; nameCell.appendChild(note); }
+            if (p) {
+                const line = p.price * qty;
+                total += line;
+                tr.querySelector('.unit').textContent = p.price.toFixed(2);
+                tr.querySelector('.line').textContent = line.toFixed(2);
+                note.className = 'stock-note' + (qty > p.balance ? ' low' : '');
+                note.innerHTML = p.balance + ' in stock' +
+                    (p.rx_only || p.controlled ? ' <span class="tag">Rx</span>' : '') +
+                    (p.controlled ? ' <span class="tag">Controlled</span>' : '') +
+                    (!p.price ? ' &middot; <strong>no selling price set</strong>' : '');
+                if (p.rx_only || p.controlled) rx = true;
+                if (p.controlled) controlled = true;
+            } else {
+                tr.querySelector('.unit').innerHTML = '&ndash;';
+                tr.querySelector('.line').innerHTML = '&ndash;';
+                note.textContent = name ? 'Not found — pick an item from the list' : '';
+            }
+        }
+        document.getElementById('pos-total').textContent = fmt(total);
+        const pay = document.getElementById('payment_method').value;
+        document.getElementById('cash-box').classList.toggle('hide', pay !== 'Cash');
+        document.getElementById('aid-box').classList.toggle('hide', pay !== 'Medical aid');
+        document.getElementById('rx-box').classList.toggle('hide', !rx);
+        document.getElementById('cust-req').classList.toggle('hide', !rx);
+        document.getElementById('presc-req').classList.toggle('hide', !controlled);
+        const tendered = parseFloat(document.getElementById('amount_tendered').value);
+        document.getElementById('change').textContent = fmt(isNaN(tendered) ? 0 : Math.max(0, tendered - total));
+    }
+
+    document.getElementById('add-row').addEventListener('click', () => { addRow().querySelector('input').focus(); });
+    document.getElementById('payment_method').addEventListener('change', update);
+    document.getElementById('amount_tendered').addEventListener('input', update);
+    document.getElementById('pos-form').addEventListener('submit', () => {
+        document.getElementById('complete').disabled = true;   // no double sale on a double click
+    });
+
+    if (saved.names && saved.names.length) {
+        saved.names.forEach((n, i) => addRow(n, saved.qtys[i]));
+    } else {
+        addRow();
+    }
+
+    fetch('/api/pos/products').then(r => r.json()).then(list => {
+        const dl = document.getElementById('pos-products');
+        for (const p of list) {
+            products[p.name] = p;
+            const o = document.createElement('option');
+            o.value = p.name;
+            o.label = 'M' + p.price.toFixed(2) + ' · ' + p.balance + ' in stock';
+            dl.appendChild(o);
+        }
+        update();
+    }).catch(() => {});
+    update();
+})();
+</script>
+{% endblock %}
