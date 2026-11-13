@@ -70,7 +70,7 @@
     <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
 
-{% from "_uploads.html" import upload_box, upload_styles %}
+{% from "_uploads.html" import upload_box, upload_styles, file_field %}
 {{ upload_styles() }}
 <datalist id="req_meds">{% for n in med_names %}<option value="{{ n }}">{% endfor %}</datalist>
 
@@ -217,15 +217,14 @@ expires within {{ watch_days }} days, soonest first.</p>
 {% endmacro %}
 
 {% macro checklist_import(dept, fixed, draft) %}
-<form method="POST" action="{{ url_for('department_requests') }}" enctype="multipart/form-data"
-      class="req-import">
+<form method="POST" action="{{ url_for('department_requests') }}" class="req-import">
     <input type="hidden" name="action" value="import_checklist">
     {% if not fixed %}<input type="hidden" name="department" value="{{ dept }}">{% endif %}
     <strong>Already filled in the checklist spreadsheet?</strong>
     <span class="req-hint" style="margin:0;">Upload it and the boxes below are filled from
     the month's QTY and EXPIRY DATE columns, for you to check before sending.</span>
     <div class="req-import-row">
-        <input type="file" name="checklist" accept=".xlsx,.xlsm" required>
+        {{ file_field('checklist', '.xlsx,.xlsm') }}
         {% if draft and draft.sheets %}
         <select name="sheet">
             {% for t in draft.sheets %}<option value="{{ t }}" {% if t == draft.sheet %}selected{% endif %}>{{ t }}</option>{% endfor %}

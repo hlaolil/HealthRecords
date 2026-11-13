@@ -3,9 +3,54 @@
    Every upload is read into a table that is shown for checking first;
    nothing is saved until the page's own button is pressed. #}
 
+{# The file is read in the browser and sent as text, not as an attachment:
+   Vercel rejected attachment ("multipart") forms with 400 BAD_REQUEST before
+   they reached the app. See _uploaded() in app.py. #}
+{% macro file_field(field, accept) %}
+<input type="file" data-up-field="{{ field }}" accept="{{ accept }}" required>
+<input type="hidden" name="{{ field }}_b64" value="">
+<input type="hidden" name="{{ field }}_name" value="">
+<script>
+if (!window._upWired) {
+    window._upWired = true;
+    document.addEventListener('submit', function (e) {
+        var f = e.target;
+        var inp = f.querySelector && f.querySelector('input[type=file][data-up-field]');
+        if (!inp || e.defaultPrevented) return;
+        var field = inp.getAttribute('data-up-field');
+        var b64 = f.querySelector('[name="' + field + '_b64"]');
+        if (b64.value) return;                       // already read: let it go
+        e.preventDefault();
+        var file = inp.files && inp.files[0];
+        if (!file) { alert('Choose the spreadsheet first.'); return; }
+        if (file.size > 3 * 1024 * 1024) {
+            alert('That file is over 3 MB - too large for a list. Save just the sheet you need and try again.');
+            return;
+        }
+        var btn = f.querySelector('button[type=submit], input[type=submit]');
+        var r = new FileReader();
+        r.onload = function () {
+            b64.value = String(r.result).split(',')[1] || '';
+            f.querySelector('[name="' + field + '_name"]').value = file.name;
+            if (btn) { btn.disabled = true; if (btn.tagName === 'BUTTON') btn.textContent = 'Reading\u2026'; }
+            HTMLFormElement.prototype.submit.call(f);
+        };
+        r.onerror = function () { alert('The file could not be read on this device.'); };
+        r.readAsDataURL(file);
+    });
+    // Back from the next page, a form may come back with the old text in it.
+    window.addEventListener('pageshow', function () {
+        document.querySelectorAll('input[name$="_b64"]').forEach(function (x) { x.value = ''; });
+        document.querySelectorAll('.up-form button[type=submit], .req-import button[type=submit]')
+            .forEach(function (b) { b.disabled = false; });
+    });
+}
+</script>
+{% endmacro %}
+
 {% macro upload_box(url, title, action, hidden, template_url, help, button='Read Spreadsheet', anchor='upload') %}
 <div class="up-box" id="{{ anchor }}">
-    <form method="POST" action="{{ url }}" enctype="multipart/form-data">
+    <form method="POST" action="{{ url }}" class="up-form">
         <input type="hidden" name="action" value="{{ action }}">
         {% for k, v in hidden.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
         <strong>{{ title }}</strong>
@@ -13,7 +58,7 @@
         {% if template_url %}<a href="{{ template_url }}">Download the template</a> to see the headings it reads.{% endif %}</span>
         {{ caller() if caller is defined else '' }}
         <div class="up-row">
-            <input type="file" name="sheet" accept=".xlsx,.xlsm,.csv" required>
+            {{ file_field('sheet', '.xlsx,.xlsm,.csv') }}
             <button type="submit">{{ button }}</button>
         </div>
     </form>

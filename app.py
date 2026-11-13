@@ -2298,7 +2298,7 @@ def receive() -> ResponseReturnValue:
                         {}, {'_id': 0, 'name': 1, 'pack_size': 1})}
                     mode = 'units' if request.form.get('qty_mode') == 'units' else 'packs'
                     try:
-                        found = _invoice_rows(request.files.get('sheet'), names, meds_by, mode)
+                        found = _invoice_rows(_uploaded('sheet'), names, meds_by, mode)
                     except ValueError as e:
                         flash(f'The invoice could not be read: {e}.')
                         return back
@@ -2600,7 +2600,7 @@ def add_medication() -> ResponseReturnValue:
             existing = [m['name'] for m in medications.find({}, {'_id': 0, 'name': 1})]
             if action == 'upload_meds':
                 try:
-                    found = _new_med_rows(request.files.get('sheet'), existing)
+                    found = _new_med_rows(_uploaded('sheet'), existing)
                 except ValueError as e:
                     flash(f'The list could not be read: {e}.')
                     return redirect(url_for('add_medication', _anchor='upload'))
@@ -4932,7 +4932,7 @@ def internal_issue() -> ResponseReturnValue:
                     flash('The uploaded list was cleared from the form.')
                     return redirect(url_for('internal_issue'))
                 try:
-                    found = _upload_rows_for_list(request.files.get('sheet'), _medication_names())
+                    found = _upload_rows_for_list(_uploaded('sheet'), _medication_names())
                 except ValueError as e:
                     flash(f'The list could not be read: {e}.')
                     return redirect(url_for('internal_issue', _anchor='upload'))
@@ -5721,6 +5721,41 @@ def _heading_key(v: Any) -> str:
     return ' '.join(re.sub(r'[^a-z0-9]+', ' ', str(v or '').lower()).split())
 
 
+class _SentFile:
+    """A spreadsheet the browser read itself and sent as a plain form field."""
+
+    def __init__(self, filename: str, data: bytes) -> None:
+        self.filename, self._data = filename, data
+
+    def read(self, n: int = -1) -> bytes:
+        return self._data if n < 0 else self._data[:n]
+
+
+def _uploaded(field: str) -> Any:
+    """The file sent in `field`, however it came.
+
+    Upload forms send the spreadsheet as text - the browser reads it and puts
+    it, base64-encoded, in `<field>_b64` - rather than as a file attachment.
+    Vercel turned the attachment form away with "400 BAD_REQUEST" before it
+    reached the app, while every ordinary form went through; sent as text, an
+    upload is an ordinary form. A real attachment is still accepted.
+    """
+    f = request.files.get(field)
+    if f is not None and f.filename:
+        return f
+    b64 = request.form.get(f'{field}_b64') or ''
+    if not b64:
+        return None
+    import base64
+    import binascii
+    try:
+        data = base64.b64decode(b64)
+    except (binascii.Error, ValueError):
+        data = b''
+    name = (request.form.get(f'{field}_name') or 'upload.xlsx').strip()[:200]
+    return _SentFile(name, data)
+
+
 def _read_upload(upload: Any) -> list[tuple[str, list[list[Any]]]]:
     """[(sheet title, rows)] from an uploaded .xlsx or .csv.
 
@@ -6306,7 +6341,7 @@ def department_requests() -> ResponseReturnValue:
                     flash('The uploaded list was cleared from the form.')
                     return redirect(url_for('department_requests'))
                 try:
-                    found = _upload_rows_for_list(request.files.get('sheet'), _medication_names())
+                    found = _upload_rows_for_list(_uploaded('sheet'), _medication_names())
                 except ValueError as e:
                     flash(f'The list could not be read: {e}.')
                     return redirect(url_for('department_requests', _anchor='req-form'))
@@ -6329,7 +6364,7 @@ def department_requests() -> ResponseReturnValue:
                 back = url_for('department_requests', topup=None if dept_user else dept,
                                _anchor='topup')
                 standard = _standard_list(db, dept) if dept in REQUEST_DEPARTMENTS else []
-                upload = request.files.get('checklist')
+                upload = _uploaded('checklist')
                 if not standard:
                     flash('Choose a department with a standard list first.')
                     return redirect(url_for('department_requests'))
@@ -9244,7 +9279,7 @@ def stock_take() -> ResponseReturnValue:
                     flash('The uploaded counts were cleared from the sheet. Nothing was posted.')
                     return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
                 try:
-                    table = _find_table(_read_upload(request.files.get('sheet')),
+                    table = _find_table(_read_upload(_uploaded('sheet')),
                                         ['med', 'counted', 'qty', 'expiry', 'batch', 'note'],
                                         [['med'], ['counted', 'qty', 'expiry', 'batch']])
                 except ValueError as e:
