@@ -107,10 +107,16 @@ ticking.</p>
 {% if upload_draft %}
 <div class="message partial" style="font-size:14px;">
     <strong>{{ upload_draft.rows|length }} row(s) filled from &ldquo;{{ upload_draft.meta.sheet }}&rdquo;</strong>,
-    shown below in yellow. Check them, then press <strong>Post Counts</strong>.
+    shown below in yellow. Check them, then press <strong>Post Counts</strong> &mdash;
+    or, if you have not changed anything, <strong>Post Uploaded Counts</strong> posts them as uploaded.
     {% if upload_draft.meta.guesses %}<br>Matched by a close spelling &mdash; check: {{ upload_draft.meta.guesses|join('; ') }}.{% endif %}
     {% if upload_draft.meta.unknown %}<br>Not on the medication list, left out: {{ upload_draft.meta.unknown|join('; ') }}.{% endif %}
     {% if upload_draft.meta.bad %}<br>Not read: {{ upload_draft.meta.bad|join('; ') }}.{% endif %}
+    <form method="POST" action="{{ url_for('stock_take') }}" style="display:inline;margin:0;padding:0;background:none;box-shadow:none;">
+        <input type="hidden" name="action" value="post_uploaded">
+        <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
+        <button type="submit" style="padding:4px 10px;font-size:13px;margin:6px 6px 0 0;">Post Uploaded Counts</button>
+    </form>
     <form method="POST" action="{{ url_for('stock_take') }}" style="display:inline;margin:0;padding:0;background:none;box-shadow:none;">
         <input type="hidden" name="action" value="discard_counts">
         <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
@@ -118,7 +124,7 @@ ticking.</p>
     </form>
 </div>
 {% endif %}
-<form method="POST" action="{{ url_for('stock_take') }}">
+<form method="POST" action="{{ url_for('stock_take') }}" id="st_sheet_form">
     <input type="hidden" name="action" value="count_sheet">
     <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
     <p>
@@ -139,7 +145,7 @@ ticking.</p>
         <tbody>
         {% for m in sheet %}
             <tr{% if m.pre %} class="close-to-expire" title="filled from the uploaded sheet"{% endif %}>
-                <td>{{ m.name }}<input type="hidden" name="med_name" value="{{ m.name }}"></td>
+                <td>{{ m.name }}<input type="hidden" name="med__{{ loop.index0 }}" value="{{ m.name }}"></td>
                 <td class="st-system">{{ m.balance }}</td>
                 <td class="st-agree"><input name="agree__{{ loop.index0 }}" type="checkbox"
                            aria-label="{{ m.name }} matches the system"></td>
@@ -199,6 +205,38 @@ document.addEventListener('DOMContentLoaded', function () {
         };
         d.addEventListener('input', mark);
         d.addEventListener('change', mark);
+    });
+});
+// Only the rows with something in them are sent. A row left as it came
+// (no count, not ticked, expiry and batch as on file, no note) is switched
+// off just before sending, so a 300-line sheet goes as a few lines.
+function stRowUntouched(tr) {
+    var get = function (sel) { return tr.querySelector(sel); };
+    var count = get('input[name^="counted__"]'), box = get('input[name^="agree__"]');
+    var note = get('input[name^="note__"]');
+    if (count && count.value.trim() !== '') return false;
+    if (box && box.checked) return false;
+    if (note && note.value.trim() !== '') return false;
+    var details = tr.querySelectorAll('.st-detail');
+    for (var i = 0; i < details.length; i++) {
+        if (details[i].value !== (details[i].dataset.orig || '')) return false;
+    }
+    return true;
+}
+document.addEventListener('DOMContentLoaded', function () {
+    var form = document.getElementById('st_sheet_form');
+    if (!form) return;
+    form.addEventListener('submit', function () {
+        form.querySelectorAll('#st_sheet tbody tr').forEach(function (tr) {
+            if (!stRowUntouched(tr)) return;
+            tr.querySelectorAll('input').forEach(function (inp) { inp.disabled = true; });
+        });
+    });
+});
+// Coming back with the Back button, switch every row on again.
+window.addEventListener('pageshow', function () {
+    document.querySelectorAll('#st_sheet tbody input:disabled').forEach(function (inp) {
+        inp.disabled = false;
     });
 });
 function stFilter() {

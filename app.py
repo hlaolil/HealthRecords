@@ -5731,6 +5731,10 @@ class _SentFile:
         return self._data if n < 0 else self._data[:n]
 
 
+# What a sheet writes in a cell to mean "nothing here".
+UPLOAD_BLANKS = {'-', '--', '\u2013', '\u2014', 'n/a', 'na', 'none', 'nil'}
+
+
 def _uploaded(field: str) -> Any:
     """The file sent in `field`, however it came.
 
@@ -9311,7 +9315,11 @@ def stock_take() -> ResponseReturnValue:
                         bad.append(f'{name}: count "{cv:g}" is not a whole number')
                         cv = None
                     batch = str(_cell(r, cols, 'batch') or '').strip()
+                    if batch.lower() in UPLOAD_BLANKS:
+                        batch = ''      # a dash in the sheet means "none"
                     note = str(_cell(r, cols, 'note') or '').strip()
+                    if note.lower() in UPLOAD_BLANKS:
+                        note = ''
                     # The downloaded sheet carries what is on file; sent back
                     # unchanged, that is not an entry.
                     on_file = medications.find_one({'name': name},
@@ -9341,7 +9349,7 @@ def stock_take() -> ResponseReturnValue:
                 flash(msg)
                 return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
 
-            if action == 'count_sheet':
+            if action in ('count_sheet', 'post_uploaded'):
                 st = _load_stock_take(stock_takes, request.form.get('stock_take_id'))
                 if not st:
                     flash('Stock take not found.')
@@ -9350,7 +9358,34 @@ def stock_take() -> ResponseReturnValue:
                     flash(f"Stock take {st['reference']} is closed.")
                     return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
 
-                names = request.form.getlist('med_name')
+                # Each row is keyed by its own number (med__3, counted__3 ...)
+                # so the page can leave untouched rows out of the post. A
+                # whole 300-line sheet is a big request; only what was
+                # filled in needs to travel. The older shape (a med_name
+                # list in row order) is still read.
+                form: Any = request.form
+                if action == 'post_uploaded':
+                    # Post the uploaded figures straight from the saved
+                    # draft: the browser sends next to nothing.
+                    up = _draft_get(db, session['user'].get('login'), 'stock_take',
+                                    str(st['_id']))
+                    form = {}
+                    for i, row in enumerate((up or {}).get('rows') or []):
+                        form[f'med__{i}'] = row.get('name') or ''
+                        form[f'counted__{i}'] = str(row.get('counted', ''))
+                        form[f'expiry__{i}'] = row.get('expiry') or ''
+                        form[f'batch__{i}'] = row.get('batch') or ''
+                        form[f'note__{i}'] = row.get('note') or ''
+                    if not form:
+                        flash('There are no uploaded counts waiting to be posted.')
+                        return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+                by_row: dict[int, str] = {}
+                for k in form.keys():
+                    if k.startswith('med__') and k[5:].isdigit():
+                        by_row[int(k[5:])] = str(form.get(k) or '')
+                if not by_row:
+                    by_row = dict(enumerate(request.form.getlist('med_name')))
+                names = list(by_row.values())
                 posted = agreed = short = over = skipped = 0
                 details_only = detail_changes = bad_dates = confirmed = 0
                 # The expiry and batch boxes arrive already filled with what
@@ -9360,11 +9395,11 @@ def stock_take() -> ResponseReturnValue:
                 on_file = {m['name']: m for m in medications.find(
                     {'name': {'$in': names}},
                     {'_id': 0, 'name': 1, 'expiry_date': 1, 'batch': 1})}
-                for i, name in enumerate(names):
-                    raw = (request.form.get(f'counted__{i}') or '').strip()
-                    expiry = (request.form.get(f'expiry__{i}') or '').strip()
-                    batch = (request.form.get(f'batch__{i}') or '').strip()
-                    agree = request.form.get(f'agree__{i}') == 'on'
+                for i, name in sorted(by_row.items()):
+                    raw = (form.get(f'counted__{i}') or '').strip()
+                    expiry = (form.get(f'expiry__{i}') or '').strip()
+                    batch = (form.get(f'batch__{i}') or '').strip()
+                    agree = form.get(f'agree__{i}') == 'on'
                     current = on_file.get(name) or {}
                     if expiry and expiry == _expiry_iso(current.get('expiry_date')):
                         expiry = ''
@@ -9400,7 +9435,7 @@ def stock_take() -> ResponseReturnValue:
 
                     outcome = _record_count(
                         medications, transactions, counts_col, st, name, counted,
-                        (request.form.get(f'note__{i}') or '').strip(), current_user,
+                        (form.get(f'note__{i}') or '').strip(), current_user,
                         expiry=expiry or None, batch=batch or None, agree=agree)
                     if outcome is None:
                         skipped += 1
