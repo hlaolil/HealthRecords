@@ -13,7 +13,8 @@ import json
 import secrets
 import zipfile
 import requests
-from flask import Flask, request, render_template, jsonify, redirect, url_for, session, flash, get_flashed_messages, make_response
+from flask import Flask, request, render_template, jsonify, redirect, url_for, session, get_flashed_messages, make_response
+from flask import flash as _flask_flash
 from functools import wraps
 from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import ServerSelectionTimeoutError, DuplicateKeyError
@@ -115,6 +116,30 @@ app.config.update(
 # across 17 templates, and a scheme that depends on remembering to add a
 # line to each one is a scheme that protects 42 forms.
 # ---------------------------------------------------------------------
+# A message shown after a redirect travels to the next page inside the
+# session cookie. A long one - every unmatched name on a 300-line upload -
+# made the cookie bigger than browsers and Vercel accept, and the upload came
+# back as "400 BAD_REQUEST" before the app ever saw it. Lists in messages are
+# kept to their first few items (_brief); the full lists stay on the page,
+# and this cap is the backstop for any message that still runs long.
+FLASH_MAX_CHARS = 700
+
+
+def flash(message: Any, category: str = 'message') -> None:
+    text = str(message)
+    if len(text) > FLASH_MAX_CHARS:
+        text = text[:FLASH_MAX_CHARS].rsplit(' ', 1)[0] + ' ... (shortened)'
+    _flask_flash(text, category)
+
+
+def _brief(items: list[str], n: int = 4, sep: str = '; ') -> str:
+    """The first few of a list, and how many more: 'a; b; c; d and 12 more'."""
+    items = [str(i) for i in items]
+    if len(items) <= n:
+        return sep.join(items)
+    return sep.join(items[:n]) + f' and {len(items) - n} more'
+
+
 CSRF_FIELD_NAME = '_csrf_token'
 CSRF_SESSION_KEY = '_csrf_token'
 CSRF_HEADER = 'X-CSRF-Token'
@@ -2343,7 +2368,7 @@ def receive() -> ResponseReturnValue:
                         r['problem'] = ''
                     _draft_put(db, login, 'receive', str(d['_id']), rows,
                                (_draft_get(db, login, 'receive', str(d['_id'])) or {}).get('meta'))
-                    flash('Nothing was added: ' + ('; '.join(problems) if problems
+                    flash('Nothing was added: ' + (_brief(problems) if problems
                                                   else 'no line is ticked') + '.')
                     return back
                 total = 0.0
@@ -2628,7 +2653,7 @@ def add_medication() -> ResponseReturnValue:
             if problems or not plan:
                 _draft_put(db, login, 'medications', '', rows,
                            (_draft_get(db, login, 'medications') or {}).get('meta'))
-                flash('Nothing was added: ' + ('; '.join(problems) if problems
+                flash('Nothing was added: ' + (_brief(problems) if problems
                                               else 'no new item is ticked') + '.')
                 return redirect(url_for('add_medication', _anchor='upload-review'))
             for name, cat, sch, ps, pp, ob, batch, exp in plan:
@@ -4916,7 +4941,7 @@ def internal_issue() -> ResponseReturnValue:
                 flash(f"{len(found['rows'])} item(s) from \"{found['sheet']}\" put into the form below. "
                       f"Nothing has been issued yet - fill in the department and who is taking it, "
                       f"check the items, then press Record Issue."
-                      + (' Check: ' + '; '.join(flagged) + '.' if flagged else ''))
+                      + (' Check: ' + _brief(flagged) + '.' if flagged else ''))
                 return redirect(url_for('internal_issue', _anchor='issue-form'))
 
             if action == 'issue':
@@ -4975,7 +5000,7 @@ def internal_issue() -> ResponseReturnValue:
                 else:
                     msg = 'Nothing was issued.'
                 if problems:
-                    msg += ' Problems: ' + '; '.join(problems)
+                    msg += ' Problems: ' + _brief(problems)
                 flash(msg)
                 return redirect(url_for('internal_issue'))
 
@@ -5936,12 +5961,33 @@ def _checklist_date(v: Any) -> tuple[str | None, str | None]:
     if isinstance(v, date):
         return v.strftime('%Y-%m-%d'), None
     text = str(v).strip()
-    for fmt in ('%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%d.%m.%Y', '%m/%Y', '%b %Y', '%B %Y'):
+    # A dash or "n/a" in an expiry column means there is none, not a bad date.
+    if text.lower() in ('-', '--', '\u2014', '\u2013', 'n/a', 'na', 'none', 'nil', 'no expiry', 'x'):
+        return None, None
+    for fmt in ('%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%d.%m.%Y', '%d/%m/%y', '%d-%m-%y'):
         try:
             d = datetime.strptime(text, fmt).date()
             return d.strftime('%Y-%m-%d'), None
         except ValueError:
             continue
+    # A month and year only - "12/26", "6/2028", "Jun 2028" - as packs print
+    # it. Such stock is good to the end of that month.
+    month = year = None
+    m = re.fullmatch(r'(\d{1,2})\s*[/\-.]\s*(\d{2}|\d{4})', text)
+    if m and 1 <= int(m.group(1)) <= 12:
+        month, year = int(m.group(1)), int(m.group(2))
+    else:
+        for fmt in ('%b %Y', '%B %Y', '%b-%Y', '%b %y', '%b-%y', '%B-%Y'):
+            try:
+                d0 = datetime.strptime(text.title(), fmt)
+                month, year = d0.month, d0.year
+                break
+            except ValueError:
+                continue
+    if month and year:
+        year = year + 2000 if year < 100 else year
+        last = (date(year + (month == 12), month % 12 + 1, 1) - timedelta(days=1))
+        return last.strftime('%Y-%m-%d'), None
     return None, f'"{text}" is not a date'
 
 
@@ -6130,7 +6176,7 @@ def standard_lists() -> ResponseReturnValue:
             msg = (f'{len(changes)} line(s) of the {dept} list updated.' if changes
                    else 'Nothing was changed.')
             if problems:
-                msg += ' Not saved: ' + '; '.join(problems) + '.'
+                msg += ' Not saved: ' + _brief(problems) + '.'
             flash(msg, 'partial' if problems or not changes else 'success')
         elif action == 'add':
             item = (request.form.get('item') or '').strip()
@@ -6237,7 +6283,7 @@ def department_requests() -> ResponseReturnValue:
                 # pharmacy never serves half of something the ward meant
                 # differently.
                 if problems:
-                    flash('The request was not sent: ' + '; '.join(problems) + '.')
+                    flash('The request was not sent: ' + _brief(problems) + '.')
                     return redirect(url_for('department_requests'))
                 if not lines:
                     flash('Add at least one item to the request.')
@@ -6272,7 +6318,7 @@ def department_requests() -> ResponseReturnValue:
                 flagged = [f"{r['raw']}: {r['problem']}" for r in found['rows'] if r['problem']]
                 flash(f"{len(found['rows'])} item(s) from \"{found['sheet']}\" put into the request "
                       f"form. Nothing has been sent yet - check them, then press Send Request."
-                      + (' Check: ' + '; '.join(flagged) + '.' if flagged else ''))
+                      + (' Check: ' + _brief(flagged) + '.' if flagged else ''))
                 return redirect(url_for('department_requests', _anchor='req-form'))
 
             if action == 'import_checklist':
@@ -6316,10 +6362,10 @@ def department_requests() -> ResponseReturnValue:
                        f"{len(standard)} items. Nothing has been sent - check the counts "
                        f"and dates below, then press Send Top-up Request.")
                 if found['notes']:
-                    msg += ' Check: ' + '; '.join(found['notes']) + '.'
+                    msg += ' Check: ' + _brief(found['notes']) + '.'
                 if found['unmatched']:
                     msg += (' On the sheet but not on the list, left out: '
-                            + ', '.join(found['unmatched']) + '.')
+                            + _brief(found['unmatched'], 6, ', ') + '.')
                 flash(msg, 'partial' if found['notes'] or found['unmatched'] else 'success')
                 return redirect(back)
 
@@ -6408,7 +6454,7 @@ def department_requests() -> ResponseReturnValue:
                     tproblems.append('nothing was counted - enter what is there '
                                      'for at least one item')
                 if tproblems:
-                    flash('The top-up was not sent: ' + '; '.join(tproblems) + '.')
+                    flash('The top-up was not sent: ' + _brief(tproblems) + '.')
                     return redirect(url_for('department_requests',
                                             topup=None if dept_user else dept,
                                             _anchor='topup'))
@@ -6419,7 +6465,7 @@ def department_requests() -> ResponseReturnValue:
                     db['dept_standards'].update_one({'_id': rid}, {'$set': {
                         'last_have': have_n, 'last_expiry': exp_iso,
                         'last_checked_at': stamp, 'last_checked_by': me}})
-                expired_msg = (' Expired, take off the trolley: ' + ', '.join(expired_on) + '.'
+                expired_msg = (' Expired, take off the trolley: ' + _brief(expired_on, 6, ', ') + '.'
                                if expired_on else '')
                 skipped = (f' {len(uncounted)} item{"" if len(uncounted) == 1 else "s"} '
                            f'not counted this time {"was" if len(uncounted) == 1 else "were"} left out.'
@@ -6431,7 +6477,7 @@ def department_requests() -> ResponseReturnValue:
                     msg += ' The count and expiry dates are recorded.' + expired_msg
                     db['topup_drafts'].delete_many({'login': user.get('login'), 'department': dept})
                     if not_stocked:
-                        msg += ' Short but not on the pharmacy list: ' + ', '.join(not_stocked) + '.'
+                        msg += ' Short but not on the pharmacy list: ' + _brief(not_stocked, 6, ', ') + '.'
                     flash(msg, 'success' if not not_stocked else 'partial')
                     return redirect(url_for('department_requests',
                                             topup=None if dept_user else dept))
@@ -6451,7 +6497,7 @@ def department_requests() -> ResponseReturnValue:
                                      'topup_expiry': expiries, 'topup_expired': expired_on})
                 flash(f'Top-up {ref} sent to the pharmacy: {len(tlines)} '
                       f'item{"" if len(tlines) == 1 else "s"} to bring {dept} up to standard.'
-                      + (f' Not on the pharmacy list: {", ".join(not_stocked)}.' if not_stocked else '')
+                      + (f' Not on the pharmacy list: {_brief(not_stocked, 6, ", ")}.' if not_stocked else '')
                       + expired_msg + skipped, 'partial' if expired_on else 'success')
                 return redirect(url_for('department_requests'))
 
@@ -6550,7 +6596,7 @@ def department_requests() -> ResponseReturnValue:
                 # All lines are checked before any stock moves, so a typing
                 # error on line 5 does not leave lines 1 to 4 issued.
                 if problems:
-                    flash(f"Nothing was issued for {doc['ref']}: " + '; '.join(problems) + '.')
+                    flash(f"Nothing was issued for {doc['ref']}: " + _brief(problems) + '.')
                     return redirect(url_for('department_requests', _anchor=doc['ref']))
                 if not plan:
                     flash(f"Tick at least one item of {doc['ref']} to serve now.")
@@ -6628,7 +6674,7 @@ def department_requests() -> ResponseReturnValue:
                     msg = (f"{doc['ref']} for {doc['department']}: {status.lower()} "
                            f"({total_given} of {total_asked} units).")
                 if short:
-                    msg += ' Recorded as unmet demand: ' + '; '.join(short) + '.'
+                    msg += ' Recorded as unmet demand: ' + _brief(short, 6) + '.'
                 flash(msg, 'success' if status == REQ_SERVED else 'partial')
                 return redirect(url_for('department_requests'))
 
@@ -7506,7 +7552,7 @@ def loans() -> ResponseReturnValue:
                     else:
                         chosen.append(item)
                 if problems:
-                    flash('Nothing was issued: ' + '; '.join(problems) + '.')
+                    flash('Nothing was issued: ' + _brief(problems) + '.')
                     return redirect(url_for('loans'))
 
                 patient = (request.form.get('patient_name') or '').strip()
@@ -9252,11 +9298,11 @@ def stock_take() -> ResponseReturnValue:
                        f'Nothing has been posted yet - check the highlighted rows, then '
                        f'press Post Counts.')
                 if guesses:
-                    msg += ' Matched by a close spelling, check them: ' + '; '.join(guesses) + '.'
+                    msg += ' Matched by a close spelling, check them: ' + _brief(guesses, 3) + '.'
                 if unknown:
-                    msg += ' Not on the medication list, left out: ' + '; '.join(unknown) + '.'
+                    msg += ' Not on the medication list, left out: ' + _brief(unknown, 3) + '.'
                 if bad:
-                    msg += ' Not read: ' + '; '.join(bad) + '.'
+                    msg += ' Not read: ' + _brief(bad, 3) + '.'
                 flash(msg)
                 return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
 
