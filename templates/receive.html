@@ -186,6 +186,90 @@ priced singly, leave pack size as 1.</p>
     <div class="form-buttons"><input type="submit" value="Add Line"></div>
 </form>
 
+{# ---- Many lines at once, from the invoice as a spreadsheet ---- #}
+{% from "_uploads.html" import upload_box, upload_styles %}
+{{ upload_styles() }}
+{% call upload_box(url_for('receive'), 'Long invoice? Upload its lines instead.', 'upload_lines',
+                   {'delivery_id': delivery._id|string}, url_for('upload_template', kind='receive'),
+                   'One row per item: medication, quantity, pack size, price, batch and expiry. '
+                   ~ 'The lines are shown below for checking before anything is added.') %}
+    <div class="up-choice">Where the sheet just says <em>Qty</em>, it counts:
+        <label><input type="radio" name="qty_mode" value="packs" checked> packs (as on most invoices)</label>
+        <label><input type="radio" name="qty_mode" value="units"> single units</label>
+    </div>
+{% endcall %}
+
+{% if upload_draft and upload_draft.rows %}
+{% set rows = upload_draft.rows %}
+<div class="up-review" id="upload-review">
+<h3>Uploaded Lines &mdash; check, then add</h3>
+<p style="font-size:13px;">Read from &ldquo;{{ upload_draft.meta.sheet }}&rdquo;. Nothing is on the
+shelf yet. Correct anything below &mdash; especially the rows in <span style="background:#fff5f5;">red</span>
+(something missing) and <span style="background:#fffbea;">yellow</span> (a name the app matched but
+wants you to confirm). Untick a row to leave it out. Every ticked line is checked before any stock
+moves, so one wrong line never leaves half the invoice on the shelf.</p>
+<form method="POST" action="{{ url_for('receive') }}" id="up-lines-form">
+    <input type="hidden" name="action" value="lines_bulk">
+    <input type="hidden" name="delivery_id" value="{{ delivery._id|string }}">
+    <input type="hidden" name="n" value="{{ rows|length }}">
+    <div class="table-scroll"><table class="up-sticky">
+        <thead><tr><th>Medication</th><th>Add</th><th>Units</th><th>Pack size</th>
+            <th>Price per pack (R)</th><th>Line value</th><th>Batch</th><th>Expiry</th></tr></thead>
+        <tbody>
+        {% for r in rows %}
+        <tr class="{% if r.problem and not r.guessed %}up-bad{% elif r.guessed %}up-guess{% endif %}" data-row>
+            <td><input name="med__{{ loop.index0 }}" value="{{ r.name }}" list="med_suggestions"
+                       autocomplete="off" style="width:16em;">
+                <input type="hidden" name="raw__{{ loop.index0 }}" value="{{ r.raw }}">
+                {% if r.raw and r.raw != r.name %}<br><small>sheet: {{ r.raw }}</small>{% endif %}
+                {% if r.problem %}<span class="up-why">{{ r.problem }}</span>{% endif %}</td>
+            <td><input type="checkbox" class="up-inc" name="inc__{{ loop.index0 }}" value="1"
+                       {% if r.include is not defined or r.include %}{% if r.matched or r.include %}checked{% endif %}{% endif %}></td>
+            <td><input name="units__{{ loop.index0 }}" value="{{ r.units }}" type="number" min="1" step="1" style="width:6em;" data-units></td>
+            <td><input name="pack_size__{{ loop.index0 }}" value="{{ r.pack_size }}" type="number" min="1" step="1" style="width:5em;" data-ps></td>
+            <td><input name="pack_price__{{ loop.index0 }}" value="{{ r.pack_price }}" type="number" min="0" step="0.01" style="width:7em;" data-pp></td>
+            <td class="up-val" style="white-space:nowrap;">&ndash;</td>
+            <td><input name="batch__{{ loop.index0 }}" value="{{ r.batch }}" style="width:8em;"></td>
+            <td><input name="expiry__{{ loop.index0 }}" value="{{ r.expiry }}" type="date" style="width:10.5em;"></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+        <tfoot><tr><td colspan="5" style="text-align:right;"><strong>Ticked lines total</strong></td>
+            <td id="up-total" style="white-space:nowrap;"><strong>&ndash;</strong></td>
+            <td colspan="2" style="font-size:12px;">invoice total R{{ "%.2f"|format(delivery.invoice_total or 0) }}</td></tr></tfoot>
+    </table></div>
+    <div class="form-buttons">
+        <input type="submit" value="Add These Lines">
+    </div>
+</form>
+<form method="POST" action="{{ url_for('receive') }}" style="margin-top:4px;background:none;box-shadow:none;">
+    <input type="hidden" name="action" value="discard_upload">
+    <input type="hidden" name="delivery_id" value="{{ delivery._id|string }}">
+    <button type="submit" class="delete-btn" onclick="return confirm('Discard the uploaded lines?');">Discard Upload</button>
+</form>
+<script>
+// Line value and the ticked total, worked the same way as the server: from
+// the pack price, so it can be held against the invoice before adding.
+(function () {
+    var f = document.getElementById('up-lines-form');
+    function work() {
+        var total = 0;
+        f.querySelectorAll('tr[data-row]').forEach(function (tr) {
+            var u = parseFloat(tr.querySelector('[data-units]').value) || 0,
+                ps = parseFloat(tr.querySelector('[data-ps]').value) || 1,
+                pp = parseFloat(tr.querySelector('[data-pp]').value) || 0,
+                v = u * pp / ps;
+            tr.querySelector('.up-val').textContent = 'R' + v.toFixed(2);
+            if (tr.querySelector('.up-inc').checked) total += v;
+        });
+        document.getElementById('up-total').innerHTML = '<strong>R' + total.toFixed(2) + '</strong>';
+    }
+    f.addEventListener('input', work); f.addEventListener('change', work); work();
+})();
+</script>
+</div>
+{% endif %}
+
 <form method="POST" action="{{ url_for('receive') }}" style="margin-top:16px;">
     <input type="hidden" name="action" value="close">
     <input type="hidden" name="delivery_id" value="{{ delivery._id|string }}">

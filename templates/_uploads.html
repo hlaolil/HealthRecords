@@ -1,0 +1,47 @@
+{# Shared pieces for bringing a long list in from a spreadsheet.
+
+   Every upload is read into a table that is shown for checking first;
+   nothing is saved until the page's own button is pressed. #}
+
+{% macro upload_box(url, title, action, hidden, template_url, help, button='Read Spreadsheet', anchor='upload') %}
+<div class="up-box" id="{{ anchor }}">
+    <form method="POST" action="{{ url }}" enctype="multipart/form-data">
+        <input type="hidden" name="action" value="{{ action }}">
+        {% for k, v in hidden.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+        <strong>{{ title }}</strong>
+        <span class="up-help">{{ help }} Excel (.xlsx) or CSV.
+        {% if template_url %}<a href="{{ template_url }}">Download the template</a> to see the headings it reads.{% endif %}</span>
+        {{ caller() if caller is defined else '' }}
+        <div class="up-row">
+            <input type="file" name="sheet" accept=".xlsx,.xlsm,.csv" required>
+            <button type="submit">{{ button }}</button>
+        </div>
+    </form>
+</div>
+{% endmacro %}
+
+{% macro upload_styles() %}
+<style>
+  .up-box { background: #f1f6fc; border: 1px dashed #8fb3dc; border-radius: 8px;
+            padding: 10px 12px; margin: 12px 0; scroll-margin-top: 150px; }
+  .up-box form { margin: 0; padding: 0; background: none; box-shadow: none; max-width: none; }
+  .up-help { display: block; font-size: 13px; color: #444; margin: 4px 0 0; }
+  .up-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+  .up-row input[type=file] { flex: 1 1 14em; margin: 0; }
+  .up-row button, .up-row select { width: auto; margin: 0; }
+  .up-choice { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; margin-top: 6px; }
+  .up-choice label { display: inline-flex; gap: 6px; align-items: center; font-weight: normal; margin: 0; }
+  .up-choice input { width: auto; margin: 0; min-height: 0; }
+  .up-review { scroll-margin-top: 150px; }
+  .up-review > form { max-width: none; }   /* the whole width: the table is wide */
+  .up-review table input { margin: 0; min-width: 0; }
+  /* Why a row is flagged, under its name, where it is seen without scrolling. */
+  .up-why { display: block; color: #721c24; font-size: 12px; max-width: 18em;
+            white-space: normal; margin-top: 3px; line-height: 1.3; }
+  .up-review tr.up-bad td { background: #fff5f5 !important; }
+  .up-review tr.up-guess td { background: #fffbea !important; }
+  .up-review input.up-inc { width: 20px; height: 20px; min-height: 0; }
+  .up-sticky td:first-child, .up-sticky th:first-child { position: sticky; left: 0; z-index: 1; }
+  .up-sticky td:first-child { background: inherit; }
+</style>
+{% endmacro %}

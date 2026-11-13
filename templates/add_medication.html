@@ -82,6 +82,62 @@ Receiving page.</p>
         <button type="button" onclick="document.querySelector('form').reset(); document.getElementById('med_suggestions').innerHTML='';">Clear Form</button>
     </div>
 </form>
+
+{# ---- Many new items at once ---- #}
+{% from "_uploads.html" import upload_box, upload_styles %}
+{{ upload_styles() }}
+{% call upload_box(url_for('add_medication'), 'Many new items? Upload them as a list.', 'upload_meds', {},
+                   url_for('upload_template', kind='medications'),
+                   'One row per item: name, category, schedule, pack size and price, and any opening stock. '
+                   ~ 'Items already on the list are shown and skipped; nothing is added until you press Add These Items.') %}
+{% endcall %}
+
+{% if upload_draft and upload_draft.rows %}
+{% set rows = upload_draft.rows %}
+<div class="up-review" id="upload-review">
+<h3>Uploaded Items &mdash; check, then add</h3>
+<p style="font-size:13px;">Read from &ldquo;{{ upload_draft.meta.sheet }}&rdquo;. Rows in
+<span style="background:#fffbea;">yellow</span> are close to an item already on the list &mdash;
+check they are not the same item under another spelling before adding. Items already on the list
+cannot be added again.</p>
+<form method="POST" action="{{ url_for('add_medication') }}" id="up-meds-form">
+    <input type="hidden" name="action" value="meds_bulk">
+    <input type="hidden" name="n" value="{{ rows|length }}">
+    <div class="table-scroll"><table class="up-sticky">
+        <thead><tr><th>Medication</th><th>Add</th><th>Category</th><th>Schedule</th><th>Pack size</th>
+            <th>Price per pack (R)</th><th>Opening balance</th><th>Batch</th><th>Expiry</th></tr></thead>
+        <tbody>
+        {% for r in rows %}{% set i = loop.index0 %}
+        <tr class="{% if r.status == 'exists' %}up-bad{% elif r.note or r.problem %}up-guess{% endif %}">
+            <td><input name="name__{{ i }}" value="{{ r.name }}" style="width:16em;" {% if r.status == 'exists' %}readonly{% endif %}>
+                <input type="hidden" name="status__{{ i }}" value="{{ r.status }}">
+                <input type="hidden" name="note__{{ i }}" value="{{ r.note }}">
+                {% if r.note or r.problem %}<span class="up-why">{{ r.note }}{% if r.note and r.problem %}; {% endif %}{{ r.problem }}</span>{% endif %}</td>
+            <td><input type="checkbox" class="up-inc" name="inc__{{ i }}" value="1"
+                       {% if r.status == 'exists' %}disabled{% elif r.include is defined %}{% if r.include %}checked{% endif %}{% elif not r.problem %}checked{% endif %}></td>
+            <td><select name="category__{{ i }}" style="width:auto;">
+                {% for cat in categories %}<option value="{{ cat }}" {% if cat == r.category %}selected{% endif %}>{{ cat }}</option>{% endfor %}
+            </select></td>
+            <td><select name="schedule__{{ i }}" style="width:auto;">
+                {% for sch in ['not controlled', 'controlled'] %}<option value="{{ sch }}" {% if sch == r.schedule %}selected{% endif %}>{{ sch|title }}</option>{% endfor %}
+            </select></td>
+            <td><input name="pack_size__{{ i }}" value="{{ r.pack_size }}" type="number" min="1" step="1" style="width:5em;"></td>
+            <td><input name="pack_price__{{ i }}" value="{{ r.pack_price }}" type="number" min="0" step="0.01" style="width:7em;"></td>
+            <td><input name="opening__{{ i }}" value="{{ r.opening }}" type="number" min="0" step="1" style="width:6em;"></td>
+            <td><input name="batch__{{ i }}" value="{{ r.batch }}" style="width:8em;"></td>
+            <td><input name="expiry__{{ i }}" value="{{ r.expiry }}" type="date" style="width:10.5em;"></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    <div class="form-buttons"><input type="submit" value="Add These Items"></div>
+</form>
+<form method="POST" action="{{ url_for('add_medication') }}" style="margin-top:4px;background:none;box-shadow:none;">
+    <input type="hidden" name="action" value="discard_meds">
+    <button type="submit" class="delete-btn" onclick="return confirm('Discard the uploaded list?');">Discard Upload</button>
+</form>
+</div>
+{% endif %}
 <script>
 document.addEventListener('DOMContentLoaded', async function() {
     const medInput = document.getElementById('med_name');

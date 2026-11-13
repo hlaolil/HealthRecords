@@ -93,6 +93,31 @@ you counted, so the register shows which items were checked against the system
 and which were counted outright. If you tick a row and also type a count, the
 count is the one that is recorded. For controlled drugs, counting is safer than
 ticking.</p>
+{% from "_uploads.html" import upload_box, upload_styles %}
+{{ upload_styles() }}
+{% call upload_box(url_for('stock_take'), 'Counted on paper or in Excel? Upload the counts.', 'upload_counts',
+                   {'stock_take_id': active._id|string},
+                   url_for('stock_take', stock_take_id=active._id|string, download='sheet'),
+                   'Download the count sheet below, fill in the Physical count column (and expiry or '
+                   ~ 'batch where they differ), and upload it. The figures fill this sheet for checking; '
+                   ~ 'nothing is posted until you press Post Counts.') %}
+{% endcall %}
+<p style="font-size:13px;margin-top:-4px;"><a href="{{ url_for('stock_take', stock_take_id=active._id|string, download='sheet') }}"><strong>&darr; Download the count sheet</strong></a>
+(the {{ sheet|length }} item(s) still to count, with what the system has)</p>
+{% if upload_draft %}
+<div class="message partial" style="font-size:14px;">
+    <strong>{{ upload_draft.rows|length }} row(s) filled from &ldquo;{{ upload_draft.meta.sheet }}&rdquo;</strong>,
+    shown below in yellow. Check them, then press <strong>Post Counts</strong>.
+    {% if upload_draft.meta.guesses %}<br>Matched by a close spelling &mdash; check: {{ upload_draft.meta.guesses|join('; ') }}.{% endif %}
+    {% if upload_draft.meta.unknown %}<br>Not on the medication list, left out: {{ upload_draft.meta.unknown|join('; ') }}.{% endif %}
+    {% if upload_draft.meta.bad %}<br>Not read: {{ upload_draft.meta.bad|join('; ') }}.{% endif %}
+    <form method="POST" action="{{ url_for('stock_take') }}" style="display:inline;margin:0;padding:0;background:none;box-shadow:none;">
+        <input type="hidden" name="action" value="discard_counts">
+        <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
+        <button type="submit" style="padding:4px 10px;font-size:13px;margin:6px 0 0;">Clear Uploaded Figures</button>
+    </form>
+</div>
+{% endif %}
 <form method="POST" action="{{ url_for('stock_take') }}">
     <input type="hidden" name="action" value="count_sheet">
     <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
@@ -113,23 +138,27 @@ ticking.</p>
         </thead>
         <tbody>
         {% for m in sheet %}
-            <tr>
+            <tr{% if m.pre %} class="close-to-expire" title="filled from the uploaded sheet"{% endif %}>
                 <td>{{ m.name }}<input type="hidden" name="med_name" value="{{ m.name }}"></td>
                 <td class="st-system">{{ m.balance }}</td>
                 <td class="st-agree"><input name="agree__{{ loop.index0 }}" type="checkbox"
                            aria-label="{{ m.name }} matches the system"></td>
                 <td><input name="counted__{{ loop.index0 }}" type="number" min="0"
-                           class="st-count" style="width:7em;" autocomplete="off"></td>
+                           class="st-count" style="width:7em;" autocomplete="off"
+                           {#- Only a figure someone counted, from an uploaded sheet;
+                               never the system's own balance. -#}
+                           {% if m.pre and m.pre.counted != '' %} value="{{ m.pre.counted }}"{% endif %}></td>
                 {# Filled with what is on file. Leave it and nothing changes;
                    change it and the old value is kept on the counted line. #}
                 <td><input name="expiry__{{ loop.index0 }}" type="date" class="st-detail"
-                           value="{{ m.expiry }}" data-orig="{{ m.expiry }}"
+                           value="{{ (m.pre.expiry if m.pre and m.pre.expiry) or m.expiry }}" data-orig="{{ m.expiry }}"
                            style="width:10em;" autocomplete="off"></td>
                 <td><input name="batch__{{ loop.index0 }}" type="text" class="st-detail"
-                           value="{{ m.batch }}" data-orig="{{ m.batch }}"
+                           value="{{ (m.pre.batch if m.pre and m.pre.batch) or m.batch }}" data-orig="{{ m.batch }}"
                            style="width:9em;" autocomplete="off" maxlength="40"></td>
                 <td><input name="note__{{ loop.index0 }}" type="text"
-                           style="width:14em;" placeholder="Shelf, remarks"></td>
+                           style="width:14em;" placeholder="Shelf, remarks"
+                           value="{{ m.pre.note if m.pre else '' }}"></td>
             </tr>
         {% else %}
             <tr><td colspan="7">Every medication has been counted in this stock take.</td></tr>

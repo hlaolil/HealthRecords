@@ -16,7 +16,24 @@
 <h2>Issue Stock to a Department</h2>
 <p style="font-size:13px;">Counts as <strong>consumption</strong>: it raises the
 item's AMC and the order request will replace it.</p>
-<form method="POST" action="{{ url_for('internal_issue') }}" class="dispense-form">
+{% from "_uploads.html" import upload_box, upload_styles %}
+{{ upload_styles() }}
+{% call upload_box(url_for('internal_issue'), 'Long list from the ward? Upload it.', 'upload_list', {},
+                   url_for('upload_template', kind='list'),
+                   'Two columns: medication and quantity. The items go into the form below for checking; '
+                   ~ 'nothing is issued until you press Record Issue.') %}
+{% endcall %}
+{% if upload_draft %}
+<div class="message partial" style="font-size:14px;">
+    {{ upload_draft.rows|length }} item(s) from &ldquo;{{ upload_draft.meta.sheet }}&rdquo; are in the
+    form below. Fill in the department and who is taking it, check the items, then press <strong>Record Issue</strong>.
+    <form method="POST" action="{{ url_for('internal_issue') }}" style="display:inline;margin:0;padding:0;background:none;box-shadow:none;">
+        <input type="hidden" name="action" value="discard_list">
+        <button type="submit" style="padding:4px 10px;font-size:13px;margin:6px 0 0;">Clear the Uploaded Items</button>
+    </form>
+</div>
+{% endif %}
+<form method="POST" action="{{ url_for('internal_issue') }}" class="dispense-form" id="issue-form" style="scroll-margin-top:150px;">
     <input type="hidden" name="action" value="issue">
     <div class="common-section">
         <div>
@@ -51,12 +68,21 @@ item's AMC and the order request will replace it.</p>
     </div>
     <h3>Items</h3>
     <div class="table-scroll"><table>
-        <thead><tr><th>Medication</th><th>Quantity</th></tr></thead>
+        <thead><tr><th>Medication</th><th>Quantity</th>{% if upload_draft %}<th>Check</th>{% endif %}</tr></thead>
         <tbody>
-        {% for i in range(6) %}
+        {% set up_rows = upload_draft.rows if upload_draft else [] %}
+        {% for r in up_rows %}
+            <tr class="{% if r.problem and not r.guessed %}expired{% elif r.guessed %}close-to-expire{% endif %}">
+                <td><input name="med_name" list="med_suggestions" autocomplete="off" style="width:18em;" value="{{ r.name }}"></td>
+                <td><input name="quantity" type="number" min="0" style="width:8em;" value="{{ r.qty }}"></td>
+                <td style="font-size:12px;">{{ r.problem }}</td>
+            </tr>
+        {% endfor %}
+        {% for i in range(2 if up_rows else 6) %}
             <tr>
                 <td><input name="med_name" list="med_suggestions" autocomplete="off" style="width:18em;"></td>
                 <td><input name="quantity" type="number" min="0" style="width:8em;"></td>
+                {% if upload_draft %}<td></td>{% endif %}
             </tr>
         {% endfor %}
         </tbody>

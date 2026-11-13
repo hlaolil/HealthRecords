@@ -1899,6 +1899,117 @@ def _unit_price(pack_price: float, pack_size: float | None) -> float:
     return pack_price / pack_size if pack_size else pack_price
 
 
+def _write_receive_line(medications: Collection, transactions: Collection, d: Doc,
+                        med: Doc, quantity: int, pack_size: int, pack_price: float,
+                        batch: str, expiry_date: str, user: str) -> tuple[float, float]:
+    """Put one checked line of a delivery onto the shelf. (unit price, line value).
+
+    Shared by Add a Line and by an uploaded invoice, so the two cannot drift.
+    Supplier, order and invoice are the delivery's; the schedule is the
+    medication's, never the form's.
+    """
+    price = _unit_price(pack_price, pack_size)
+    line_value = quantity * pack_price / pack_size
+    medications.update_one(
+        {'name': med['name']},
+        {'$inc': {'balance': quantity},
+         '$set': {'batch': batch, 'price': price, 'expiry_date': expiry_date,
+                  'pack_size': pack_size, 'pack_price': pack_price,
+                  'stock_receiver': d['stock_receiver'],
+                  'order_number': d['order_number'], 'supplier': d['supplier'],
+                  'invoice_number': d['invoice_number']}})
+    transactions.insert_one({
+        'type': 'receive',
+        'med_name': med['name'], 'quantity': quantity, 'batch': batch,
+        'price': price, 'pack_size': pack_size, 'pack_price': pack_price,
+        'line_value': line_value,
+        'expiry_date': expiry_date, 'schedule': med.get('schedule', 'not controlled'),
+        'stock_receiver': d['stock_receiver'],
+        'order_number': d['order_number'], 'supplier': d['supplier'],
+        'invoice_number': d['invoice_number'],
+        'delivery_id': str(d['_id']), 'delivery_reference': d['reference'],
+        'user': user, 'timestamp': datetime.utcnow(),
+    })
+    return price, line_value
+
+
+def _invoice_rows(upload: Any, names: list[str], meds_by_name: dict[str, Doc],
+                  qty_mode: str) -> Doc:
+    """An invoice spreadsheet read into delivery lines, for checking.
+
+    Quantity can come as single units, as packs, or as a plain "Qty". A plain
+    Qty is read the way the person said the sheet counts (qty_mode), because
+    on a supplier invoice it is usually packs and on the app's own template it
+    is units. The price per pack is taken as given, or worked out from a unit
+    price or a line total, whichever the sheet has.
+    """
+    table = _find_table(_read_upload(upload),
+                        ['med', 'units', 'packs', 'qty', 'pack_size', 'pack_price',
+                         'unit_price', 'total', 'batch', 'expiry'],
+                        [['med'], ['units', 'packs', 'qty']])
+    cols, match = table['cols'], _med_matcher(names)
+    out: Docs = []
+    for r in table['rows']:
+        raw = str(_cell(r, cols, 'med') or '').strip()
+        if not raw or _heading_key(raw) in ('total', 'subtotal', 'sub total', 'vat',
+                                             'grand total', 'total due', 'balance due'):
+            continue
+        name, sugg, guessed = match(raw)
+        med = meds_by_name.get(name or '') or {}
+        ps = _cell_num(_cell(r, cols, 'pack_size'))
+        pack_size = int(ps) if ps and ps >= 1 else int(med.get('pack_size') or 1)
+        units = _cell_num(_cell(r, cols, 'units'))
+        packs = _cell_num(_cell(r, cols, 'packs'))
+        qty = _cell_num(_cell(r, cols, 'qty'))
+        if units is None and packs is None and qty is not None:
+            if qty_mode == 'packs':
+                packs = qty
+            else:
+                units = qty
+        if units is None and packs is not None:
+            units = packs * pack_size
+        if packs is None and units is not None:
+            packs = units / pack_size
+        pp = _cell_num(_cell(r, cols, 'pack_price'))
+        up = _cell_num(_cell(r, cols, 'unit_price'))
+        tot = _cell_num(_cell(r, cols, 'total'))
+        if pp is None and up is not None:
+            # A "unit price" next to a quantity in packs is the price of what
+            # was counted - a pack. Next to single units it is per unit.
+            pp = up if (qty_mode == 'packs' and 'units' not in cols) or 'packs' in cols \
+                else up * pack_size
+        if pp is None and tot is not None and packs:
+            pp = tot / packs
+        exp, bad_date = _checklist_date(_cell(r, cols, 'expiry'))
+        problems = []
+        if not name:
+            problems.append('not on the medication list' +
+                            (f' - did you mean {", ".join(sugg[:3])}?' if sugg else
+                             ' - add it under Add Medication first'))
+        elif guessed:
+            problems.append(f'read "{raw}" as this - check it')
+        if units is None:
+            problems.append('no quantity')
+        elif not float(units).is_integer():
+            problems.append(f'{units:g} units is not a whole number - check the pack size')
+        if pp is None:
+            problems.append('no price')
+        if bad_date:
+            problems.append(f'expiry {bad_date}')
+        elif not exp:
+            problems.append('no expiry date')
+        batch = str(_cell(r, cols, 'batch') or '').strip()
+        if not batch:
+            problems.append('no batch')
+        out.append({'raw': raw, 'name': name or raw, 'matched': bool(name), 'guessed': guessed,
+                    'units': '' if units is None else _num(round(units, 4)),
+                    'pack_size': pack_size,
+                    'pack_price': '' if pp is None else round(pp, 2),
+                    'batch': batch, 'expiry': exp or '',
+                    'problem': '; '.join(problems)})
+    return {'rows': out, 'sheet': table['sheet'], 'cut': table['cut']}
+
+
 def _delivery_goods_value(transactions: Collection, delivery_id: Any) -> float:
     return sum(_line_value(l) for l in
                transactions.find({'type': 'receive', 'delivery_id': delivery_id},
@@ -2110,9 +2221,6 @@ def receive() -> ResponseReturnValue:
                 # directly so that a unit price which does not divide cleanly
                 # (a pack of 3, say) cannot introduce a rounding mismatch
                 # against the invoice.
-                price      = _unit_price(pack_price, pack_size)
-                line_value = quantity * pack_price / pack_size
-
                 # FIX (Data integrity): this used to upsert, so a typo in the
                 # medication name silently CREATED a new medication and put the
                 # stock there, leaving the real item's balance untouched and
@@ -2130,34 +2238,11 @@ def receive() -> ResponseReturnValue:
                     return redirect(url_for('receive', delivery_id=str(d['_id'])))
 
                 # Classification comes from the medication record, never from
-                # the form — see the note on the add-line template.
-                schedule = existing_med.get('schedule', 'not controlled')
-
-                # Supplier / order / invoice are INHERITED from the delivery
-                # header — that is the whole point: they are typed once per
-                # delivery, not once per medication, so they cannot drift
-                # between lines of the same consignment.
-                medications.update_one(
-                    {'name': med_name},
-                    {'$inc': {'balance': quantity},
-                     '$set': {'batch': batch, 'price': price, 'expiry_date': expiry_date,
-                              'pack_size': pack_size, 'pack_price': pack_price,
-                              'stock_receiver': d['stock_receiver'],
-                              'order_number': d['order_number'], 'supplier': d['supplier'],
-                              'invoice_number': d['invoice_number']}}
-                )
-                transactions.insert_one({
-                    'type': 'receive',
-                    'med_name': med_name, 'quantity': quantity, 'batch': batch,
-                    'price': price, 'pack_size': pack_size, 'pack_price': pack_price,
-                    'line_value': line_value,
-                    'expiry_date': expiry_date, 'schedule': schedule,
-                    'stock_receiver': d['stock_receiver'],
-                    'order_number': d['order_number'], 'supplier': d['supplier'],
-                    'invoice_number': d['invoice_number'],
-                    'delivery_id': str(d['_id']), 'delivery_reference': d['reference'],
-                    'user': current_user, 'timestamp': datetime.utcnow(),
-                })
+                # the form; supplier / order / invoice are INHERITED from the
+                # delivery header, typed once per delivery, not per line.
+                price, line_value = _write_receive_line(
+                    medications, transactions, d, existing_med, quantity, pack_size,
+                    pack_price, batch, expiry_date, current_user)
                 packs = quantity / pack_size
                 flash(f'{med_name}: {quantity} units received onto {d["reference"]} '
                       f'({packs:g} x pack of {pack_size} at R{pack_price:.2f} = '
@@ -2167,6 +2252,111 @@ def receive() -> ResponseReturnValue:
                 # work this out by reading its own text.
                 return redirect(url_for('receive', delivery_id=str(d['_id']),
                                         line_added=1))
+
+            if action in ('upload_lines', 'lines_bulk', 'discard_upload'):
+                d = _load_delivery(deliveries, request.form.get('delivery_id'))
+                if not d:
+                    flash('Delivery not found.')
+                    return redirect(url_for('receive'))
+                back = redirect(url_for('receive', delivery_id=str(d['_id']), _anchor='upload'))
+                login = session['user'].get('login')
+                if d['status'] != 'open':
+                    flash(f"Delivery {d['reference']} is closed. No further lines can be added.")
+                    return redirect(url_for('receive', delivery_id=str(d['_id'])))
+                if action == 'discard_upload':
+                    _draft_drop(db, login, 'receive', str(d['_id']))
+                    flash('The uploaded lines were discarded. Nothing was added.')
+                    return redirect(url_for('receive', delivery_id=str(d['_id'])))
+                if action == 'upload_lines':
+                    names = [m['name'] for m in medications.find(_active(), {'_id': 0, 'name': 1})]
+                    meds_by = {m['name']: m for m in medications.find(
+                        {}, {'_id': 0, 'name': 1, 'pack_size': 1})}
+                    mode = 'units' if request.form.get('qty_mode') == 'units' else 'packs'
+                    try:
+                        found = _invoice_rows(request.files.get('sheet'), names, meds_by, mode)
+                    except ValueError as e:
+                        flash(f'The invoice could not be read: {e}.')
+                        return back
+                    if not found['rows']:
+                        flash('The sheet has headings but no lines under them.')
+                        return back
+                    _draft_put(db, login, 'receive', str(d['_id']), found['rows'],
+                               {'sheet': found['sheet'], 'mode': mode})
+                    flagged = sum(1 for r in found['rows'] if r['problem'])
+                    flash(f"Read {len(found['rows'])} line(s) from \"{found['sheet']}\". "
+                          f"Nothing has been added yet - check the lines below"
+                          + (f' ({flagged} need attention)' if flagged else '')
+                          + ', then press Add These Lines.'
+                          + (' Only the first 2000 rows were read.' if found['cut'] else ''))
+                    return back
+
+                # lines_bulk: what is on the page now, corrected or not
+                rows: Docs = []
+                n = int(request.form.get('n') or 0)
+                for i in range(min(n, UPLOAD_MAX_ROWS)):
+                    rows.append({
+                        'include': bool(request.form.get(f'inc__{i}')),
+                        'name': (request.form.get(f'med__{i}') or '').strip(),
+                        'raw': (request.form.get(f'raw__{i}') or '').strip(),
+                        'units': (request.form.get(f'units__{i}') or '').strip(),
+                        'pack_size': (request.form.get(f'pack_size__{i}') or '').strip(),
+                        'pack_price': (request.form.get(f'pack_price__{i}') or '').strip(),
+                        'batch': (request.form.get(f'batch__{i}') or '').strip(),
+                        'expiry': (request.form.get(f'expiry__{i}') or '').strip(),
+                    })
+                plan, problems = [], []
+                for i, r in enumerate(rows):
+                    if not r['include']:
+                        continue
+                    label = f"line {i + 1} ({r['name'] or r['raw']})"
+                    med = medications.find_one({'name': r['name']}) if r['name'] else None
+                    try:
+                        qty = int(float(r['units']))
+                        if qty < 1 or float(r['units']) != qty:
+                            raise ValueError
+                    except ValueError:
+                        problems.append(f'{label}: the quantity must be a whole number of units')
+                        continue
+                    try:
+                        ps = int(float(r['pack_size'] or 1))
+                        pp = float(r['pack_price'])
+                        if ps < 1 or pp < 0:
+                            raise ValueError
+                    except ValueError:
+                        problems.append(f'{label}: check the pack size and price')
+                        continue
+                    if not med:
+                        problems.append(f'{label}: not on the medication list')
+                        continue
+                    if not r['batch']:
+                        problems.append(f'{label}: enter the batch')
+                        continue
+                    if not _parse_expiry(r['expiry']):
+                        problems.append(f'{label}: enter a valid expiry date')
+                        continue
+                    plan.append((med, qty, ps, pp, r['batch'], r['expiry']))
+                # Every ticked line is checked before any stock moves, so one
+                # bad line does not leave half an invoice on the shelf.
+                if problems or not plan:
+                    for r in rows:
+                        r['matched'] = bool(r['name'] and medications.find_one({'name': r['name']}))
+                        r['problem'] = ''
+                    _draft_put(db, login, 'receive', str(d['_id']), rows,
+                               (_draft_get(db, login, 'receive', str(d['_id'])) or {}).get('meta'))
+                    flash('Nothing was added: ' + ('; '.join(problems) if problems
+                                                  else 'no line is ticked') + '.')
+                    return back
+                total = 0.0
+                for med, qty, ps, pp, batch, exp in plan:
+                    total += _write_receive_line(medications, transactions, d, med, qty, ps, pp,
+                                                 batch, exp, current_user)[1]
+                _draft_drop(db, login, 'receive', str(d['_id']))
+                write_audit_entry('CREATE', 'receive', d['reference'],
+                                  f'{len(plan)} line(s) added from an uploaded invoice by '
+                                  f'{current_user}, R{total:.2f}')
+                flash(f'{len(plan)} line(s) added to {d["reference"]} from the upload, '
+                      f'worth R{total:.2f}.')
+                return redirect(url_for('receive', delivery_id=str(d['_id'])))
 
             if action == 'close':
                 d = _load_delivery(deliveries, request.form.get('delivery_id'))
@@ -2200,6 +2390,7 @@ def receive() -> ResponseReturnValue:
         # ---------------- Delivery views ------------------------------
         delivery, delivery_lines, recon, delivery_rows = None, [], {}, []
         order_summary = None
+        upload_draft = None
         delivery = _load_delivery(deliveries, request.values.get('delivery_id'))
         if delivery:
             delivery_lines = list(transactions.find(
@@ -2209,6 +2400,8 @@ def receive() -> ResponseReturnValue:
                                         sum(_line_value(l) for l in delivery_lines))
             order_summary = _order_rollup(deliveries, transactions,
                                           delivery.get('order_number'))
+            upload_draft = _draft_get(db, session['user'].get('login'), 'receive',
+                                      str(delivery['_id']))
         elif not rx_data:
             delivery_rows = list(deliveries.find().sort([('status', 1), ('opened_at', -1)]).limit(200))
             values = _delivery_values(transactions, [str(d['_id']) for d in delivery_rows])
@@ -2229,7 +2422,8 @@ def receive() -> ResponseReturnValue:
             current_user=session['user']['name'],
             delivery=delivery, delivery_lines=delivery_lines, recon=recon,
             deliveries=delivery_rows, order_summary=order_summary,
-            pager=pager, window_defaulted=window_defaulted, unit='receipts'
+            pager=pager, window_defaulted=window_defaulted, unit='receipts',
+            upload_draft=upload_draft,
         )
     except ServerSelectionTimeoutError:
         return render_template(
@@ -2239,6 +2433,120 @@ def receive() -> ResponseReturnValue:
             current_user=session.get('user', {}).get('name', ''),
             pager={'page': 1, 'pages': 1, 'total': 0, 'page_size': 0, 'has_prev': False, 'has_next': False, 'first': 0, 'last': 0}, window_defaulted=False, unit='receipts'
         ), 500
+
+
+def _create_medication(medications: Collection, transactions: Collection, name: str,
+                       category: str, schedule: str, pack_size: int, pack_price: float,
+                       opening: int, batch: str, expiry_date: str, stock_receiver: str,
+                       user: str) -> float:
+    """Define one new item, with its opening stock if any. Returns the unit price.
+
+    Shared by the Add Medication form and by an uploaded list of new items.
+    """
+    price = _unit_price(pack_price, pack_size)
+    medications.insert_one({
+        'name': name, 'category': category,
+        'balance': opening, 'batch': batch,
+        'price': price, 'pack_size': pack_size, 'pack_price': pack_price,
+        'expiry_date': expiry_date, 'schedule': schedule,
+        'stock_receiver': stock_receiver,
+    })
+    # An opening load is stock that was already on the shelf, not a supplier
+    # delivery. It is written as its own transaction type so that it can never
+    # be mistaken for one: it has no invoice to reconcile against, it must not
+    # appear in the receive list or the delivery totals, and it must not be
+    # read as a stock-take correction either. Reports that back-calculate
+    # balances treat it exactly like a receipt, which is what it is in stock
+    # terms.
+    if opening > 0:
+        transactions.insert_one({
+            'type': 'opening_balance',
+            'med_name': name, 'quantity': opening,
+            'batch': batch, 'price': price,
+            'pack_size': pack_size, 'pack_price': pack_price,
+            'line_value': opening * pack_price / pack_size,
+            'expiry_date': expiry_date, 'schedule': schedule,
+            'stock_receiver': stock_receiver,
+            'user': user, 'timestamp': datetime.utcnow(),
+        })
+        write_audit_entry('CREATE', 'opening_balance', name,
+                          f'opening stock of {opening} units recorded by {user}')
+    return price
+
+
+def _category_from(v: Any) -> str:
+    k = _heading_key(v)
+    if not k or k.startswith('pharm'):
+        return CATEGORY_PHARM
+    if 'donor' in k:
+        return CATEGORY_DONOR
+    if 'suppl' in k or 'consum' in k or 'sundr' in k:
+        return CATEGORY_SUPPLY
+    return ''
+
+
+def _schedule_from(v: Any) -> str:
+    k = _heading_key(v)
+    if not k or k in ('no', 'n', 'not controlled', 'non controlled', 'uncontrolled', 'false', '0'):
+        return 'not controlled'
+    if k in ('yes', 'y', 'controlled', 'cd', 'true', '1') or k.startswith('schedule'):
+        return 'controlled'
+    return ''
+
+
+def _new_med_rows(upload: Any, existing: list[str]) -> Doc:
+    """New items from a spreadsheet, each marked new, already on the list, or close."""
+    table = _find_table(_read_upload(upload),
+                        ['med', 'category', 'schedule', 'pack_size', 'pack_price', 'unit_price',
+                         'opening', 'batch', 'expiry'], [['med']])
+    cols, match = table['cols'], _med_matcher(existing)
+    out: Docs = []
+    seen: set[str] = set()
+    for r in table['rows']:
+        name = ' '.join(str(_cell(r, cols, 'med') or '').split())
+        if not name:
+            continue
+        key = _match_key(name)
+        found, sugg, guessed = match(name)
+        ps = _cell_num(_cell(r, cols, 'pack_size'))
+        pack_size = int(ps) if ps and ps >= 1 else 1
+        pp = _cell_num(_cell(r, cols, 'pack_price'))
+        up = _cell_num(_cell(r, cols, 'unit_price'))
+        if pp is None and up is not None:
+            pp = up * pack_size
+        ob = _cell_num(_cell(r, cols, 'opening'))
+        exp, bad_date = _checklist_date(_cell(r, cols, 'expiry'))
+        cat = _category_from(_cell(r, cols, 'category'))
+        sch = _schedule_from(_cell(r, cols, 'schedule'))
+        status, note = 'new', ''
+        if found and not guessed:
+            status, note = 'exists', f'already on the list as "{found}" - use Receiving to add stock'
+        elif key in seen:
+            status, note = 'exists', 'on this sheet twice'
+        else:
+            # Only names that are genuinely alike are worth a warning here:
+            # "tabs, 10 mg" alone is shared by half the list.
+            import difflib
+            close = [x for x in ([found] if found else sugg)
+                     if x and difflib.SequenceMatcher(None, key, _match_key(x)).ratio() >= 0.8]
+            if close:
+                note = ('close to ' + ', '.join(f'"{x}"' for x in close[:3])
+                        + ' - check it is not the same item')
+        problems = []
+        if not cat:
+            problems.append(f'category "{_cell(r, cols, "category")}" not recognised')
+        if not sch:
+            problems.append(f'schedule "{_cell(r, cols, "schedule")}" not recognised')
+        if bad_date:
+            problems.append(f'expiry {bad_date}')
+        seen.add(key)
+        out.append({'name': name, 'status': status, 'note': note,
+                    'category': cat or CATEGORY_PHARM, 'schedule': sch or 'not controlled',
+                    'pack_size': pack_size, 'pack_price': '' if pp is None else round(pp, 2),
+                    'opening': '' if ob is None else _num(ob),
+                    'batch': str(_cell(r, cols, 'batch') or '').strip(), 'expiry': exp or '',
+                    'problem': '; '.join(problems)})
+    return {'rows': out, 'sheet': table['sheet'], 'cut': table['cut']}
 
 
 @app.route('/add-medication', methods=['GET', 'POST'])
@@ -2252,8 +2560,88 @@ def add_medication() -> ResponseReturnValue:
         db = client['pharmacy_db']
         medications = db['medications']
         transactions = db['transactions']
-        message = None
+        flashed = get_flashed_messages()
+        message = flashed[0] if flashed else None
         current_user = session['user']['name']
+        login = session['user'].get('login')
+
+        if request.method == 'POST' and request.form.get('action') in (
+                'upload_meds', 'meds_bulk', 'discard_meds'):
+            action = request.form.get('action')
+            if action == 'discard_meds':
+                _draft_drop(db, login, 'medications')
+                flash('The uploaded list was discarded. Nothing was added.')
+                return redirect(url_for('add_medication'))
+            existing = [m['name'] for m in medications.find({}, {'_id': 0, 'name': 1})]
+            if action == 'upload_meds':
+                try:
+                    found = _new_med_rows(request.files.get('sheet'), existing)
+                except ValueError as e:
+                    flash(f'The list could not be read: {e}.')
+                    return redirect(url_for('add_medication', _anchor='upload'))
+                _draft_put(db, login, 'medications', '', found['rows'], {'sheet': found['sheet']})
+                new = sum(1 for r in found['rows'] if r['status'] == 'new')
+                flash(f"Read {len(found['rows'])} item(s) from \"{found['sheet']}\": {new} new, "
+                      f"{len(found['rows']) - new} already on the list. Nothing has been added "
+                      f"yet - check the list below, then press Add These Items.")
+                return redirect(url_for('add_medication', _anchor='upload-review'))
+            # meds_bulk
+            rows: Docs = []
+            for i in range(min(int(request.form.get('n') or 0), UPLOAD_MAX_ROWS)):
+                g = lambda f: (request.form.get(f'{f}__{i}') or '').strip()
+                rows.append({'include': bool(request.form.get(f'inc__{i}')), 'name': ' '.join(g('name').split()),
+                             'category': g('category'), 'schedule': g('schedule'),
+                             'pack_size': g('pack_size'), 'pack_price': g('pack_price'),
+                             'opening': g('opening'), 'batch': g('batch'), 'expiry': g('expiry'),
+                             'status': g('status') or 'new', 'note': g('note')})
+            have = {_match_key(n) for n in existing}
+            plan, problems, seen = [], [], set()
+            for i, r in enumerate(rows):
+                if not r['include']:
+                    continue
+                label = f"row {i + 1} ({r['name'] or 'no name'})"
+                k = _match_key(r['name'])
+                if not k:
+                    problems.append(f'{label}: no name')
+                    continue
+                if k in have or k in seen:
+                    problems.append(f'{label}: already on the list')
+                    continue
+                if r['category'] not in CATEGORIES or r['schedule'] not in ('controlled', 'not controlled'):
+                    problems.append(f'{label}: choose the category and schedule')
+                    continue
+                try:
+                    ps = int(float(r['pack_size'] or 1))
+                    pp = float(r['pack_price'] or 0)
+                    ob = int(float(r['opening'] or 0))
+                    if ps < 1 or pp < 0 or ob < 0 or float(r['opening'] or 0) != ob:
+                        raise ValueError
+                except ValueError:
+                    problems.append(f'{label}: check the pack size, price and opening balance')
+                    continue
+                if r['expiry'] and not _parse_expiry(r['expiry']):
+                    problems.append(f'{label}: the expiry is not a date')
+                    continue
+                seen.add(k)
+                plan.append((r['name'], r['category'], r['schedule'], ps, pp, ob, r['batch'], r['expiry']))
+            # Nothing is created until every ticked row is right.
+            if problems or not plan:
+                _draft_put(db, login, 'medications', '', rows,
+                           (_draft_get(db, login, 'medications') or {}).get('meta'))
+                flash('Nothing was added: ' + ('; '.join(problems) if problems
+                                              else 'no new item is ticked') + '.')
+                return redirect(url_for('add_medication', _anchor='upload-review'))
+            for name, cat, sch, ps, pp, ob, batch, exp in plan:
+                _create_medication(medications, transactions, name, cat, sch, ps, pp, ob,
+                                   batch, exp, '', current_user)
+            write_audit_entry('CREATE', 'medication', f'{len(plan)} items',
+                              f'added from an uploaded list by {current_user}: '
+                              + ', '.join(p_[0] for p_ in plan))
+            _draft_drop(db, login, 'medications')
+            stocked = sum(1 for p_ in plan if p_[5] > 0)
+            flash(f'{len(plan)} medication(s) added successfully from the upload'
+                  + (f', {stocked} with opening stock.' if stocked else '.'))
+            return redirect(url_for('add_medication'))
 
         if request.method == 'POST':
             try:
@@ -2285,36 +2673,11 @@ def add_medication() -> ResponseReturnValue:
                      current_user=session.get('user', {}).get('name', ''),
                                                   categories=CATEGORIES)
 
-                price = _unit_price(pack_price, pack_size)
-                medications.insert_one({
-                    'name': med_name, 'category': category,
-                    'balance': initial_balance, 'batch': batch,
-                    'price': price, 'pack_size': pack_size, 'pack_price': pack_price,
-                    'expiry_date': expiry_date, 'schedule': schedule,
-                    'stock_receiver': stock_receiver,
-                })
-
-                # An opening load is stock that was already on the shelf, not a
-                # supplier delivery. It is written as its own transaction type so
-                # that it can never be mistaken for one: it has no invoice to
-                # reconcile against, it must not appear in the receive list or
-                # the delivery totals, and it must not be read as a stock-take
-                # correction either. Reports that back-calculate balances treat
-                # it exactly like a receipt, which is what it is in stock terms.
+                price = _create_medication(
+                    medications, transactions, med_name, category, schedule, pack_size,
+                    pack_price, initial_balance, batch, expiry_date, stock_receiver,
+                    current_user)
                 if initial_balance > 0:
-                    transactions.insert_one({
-                        'type': 'opening_balance',
-                        'med_name': med_name, 'quantity': initial_balance,
-                        'batch': batch, 'price': price,
-                        'pack_size': pack_size, 'pack_price': pack_price,
-                        'line_value': initial_balance * pack_price / pack_size,
-                        'expiry_date': expiry_date, 'schedule': schedule,
-                        'stock_receiver': stock_receiver,
-                        'user': current_user, 'timestamp': datetime.utcnow(),
-                    })
-                    write_audit_entry('CREATE', 'opening_balance', med_name,
-                                      f'opening stock of {initial_balance} units '
-                                      f'recorded by {current_user}')
                     message = (f'Medication added with an opening balance of '
                                f'{initial_balance} units (unit price R{price:.4f}).')
                 else:
@@ -2330,7 +2693,8 @@ def add_medication() -> ResponseReturnValue:
 
         return render_template('add_medication.html', nav_links=get_nav_links(), message=message,
                      current_user=session.get('user', {}).get('name', ''),
-                                                  categories=CATEGORIES)
+                                                  categories=CATEGORIES,
+                     upload_draft=_draft_get(db, login, 'medications'))
     except ServerSelectionTimeoutError:
         return render_template(
             'add_medication.html', nav_links=get_nav_links(),
@@ -4536,6 +4900,25 @@ def internal_issue() -> ResponseReturnValue:
         if request.method == 'POST':
             action = request.form.get('action')
 
+            if action in ('upload_list', 'discard_list'):
+                login = session['user'].get('login')
+                if action == 'discard_list':
+                    _draft_drop(db, login, 'issue')
+                    flash('The uploaded list was cleared from the form.')
+                    return redirect(url_for('internal_issue'))
+                try:
+                    found = _upload_rows_for_list(request.files.get('sheet'), _medication_names())
+                except ValueError as e:
+                    flash(f'The list could not be read: {e}.')
+                    return redirect(url_for('internal_issue', _anchor='upload'))
+                _draft_put(db, login, 'issue', '', found['rows'], {'sheet': found['sheet']})
+                flagged = [f"{r['raw']}: {r['problem']}" for r in found['rows'] if r['problem']]
+                flash(f"{len(found['rows'])} item(s) from \"{found['sheet']}\" put into the form below. "
+                      f"Nothing has been issued yet - fill in the department and who is taking it, "
+                      f"check the items, then press Record Issue."
+                      + (' Check: ' + '; '.join(flagged) + '.' if flagged else ''))
+                return redirect(url_for('internal_issue', _anchor='issue-form'))
+
             if action == 'issue':
                 dept = (request.form.get('department') or '').strip()
                 if dept == 'Other':
@@ -4588,6 +4971,7 @@ def internal_issue() -> ResponseReturnValue:
                     write_audit_entry('UPDATE', 'internal_issue', issue_id,
                                       f'issued to {dept} ({issued_to}): {", ".join(done)}')
                     msg = f'Issue to {dept} recorded: {", ".join(done)}.'
+                    _draft_drop(db, session['user'].get('login'), 'issue')
                 else:
                     msg = 'Nothing was issued.'
                 if problems:
@@ -4646,7 +5030,8 @@ def internal_issue() -> ResponseReturnValue:
             'internal_issue.html', nav_links=get_nav_links(), message=message,
             current_user=session['user']['name'],
             past_receivers=_past_receivers(db),
-            departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=recent)
+            departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=recent,
+            upload_draft=_draft_get(db, session['user'].get('login'), 'issue'))
     except ServerSelectionTimeoutError:
         return render_template(
             'internal_issue.html', nav_links=get_nav_links(),
@@ -5074,7 +5459,7 @@ REQ_MAX_LINES = 30
 # requests, so a typed address cannot open the dispensing register.
 DEPARTMENT_ENDPOINTS = {'department_requests', 'logout', 'login', 'change_expired_password',
                         'static', 'api_session_ping', 'session_ping',
-                        'get_medication_options'}
+                        'get_medication_options', 'upload_template'}
 REQUEST_DEPARTMENTS = [d for d in DEPARTMENTS if d != 'Other']
 
 
@@ -5261,6 +5646,285 @@ def _checklist_sheets(wb: Any) -> list[str]:
         if at and ws.max_row > at[0]:
             out.append(ws.title)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Spreadsheet uploads. Long lists - an invoice's lines, a stock-take count, a
+# batch of new items, a ward's list - can be brought in from Excel or CSV
+# instead of typed line by line. Every upload is read into a table that is
+# shown for checking and correcting first; nothing reaches stock until the
+# person presses the page's own save button, through the same checks a typed
+# entry goes through.
+# ---------------------------------------------------------------------------
+UPLOAD_MAX_BYTES = 5 * 1024 * 1024
+UPLOAD_MAX_ROWS = 2000
+UPLOAD_EXTENSIONS = ('.xlsx', '.xlsm', '.csv')
+
+# What a column may be headed, by what it holds. Matched on the heading with
+# punctuation and case ignored, so "Batch No.", "BATCH NO" and "batch no" are
+# one heading.
+UPLOAD_HEADINGS: dict[str, list[str]] = {
+    'med': ['medication', 'medicine', 'item', 'item description', 'description',
+            'product', 'product description', 'drug', 'name', 'item name',
+            'medication name', 'stock item', 'emergency drugs'],
+    'units': ['quantity single units', 'quantity units', 'units', 'qty units',
+              'total units', 'quantity in units'],
+    'packs': ['packs', 'no of packs', 'number of packs', 'qty packs', 'quantity packs'],
+    'qty': ['quantity', 'qty', 'qty supplied', 'qty delivered', 'quantity supplied',
+            'quantity delivered', 'qty issued', 'quantity issued', 'quantity requested',
+            'qty requested', 'qty ordered', 'quantity ordered'],
+    'pack_size': ['pack size', 'pack size units per pack', 'units per pack', 'pack qty',
+                  'pack'],
+    'pack_price': ['price per pack', 'price per pack r', 'pack price'],
+    'unit_price': ['unit price', 'price', 'price per unit', 'unit cost', 'cost', 'rate',
+                   'price excl', 'price incl'],
+    'total': ['total', 'amount', 'line total', 'value', 'total price', 'ext price',
+              'extended price', 'net amount', 'nett amount', 'line value'],
+    'batch': ['batch', 'batch no', 'batch number', 'lot', 'lot no', 'lot number'],
+    'expiry': ['expiry', 'expiry date', 'exp', 'exp date', 'expires', 'best before',
+               'use by', 'expiry date yyyy mm dd'],
+    'note': ['note', 'notes', 'remarks', 'comment', 'comments'],
+    'counted': ['physical count', 'counted', 'count', 'qty counted', 'quantity counted',
+                'physical count only if different'],
+    'category': ['category'],
+    'schedule': ['schedule', 'controlled'],
+    'opening': ['opening balance', 'opening stock', 'initial balance', 'stock on hand'],
+}
+
+
+def _heading_key(v: Any) -> str:
+    return ' '.join(re.sub(r'[^a-z0-9]+', ' ', str(v or '').lower()).split())
+
+
+def _read_upload(upload: Any) -> list[tuple[str, list[list[Any]]]]:
+    """[(sheet title, rows)] from an uploaded .xlsx or .csv.
+
+    Raises ValueError with a sentence fit to show the person.
+    """
+    if not upload or not getattr(upload, 'filename', ''):
+        raise ValueError('choose a spreadsheet to upload')
+    fname = upload.filename.lower()
+    if not fname.endswith(UPLOAD_EXTENSIONS):
+        raise ValueError('that is not a spreadsheet - save it as Excel (.xlsx) or CSV '
+                         'and upload that')
+    data = upload.read(UPLOAD_MAX_BYTES + 1)
+    if len(data) > UPLOAD_MAX_BYTES:
+        raise ValueError('that file is too large for a list (over 5 MB)')
+    if fname.endswith('.csv'):
+        text = None
+        for enc in ('utf-8-sig', 'cp1252', 'latin-1'):
+            try:
+                text = data.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            raise ValueError('the CSV file could not be read')
+        try:
+            dialect: Any = csv.Sniffer().sniff(text[:4096], delimiters=',;\t')
+        except csv.Error:
+            dialect = csv.excel
+        return [('CSV', [r for r in csv.reader(io.StringIO(text), dialect)])]
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    except Exception:
+        raise ValueError('the workbook could not be opened - check it is an Excel '
+                         '.xlsx file and not password-protected')
+    out = []
+    for ws in wb.worksheets:
+        rows = []
+        for r in ws.iter_rows(values_only=True):
+            rows.append(list(r))
+            if len(rows) > UPLOAD_MAX_ROWS + 30:
+                break
+        out.append((ws.title, rows))
+    wb.close()
+    return out
+
+
+def _find_table(sheets: list[tuple[str, list[list[Any]]]], fields: list[str],
+                need: list[list[str]]) -> Doc:
+    """Find the heading row and which column holds what.
+
+    `need` lists groups of fields of which at least one must be found, e.g.
+    [['med'], ['units', 'packs', 'qty']]. Every sheet and the first 15 rows
+    of each are tried; the row that recognises the most headings wins.
+    """
+    best: Doc | None = None
+    for title, rows in sheets:
+        for hi, row in enumerate(rows[:15]):
+            cols: dict[str, int] = {}
+            for ci, cell in enumerate(row or []):
+                key = _heading_key(cell)
+                if not key:
+                    continue
+                for f in fields:
+                    if f not in cols and key in UPLOAD_HEADINGS.get(f, []):
+                        cols[f] = ci
+                        break
+            if not all(any(f in cols for f in g) for g in need):
+                continue
+            if best is None or len(cols) > len(best['cols']):
+                body = [r for r in rows[hi + 1:]
+                        if any(c not in (None, '') and str(c).strip() for c in (r or []))]
+                best = {'sheet': title, 'header_row': hi + 1, 'cols': cols,
+                        'rows': body[:UPLOAD_MAX_ROWS], 'cut': len(body) > UPLOAD_MAX_ROWS}
+    if best is None:
+        wanted = ' and '.join(' or '.join(f'"{UPLOAD_HEADINGS[f][0]}"' for f in g) for g in need)
+        raise ValueError(f'no heading row with {wanted} was found - download the template '
+                         f'to see the headings the app reads')
+    return best
+
+
+def _cell(row: list[Any], cols: dict[str, int], field: str) -> Any:
+    i = cols.get(field)
+    if i is None or i >= len(row):
+        return None
+    v = row[i]
+    return v.strip() if isinstance(v, str) else v
+
+
+def _cell_num(v: Any) -> float | None:
+    """A number from a cell as people type them: '1 200', 'R45.50', '12,5'."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    t = str(v).strip().replace('\xa0', '').replace(' ', '')
+    t = re.sub(r'^(R|ZAR|M|LSL)', '', t, flags=re.I)
+    if t.count(',') == 1 and '.' not in t and len(t.split(',')[1]) != 3:
+        t = t.replace(',', '.')
+    t = t.replace(',', '')
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _match_key(s: Any) -> str:
+    """A medication name reduced to what tells items apart.
+
+    Case, spaces, commas and leading zeros are ignored, so "amoxicillin caps
+    500mg", "Amoxicillin caps, 500 mg" and "AMOXICILLIN CAPS 0500 MG" are one
+    item; the words and the numbers still have to be the same.
+    """
+    k = re.sub(r'[^a-z0-9]', '', str(s or '').lower())
+    return re.sub(r'\d+', lambda m: str(int(m.group())), k)
+
+
+def _num_key(s: str) -> list[int]:
+    """The numbers in a name, as numbers: 'Pyridoxine, 025 mg' -> [25]."""
+    return [int(n) for n in re.findall(r'\d+', s or '')]
+
+
+def _med_matcher(names: list[str]) -> Callable[[str], tuple[str | None, list[str], bool]]:
+    """Match a name from a spreadsheet to one on the medication list.
+
+    Returns (name on file or None, suggestions, guessed). An exact match,
+    ignoring case, spacing and punctuation, is taken. Otherwise a close match
+    is taken only when it is the single close one and carries the same
+    numbers - "Paracetamol 500mg" may become "Paracetamol tabs, 500 mg", but
+    "Amoxicillin 250" never becomes "Amoxicillin 500". A guess is marked, so
+    the page can show it for checking; anything else is left for a person.
+    """
+    import difflib
+    by_key: dict[str, str] = {}
+    for n in names:
+        by_key.setdefault(_match_key(n), n)
+    keys = list(by_key)
+
+    def match(raw: str) -> tuple[str | None, list[str], bool]:
+        k = _match_key(raw)
+        if not k:
+            return None, [], False
+        if k in by_key:
+            return by_key[k], [], False
+        close = difflib.get_close_matches(k, keys, n=4, cutoff=0.6)
+        same_numbers = [c for c in close if _num_key(c) == _num_key(k)]
+        sugg = [by_key[c] for c in close]
+        if len(same_numbers) == 1 and difflib.SequenceMatcher(None, k, same_numbers[0]).ratio() >= 0.75:
+            return by_key[same_numbers[0]], sugg, True
+        return None, sugg, False
+    return match
+
+
+def _draft_get(db: Database, login: Any, kind: str, context: str = '') -> Doc | None:
+    return db['upload_drafts'].find_one({'login': login, 'kind': kind, 'context': context})
+
+
+def _draft_put(db: Database, login: Any, kind: str, context: str, rows: Docs,
+               meta: Doc | None = None) -> None:
+    db['upload_drafts'].delete_many({'login': login, 'kind': kind, 'context': context})
+    db['upload_drafts'].insert_one({'login': login, 'kind': kind, 'context': context,
+                                    'rows': rows, 'meta': meta or {},
+                                    'created_at': datetime.utcnow()})
+
+
+def _draft_drop(db: Database, login: Any, kind: str, context: str = '') -> None:
+    db['upload_drafts'].delete_many({'login': login, 'kind': kind, 'context': context})
+
+
+def _xlsx_download(filename: str, title: str, headings: list[str], rows: list[list[Any]],
+                   note: str = '') -> ResponseReturnValue:
+    """An Excel file to fill in, with the headings the upload reads."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = title[:31]
+    ws.append(headings)
+    for c in ws[1]:
+        c.font = Font(bold=True, color='FFFFFF')
+        c.fill = PatternFill('solid', fgColor='0056B3')
+    for r in rows:
+        ws.append(r)
+    for i, h in enumerate(headings, start=1):
+        width = max([len(str(h))] + [len(str(r[i - 1])) for r in rows[:300] if len(r) >= i
+                                       and r[i - 1] is not None])
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = min(48, width + 3)
+    ws.freeze_panes = 'A2'
+    if note:
+        info = wb.create_sheet('How to fill this in')
+        for line in note.split('\n'):
+            info.append([line])
+        info.column_dimensions['A'].width = 110
+    buf = io.BytesIO()
+    wb.save(buf)
+    resp = make_response(buf.getvalue())
+    resp.headers['Content-Type'] = ('application/vnd.openxmlformats-officedocument.'
+                                    'spreadsheetml.sheet')
+    resp.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return resp
+
+
+def _upload_rows_for_list(upload: Any, names: list[str]) -> Doc:
+    """A ward's list - item and quantity - read for the issue and request forms."""
+    table = _find_table(_read_upload(upload), ['med', 'units', 'qty', 'packs', 'note'],
+                        [['med'], ['units', 'qty', 'packs']])
+    cols, match = table['cols'], _med_matcher(names)
+    rows: Docs = []
+    for r in table['rows']:
+        raw = str(_cell(r, cols, 'med') or '').strip()
+        if not raw:
+            continue
+        qv = None
+        for f in ('units', 'qty', 'packs'):
+            qv = _cell_num(_cell(r, cols, f))
+            if qv is not None:
+                break
+        name, sugg, guessed = match(raw)
+        problem = ''
+        if not name:
+            problem = 'not on the list' + (f' - did you mean {", ".join(sugg[:3])}?' if sugg else '')
+        elif guessed:
+            problem = f'read "{raw}" as this - check it'
+        if qv is None:
+            problem = (problem + '; ' if problem else '') + 'no quantity'
+        rows.append({'raw': raw, 'name': name or raw, 'matched': bool(name), 'guessed': guessed,
+                     'qty': '' if qv is None else _num(int(qv) if float(qv).is_integer() else qv),
+                     'problem': problem})
+    return {'rows': rows, 'sheet': table['sheet'], 'cut': table['cut']}
 
 
 def _checklist_date(v: Any) -> tuple[str | None, str | None]:
@@ -5584,9 +6248,32 @@ def department_requests() -> ResponseReturnValue:
                     return redirect(url_for('department_requests'))
                 ref = _save_request(reqs, dept, user, lines,
                                     (request.form.get('note') or '').strip()[:200])
+                _draft_drop(db, user.get('login'), 'request')
                 flash(f'Request {ref} sent to the pharmacy with {len(lines)} '
                       f'item{"" if len(lines) == 1 else "s"}.', 'success')
                 return redirect(url_for('department_requests'))
+
+            if action in ('upload_list', 'discard_list'):
+                login = user.get('login')
+                if action == 'discard_list':
+                    _draft_drop(db, login, 'request')
+                    flash('The uploaded list was cleared from the form.')
+                    return redirect(url_for('department_requests'))
+                try:
+                    found = _upload_rows_for_list(request.files.get('sheet'), _medication_names())
+                except ValueError as e:
+                    flash(f'The list could not be read: {e}.')
+                    return redirect(url_for('department_requests', _anchor='req-form'))
+                if len(found['rows']) > REQ_MAX_LINES:
+                    flash(f"The list has {len(found['rows'])} items; a request can hold "
+                          f"{REQ_MAX_LINES}. Split it into two sheets.")
+                    return redirect(url_for('department_requests', _anchor='req-form'))
+                _draft_put(db, login, 'request', '', found['rows'], {'sheet': found['sheet']})
+                flagged = [f"{r['raw']}: {r['problem']}" for r in found['rows'] if r['problem']]
+                flash(f"{len(found['rows'])} item(s) from \"{found['sheet']}\" put into the request "
+                      f"form. Nothing has been sent yet - check them, then press Send Request."
+                      + (' Check: ' + '; '.join(flagged) + '.' if flagged else ''))
+                return redirect(url_for('department_requests', _anchor='req-form'))
 
             if action == 'import_checklist':
                 # Fills the count form from the department's own spreadsheet
@@ -5959,6 +6646,7 @@ def department_requests() -> ResponseReturnValue:
                 'requests.html', nav_links=get_nav_links(),
                 message=message, message_class=message_class,
                 standard=standard, watch=watch, watch_days=EXPIRY_WATCH_DAYS, draft=draft,
+                list_draft=_draft_get(db, user.get('login'), 'request'),
                 dept_user=True, my_dept=my_dept, med_names=names,
                 mine=mine, pending=[], history=[], departments=REQUEST_DEPARTMENTS,
                 waited=_waited, max_lines=REQ_MAX_LINES)
@@ -5996,6 +6684,7 @@ def department_requests() -> ResponseReturnValue:
             message=message, message_class=message_class,
             topup_lists=topup_lists, topup_dept=topup_dept, topup_standard=topup_standard,
             watch=watch, watch_days=EXPIRY_WATCH_DAYS, draft=draft,
+            list_draft=_draft_get(db, user.get('login'), 'request'),
             # Open when someone asked for it: a department chosen, a checklist
             # just read, or a count sent back to be put right.
             topup_open=bool(request.args.get('topup') or draft),
@@ -8498,6 +9187,79 @@ def stock_take() -> ResponseReturnValue:
                 return redirect(url_for('stock_take', stock_take_id=str(new_id)))
 
             # --- Post a whole count sheet at once -------------------------
+            if action in ('upload_counts', 'discard_counts'):
+                st = _load_stock_take(stock_takes, request.form.get('stock_take_id'))
+                if not st or st['status'] != 'open':
+                    flash('That stock take is not open.')
+                    return redirect(url_for('stock_take'))
+                login = session['user'].get('login')
+                if action == 'discard_counts':
+                    _draft_drop(db, login, 'stock_take', str(st['_id']))
+                    flash('The uploaded counts were cleared from the sheet. Nothing was posted.')
+                    return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+                try:
+                    table = _find_table(_read_upload(request.files.get('sheet')),
+                                        ['med', 'counted', 'qty', 'expiry', 'batch', 'note'],
+                                        [['med'], ['counted', 'qty', 'expiry', 'batch']])
+                except ValueError as e:
+                    flash(f'The count sheet could not be read: {e}.')
+                    return redirect(url_for('stock_take', stock_take_id=str(st['_id']),
+                                            _anchor='upload'))
+                cols = table['cols']
+                match = _med_matcher([m['name'] for m in medications.find(
+                    _active(), {'_id': 0, 'name': 1})])
+                filled: dict[str, Doc] = {}
+                unknown, guesses, bad = [], [], []
+                for r in table['rows']:
+                    raw = str(_cell(r, cols, 'med') or '').strip()
+                    if not raw:
+                        continue
+                    name, sugg, guessed = match(raw)
+                    if not name:
+                        unknown.append(raw + (f' (did you mean {sugg[0]}?)' if sugg else ''))
+                        continue
+                    if guessed:
+                        guesses.append(f'"{raw}" as {name}')
+                    cv = _cell_num(_cell(r, cols, 'counted'))
+                    if cv is None:
+                        cv = _cell_num(_cell(r, cols, 'qty'))
+                    exp, bad_date = _checklist_date(_cell(r, cols, 'expiry'))
+                    if bad_date:
+                        bad.append(f'{name}: {bad_date}')
+                    if cv is not None and (cv < 0 or not float(cv).is_integer()):
+                        bad.append(f'{name}: count "{cv:g}" is not a whole number')
+                        cv = None
+                    batch = str(_cell(r, cols, 'batch') or '').strip()
+                    note = str(_cell(r, cols, 'note') or '').strip()
+                    # The downloaded sheet carries what is on file; sent back
+                    # unchanged, that is not an entry.
+                    on_file = medications.find_one({'name': name},
+                                                   {'_id': 0, 'expiry_date': 1, 'batch': 1}) or {}
+                    if exp and exp == _expiry_iso(on_file.get('expiry_date')):
+                        exp = None
+                    if batch and batch == (on_file.get('batch') or '').strip():
+                        batch = ''
+                    if cv is None and not exp and not batch:
+                        continue
+                    filled[name] = {'counted': '' if cv is None else int(cv),
+                                    'expiry': exp or '', 'batch': batch, 'note': note,
+                                    'guessed': guessed}
+                _draft_put(db, login, 'stock_take', str(st['_id']),
+                           [{'name': k, **v} for k, v in filled.items()],
+                           {'sheet': table['sheet'], 'unknown': unknown, 'guesses': guesses,
+                            'bad': bad})
+                msg = (f'{len(filled)} row(s) of the sheet filled from "{table["sheet"]}". '
+                       f'Nothing has been posted yet - check the highlighted rows, then '
+                       f'press Post Counts.')
+                if guesses:
+                    msg += ' Matched by a close spelling, check them: ' + '; '.join(guesses) + '.'
+                if unknown:
+                    msg += ' Not on the medication list, left out: ' + '; '.join(unknown) + '.'
+                if bad:
+                    msg += ' Not read: ' + '; '.join(bad) + '.'
+                flash(msg)
+                return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
+
             if action == 'count_sheet':
                 st = _load_stock_take(stock_takes, request.form.get('stock_take_id'))
                 if not st:
@@ -8596,6 +9358,10 @@ def stock_take() -> ResponseReturnValue:
                             f'YYYY-MM-DD form and were not saved.')
                 if skipped:
                     msg += f' {skipped} row(s) skipped as invalid or unknown.'
+                if posted or details_only or confirmed:
+                    # The uploaded figures have been posted or looked over;
+                    # what was left unposted goes back to blank boxes.
+                    _draft_drop(db, session['user'].get('login'), 'stock_take', str(st['_id']))
                 flash(msg)
                 return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
 
@@ -8720,13 +9486,35 @@ def stock_take() -> ResponseReturnValue:
                       'expiry': _expiry_iso(m.get('expiry_date')),
                       'batch': (m.get('batch') or '').strip()}
                      for m in sheet_docs if m['name'] not in done]
+            # Figures brought in from an uploaded count sheet, shown in the
+            # boxes for checking. They are posted only by Post Counts.
+            upload_draft = _draft_get(db, session['user'].get('login'), 'stock_take',
+                                      str(active['_id']))
+            pre = {r['name']: r for r in (upload_draft or {}).get('rows', [])}
+            for row in sheet:
+                p_ = pre.get(row['name'])
+                if p_:
+                    row['pre'] = p_
+            if request.values.get('download') == 'sheet':
+                return _xlsx_download(
+                    f"{active['reference']}-count-sheet.xlsx", 'Count sheet',
+                    ['Medication', 'On system', 'Physical count', 'Expiry date', 'Batch', 'Note'],
+                    [[r['name'], r['balance'], None, r['expiry'] or None, r['batch'] or None, None]
+                     for r in sheet],
+                    f"Count sheet for {active['reference']}, {len(sheet)} item(s) not yet counted.\n"
+                    'Physical count: what is on the shelf. Leave it blank for an item you did '
+                    'not count - it stays on the sheet.\n'
+                    'Expiry date and batch: already filled with what is on file; change them '
+                    'only where the pack says something different.\n'
+                    'Then upload it on the stock take page: the counts fill the sheet there '
+                    'for checking, and are posted only when you press Post Counts.')
             if request.values.get('export') == 'csv':
                 return _register_csv_response('stock_take', counts)
 
             return render_template(
                 'stock_take.html', nav_links=get_nav_links(), message=message,
                 active=active, counts=counts, med_names=med_names,
-                uncounted=uncounted, sheet=sheet, sessions=[],
+                uncounted=uncounted, sheet=sheet, sessions=[], upload_draft=upload_draft,
                 agreed_count=sum(1 for c in counts if c.get('variance') == 0),
                 issued_not_recorded=sum(1 for c in counts
                                         if (c.get('variance') or 0) < 0),
@@ -10121,6 +10909,51 @@ def _medication_names() -> list[str]:
         app.logger.warning(f'medication name list unavailable: {e}')
         # Free typing still works, and the server checks the name either way.
         return []
+
+
+UPLOAD_TEMPLATES: dict[str, tuple[str, list[str], list[list[Any]], str]] = {
+    'receive': ('invoice-lines.xlsx',
+                ['Medication', 'Quantity (single units)', 'Pack size', 'Price per pack',
+                 'Batch', 'Expiry date'],
+                [['Amoxicillin caps, 500 mg', 500, 100, 52.40, 'AMX2409', '2028-03-31']],
+                'One row per item on the invoice.\n'
+                'Medication: as it is named on your medication list (close spellings are '
+                'suggested for checking).\n'
+                'Quantity: single units - or put the number of packs in a column headed '
+                '"Packs" instead.\n'
+                'Price: the price of one pack - or a "Unit price" or a line "Total" column, '
+                'and the app works the pack price out.\n'
+                'Expiry: a date, or YYYY-MM-DD.\n'
+                'A supplier\'s own spreadsheet usually works as it is: Description, Qty, '
+                'Unit price, Batch and Expiry are all recognised.'),
+    'medications': ('new-medications.xlsx',
+                    ['Medication', 'Category', 'Schedule', 'Pack size', 'Price per pack',
+                     'Opening balance', 'Batch', 'Expiry date'],
+                    [['Cetirizine tabs, 10 mg', 'Pharmaceutical', 'not controlled', 30, 18.50,
+                      0, '', '']],
+                    'One row per NEW item. Items already on the list are shown and skipped.\n'
+                    'Category: Pharmaceutical, Medical Supply or Donor Funded '
+                    '(blank means Pharmaceutical).\n'
+                    'Schedule: controlled or not controlled (blank means not controlled).\n'
+                    'Opening balance: stock already on the shelf, if any; it needs a batch '
+                    'and expiry.\n'
+                    'Name items the way the list does, e.g. "Paracetamol tabs, 500 mg", so '
+                    'they sort and match properly.'),
+    'list': ('item-list.xlsx', ['Medication', 'Quantity'],
+             [['Paracetamol tabs, 500 mg', 200], ['Gauze swabs', 20]],
+             'One row per item: the medication and the quantity in single units.'),
+}
+
+
+@app.route('/upload-template/<kind>', methods=['GET'])
+@login_required
+def upload_template(kind: str) -> ResponseReturnValue:
+    """An empty sheet with the headings an upload reads, and how to fill it."""
+    if kind not in UPLOAD_TEMPLATES:
+        return redirect('/')
+    fname, heads, example, note = UPLOAD_TEMPLATES[kind]
+    return _xlsx_download(fname, 'Fill in', heads, example,
+                          note + '\nThe example row can be overwritten or deleted.')
 
 
 @app.route('/api/stock', methods=['GET'])
