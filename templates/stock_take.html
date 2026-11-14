@@ -102,8 +102,29 @@ ticking.</p>
                    ~ 'batch where they differ), and upload it. The figures fill this sheet for checking; '
                    ~ 'nothing is posted until you press Post Counts.') %}
 {% endcall %}
-<p style="font-size:13px;margin-top:-4px;"><a href="{{ url_for('stock_take', stock_take_id=active._id|string, download='sheet') }}"><strong>&darr; Download the count sheet</strong></a>
-(the {{ sheet|length }} item(s) still to count, with what the system has)</p>
+<div class="st-downloads">
+    <strong>&darr; Download a count sheet</strong> (the items still to count, with what the system has):
+    <ul>
+    {% for g, label in count_groups if group_counts[g] %}
+        <li><a href="{{ url_for('stock_take', stock_take_id=active._id|string, download='sheet', group=g) }}">{{ label }}</a>
+            <span class="st-n">{{ group_counts[g] }}</span></li>
+    {% endfor %}
+        <li><a href="{{ url_for('stock_take', stock_take_id=active._id|string, download='sheet') }}">Everything on one sheet</a>
+            <span class="st-n">{{ sheet|length }}</span></li>
+    </ul>
+    <small>Upload each one when it is counted. The uploads add up, so you can post them together or one at a time.</small>
+</div>
+<style>
+.st-downloads { font-size: 13px; margin: -4px 0 12px; }
+.st-downloads ul { list-style: none; padding: 0; margin: 6px 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.st-n { color: #666; }
+.st-groups { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+#st_sheet_form .st-groups button { padding: 5px 11px; font-size: 13px; margin: 0; width: auto;
+    min-height: 0; border-radius: 14px; background: #fff; color: #0056b3; border: 1px solid #0056b3;
+    box-shadow: none; transition: none; transform: none; opacity: 1; font-weight: 600; }
+#st_sheet_form .st-groups button span { font-weight: 400; opacity: .8; }
+#st_sheet_form .st-groups button.on { background: #0056b3; color: #fff; }
+</style>
 {% if upload_draft %}
 <div class="message partial" style="font-size:14px;">
     <strong>{{ upload_draft.rows|length }} row(s) filled from &ldquo;{{ upload_draft.meta.sheet }}&rdquo;</strong>,
@@ -127,6 +148,12 @@ ticking.</p>
 <form method="POST" action="{{ url_for('stock_take') }}" id="st_sheet_form">
     <input type="hidden" name="action" value="count_sheet">
     <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
+    <div class="st-groups" role="group" aria-label="Show one group">
+        <button type="button" class="on" data-group="">All <span>{{ sheet|length }}</span></button>
+        {% for g, label in count_groups if group_counts[g] %}
+        <button type="button" data-group="{{ g }}">{{ label }} <span>{{ group_counts[g] }}</span></button>
+        {% endfor %}
+    </div>
     <p>
         <input type="text" id="st_filter" placeholder="Filter this list..."
                onkeyup="stFilter()" style="width:16em;">
@@ -144,7 +171,7 @@ ticking.</p>
         </thead>
         <tbody>
         {% for m in sheet %}
-            <tr{% if m.pre %} class="close-to-expire" title="filled from the uploaded sheet"{% endif %}>
+            <tr data-group="{{ m.group }}"{% if m.pre %} class="close-to-expire" title="filled from the uploaded sheet"{% endif %}>
                 <td>{{ m.name }}<input type="hidden" name="med__{{ loop.index0 }}" value="{{ m.name }}"></td>
                 <td class="st-system">{{ m.balance }}</td>
                 <td class="st-agree"><input name="agree__{{ loop.index0 }}" type="checkbox"
@@ -239,15 +266,29 @@ window.addEventListener('pageshow', function () {
         inp.disabled = false;
     });
 });
+// The group buttons and the filter box work together: a row shows when it
+// is in the chosen group and matches what is typed. Hiding never clears
+// anything entered, and Post Counts still sends every filled row.
+var stGroup = '';
 function stFilter() {
     var q = document.getElementById('st_filter').value.toLowerCase();
     var rows = document.querySelectorAll('#st_sheet tbody tr');
     for (var i = 0; i < rows.length; i++) {
         var cell = rows[i].cells[0];
-        if (!cell) { continue; }
-        rows[i].style.display = cell.textContent.toLowerCase().indexOf(q) > -1 ? '' : 'none';
+        if (!cell || !rows[i].dataset.group) { continue; }
+        var inGroup = !stGroup || rows[i].dataset.group === stGroup;
+        rows[i].style.display = inGroup && cell.textContent.toLowerCase().indexOf(q) > -1 ? '' : 'none';
     }
 }
+document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('.st-groups button');
+    if (!b) return;
+    stGroup = b.dataset.group || '';
+    document.querySelectorAll('.st-groups button').forEach(function (x) {
+        x.classList.toggle('on', x === b);
+    });
+    stFilter();
+});
 </script>
 
 {# One item on its own. The sheet is for walking the shelves; this is for the

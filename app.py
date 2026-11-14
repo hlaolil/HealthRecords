@@ -2956,6 +2956,28 @@ def _cat_of(med: Doc) -> str:
     return med.get('category') or CATEGORY_PHARM
 
 
+# The stock take is counted shelf by shelf, and the shelves follow these
+# groups: supplies in one place, the pharmaceuticals, donor stock kept apart,
+# and the controlled drugs in their locked cabinet. A controlled drug is
+# counted with the controlled drugs whatever its category, because that is
+# where it is kept and who counts it.
+COUNT_GROUPS: list[tuple[str, str]] = [('supply', 'Medical Supplies'),
+                                       ('pharm', 'Pharmaceuticals'),
+                                       ('donor', 'Donor Funded'),
+                                       ('controlled', 'Controlled Drugs')]
+
+
+def _count_group(med: Doc) -> str:
+    if (med.get('schedule') or '').strip().lower() == 'controlled':
+        return 'controlled'
+    cat = _cat_of(med)
+    if cat == CATEGORY_SUPPLY:
+        return 'supply'
+    if cat == CATEGORY_DONOR:
+        return 'donor'
+    return 'pharm'
+
+
 def _active(base: Query | None = None) -> Query:
     """Add the not-archived condition to a medications query.
 
@@ -9333,11 +9355,24 @@ def stock_take() -> ResponseReturnValue:
                     filled[name] = {'counted': '' if cv is None else int(cv),
                                     'expiry': exp or '', 'batch': batch, 'note': note,
                                     'guessed': guessed}
-                _draft_put(db, login, 'stock_take', str(st['_id']),
-                           [{'name': k, **v} for k, v in filled.items()],
-                           {'sheet': table['sheet'], 'unknown': unknown, 'guesses': guesses,
-                            'bad': bad})
+                # Sheets come one shelf group at a time, so a second upload
+                # adds to what is already waiting instead of replacing it.
+                # The same item uploaded again takes the newer figure.
+                before = _draft_get(db, login, 'stock_take', str(st['_id'])) or {}
+                kept = {r['name']: r for r in before.get('rows') or []}
+                kept.update({k: {'name': k, **v} for k, v in filled.items()})
+                old_meta = before.get('meta') or {}
+                sheets = [x for x in (old_meta.get('sheets') or
+                                      ([old_meta['sheet']] if old_meta.get('sheet') else []))
+                          if x != table['sheet']] + [table['sheet']]
+                _draft_put(db, login, 'stock_take', str(st['_id']), list(kept.values()),
+                           {'sheet': ', '.join(sheets), 'sheets': sheets,
+                            'unknown': (old_meta.get('unknown') or []) + unknown,
+                            'guesses': (old_meta.get('guesses') or []) + guesses,
+                            'bad': (old_meta.get('bad') or []) + bad})
                 msg = (f'{len(filled)} row(s) of the sheet filled from "{table["sheet"]}". '
+                       + (f'{len(kept)} uploaded row(s) are now waiting in all. '
+                          if len(kept) > len(filled) else '') +
                        f'Nothing has been posted yet - check the highlighted rows, then '
                        f'press Post Counts.')
                 if guesses:
@@ -9589,7 +9624,8 @@ def stock_take() -> ResponseReturnValue:
             # rather than "counted", and the register keeps the difference.
             sheet_docs = _by_name(medications.find(
                 _active(), {'_id': 0, 'name': 1, 'balance': 1,
-                            'expiry_date': 1, 'batch': 1}))
+                            'expiry_date': 1, 'batch': 1,
+                            'category': 1, 'schedule': 1}))
             med_names = [m['name'] for m in sheet_docs]
             # Items already counted in THIS stock take drop off the sheet, so
             # the list shrinks as the work is done and nothing is counted twice
@@ -9600,8 +9636,11 @@ def stock_take() -> ResponseReturnValue:
             uncounted = [m for m in med_names if m not in done]
             sheet = [{'name': m['name'], 'balance': m.get('balance', 0),
                       'expiry': _expiry_iso(m.get('expiry_date')),
-                      'batch': (m.get('batch') or '').strip()}
+                      'batch': (m.get('batch') or '').strip(),
+                      'group': _count_group(m)}
                      for m in sheet_docs if m['name'] not in done]
+            group_counts = {g: sum(1 for r in sheet if r['group'] == g)
+                            for g, _ in COUNT_GROUPS}
             # Figures brought in from an uploaded count sheet, shown in the
             # boxes for checking. They are posted only by Post Counts.
             upload_draft = _draft_get(db, session['user'].get('login'), 'stock_take',
@@ -9612,12 +9651,18 @@ def stock_take() -> ResponseReturnValue:
                 if p_:
                     row['pre'] = p_
             if request.values.get('download') == 'sheet':
+                # One group at a time when asked: a sheet per shelf area.
+                labels = dict(COUNT_GROUPS)
+                grp = request.values.get('group') or ''
+                rows_out = [r for r in sheet if r['group'] == grp] if grp in labels else sheet
+                title = labels.get(grp, 'Count sheet')
+                slug = ('-' + title.lower().replace(' ', '-')) if grp in labels else ''
                 return _xlsx_download(
-                    f"{active['reference']}-count-sheet.xlsx", 'Count sheet',
+                    f"{active['reference']}-count-sheet{slug}.xlsx", title,
                     ['Medication', 'On system', 'Physical count', 'Expiry date', 'Batch', 'Note'],
                     [[r['name'], r['balance'], None, r['expiry'] or None, r['batch'] or None, None]
-                     for r in sheet],
-                    f"Count sheet for {active['reference']}, {len(sheet)} item(s) not yet counted.\n"
+                     for r in rows_out],
+                    f"{title} for {active['reference']}, {len(rows_out)} item(s) not yet counted.\n"
                     'Physical count: what is on the shelf. Leave it blank for an item you did '
                     'not count - it stays on the sheet.\n'
                     'Expiry date and batch: already filled with what is on file; change them '
@@ -9631,6 +9676,7 @@ def stock_take() -> ResponseReturnValue:
                 'stock_take.html', nav_links=get_nav_links(), message=message,
                 active=active, counts=counts, med_names=med_names,
                 uncounted=uncounted, sheet=sheet, sessions=[], upload_draft=upload_draft,
+                count_groups=COUNT_GROUPS, group_counts=group_counts,
                 agreed_count=sum(1 for c in counts if c.get('variance') == 0),
                 issued_not_recorded=sum(1 for c in counts
                                         if (c.get('variance') or 0) < 0),
@@ -11061,10 +11107,68 @@ UPLOAD_TEMPLATES: dict[str, tuple[str, list[str], list[list[Any]], str]] = {
 }
 
 
+def _checklist_template() -> ResponseReturnValue:
+    """A blank month of the department's checklist, laid out the way the
+    checklist import reads it: the standard list down the side, then QTY and
+    EXPIRY DATE to fill in, on a tab named for the month.
+
+    A department login gets its own list only; staff choose the department.
+    """
+    import openpyxl
+    from openpyxl.styles import Alignment, Font, PatternFill
+    user = session.get('user') or {}
+    if user.get('role') == 'department':
+        dept = user.get('department') or ''
+    else:
+        dept = (request.args.get('department') or '').strip()
+    db = get_mongo_client()['pharmacy_db']
+    standard = _standard_list(db, dept) if dept in REQUEST_DEPARTMENTS else []
+    if not standard:
+        flash('That department has no standard list to make a checklist from.')
+        return redirect(url_for('department_requests'))
+    now = local_now()
+    month = f'{MONTH_NAMES[now.month - 1]} {now.year}'
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = month[:31]
+    heads = [f'EMERGENCY DRUGS - {dept.upper()}', 'REQUIRED', 'QTY', 'EXPIRY DATE', 'NOTE']
+    ws.append(heads)
+    for c in ws[1]:
+        c.font = Font(bold=True, color='FFFFFF')
+        c.fill = PatternFill('solid', fgColor='0056B3')
+        c.alignment = Alignment(wrap_text=True, vertical='center')
+    for r in standard:
+        ws.append([r['item'], r.get('required'), None, None, r.get('note') or None])
+    for col, w in zip('ABCDE', (38, 11, 9, 15, 30)):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = 'A2'
+    info = wb.create_sheet('How to fill this in')
+    for line in [f'Checklist for {dept}, {month}.',
+                 'QTY: how many are on the trolley now. Leave it blank for an item you '
+                 'did not check - it stays out of the request.',
+                 'EXPIRY DATE: the earliest expiry among them, e.g. 31/03/2027 or 03/2027. '
+                 'A dash means it does not expire.',
+                 'REQUIRED is what the trolley should hold; the top-up asks for the difference.',
+                 'Then upload it with "Fill from Checklist" on the Requests page. The boxes '
+                 'are filled for checking, and nothing is sent until you press Send.']:
+        info.append([line])
+    info.column_dimensions['A'].width = 110
+    buf = io.BytesIO()
+    wb.save(buf)
+    resp = make_response(buf.getvalue())
+    resp.headers['Content-Type'] = ('application/vnd.openxmlformats-officedocument.'
+                                    'spreadsheetml.sheet')
+    slug = re.sub(r'[^a-z0-9]+', '-', f'{dept} checklist {month}'.lower()).strip('-')
+    resp.headers['Content-Disposition'] = f'attachment; filename="{slug}.xlsx"'
+    return resp
+
+
 @app.route('/upload-template/<kind>', methods=['GET'])
 @login_required
 def upload_template(kind: str) -> ResponseReturnValue:
     """An empty sheet with the headings an upload reads, and how to fill it."""
+    if kind == 'checklist':
+        return _checklist_template()
     if kind not in UPLOAD_TEMPLATES:
         return redirect('/')
     fname, heads, example, note = UPLOAD_TEMPLATES[kind]

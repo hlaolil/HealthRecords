@@ -222,7 +222,9 @@ expires within {{ watch_days }} days, soonest first.</p>
     {% if not fixed %}<input type="hidden" name="department" value="{{ dept }}">{% endif %}
     <strong>Already filled in the checklist spreadsheet?</strong>
     <span class="req-hint" style="margin:0;">Upload it and the boxes below are filled from
-    the month's QTY and EXPIRY DATE columns, for you to check before sending.</span>
+    the month's QTY and EXPIRY DATE columns, for you to check before sending.
+    No sheet for this month yet? <a href="{{ url_for('upload_template', kind='checklist', department=dept) }}">Download a blank checklist</a>
+    with the list already in it.</span>
     <div class="req-import-row">
         {{ file_field('checklist', '.xlsx,.xlsm') }}
         {% if draft and draft.sheets %}
