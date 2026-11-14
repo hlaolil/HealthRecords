@@ -9409,6 +9409,99 @@ def stock_take() -> ResponseReturnValue:
                 flash(msg)
                 return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
 
+            if action == 'edit_count':
+                st = _load_stock_take(stock_takes, request.form.get('stock_take_id'))
+                back = (url_for('stock_take', stock_take_id=str(st['_id'])) + '#counted'
+                        if st else url_for('stock_take'))
+                if not st:
+                    flash('Stock take not found.')
+                    return redirect(back)
+                if st['status'] != 'open':
+                    flash(f"Stock take {st['reference']} is closed, so its counts can no longer be changed.")
+                    return redirect(back)
+                try:
+                    line = counts_col.find_one({'_id': ObjectId(request.form.get('count_id') or ''),
+                                                'stock_take_id': str(st['_id'])})
+                except Exception:
+                    line = None
+                if not line:
+                    flash('That count was not found in this stock take.')
+                    return redirect(back)
+                raw = (request.form.get('counted') or '').strip()
+                reason = (request.form.get('reason') or '').strip()
+                try:
+                    new_count = int(raw)
+                except ValueError:
+                    new_count = -1
+                if new_count < 0:
+                    flash('Enter the corrected count as a whole number, 0 or more.')
+                    return redirect(back)
+                if not reason:
+                    flash('Say why the count is being changed - it stays on the record.')
+                    return redirect(back)
+                name = line['med_name']
+                system_then = line.get('system_balance') or 0
+                was = line.get('counted')
+                # What the count had set the shelf to: the figure counted, or
+                # for a line that only fixed an expiry/batch, the balance as it
+                # stood (that line moved nothing).
+                set_to = was if was is not None else system_then
+                delta = new_count - set_to
+                if was is not None and delta == 0:
+                    flash(f'{name}: the count is already {new_count}; nothing changed.')
+                    return redirect(back)
+                # The balance moves by the difference only. Whatever was
+                # dispensed or received since the count stays counted, so the
+                # shelf ends where it would have if the right number had been
+                # written down the first time.
+                med = medications.find_one({'name': name}, {'balance': 1})
+                if not med:
+                    flash(f'{name} is no longer on the medication list.')
+                    return redirect(back)
+                if (med.get('balance') or 0) + delta < 0:
+                    flash(f"{name}: that would take the balance below zero "
+                          f"({med.get('balance') or 0} now, {delta:+g}). Check what has gone out since the count.")
+                    return redirect(back)
+                medications.update_one({'name': name}, {'$inc': {'balance': delta}})
+                variance = new_count - system_then
+                dtype = classify_variance(variance)
+                # The ledger keeps ONE correction per count, dated when the
+                # count was made: the edit changes its size rather than adding
+                # a second entry. Two entries (+5 then -3) would show 5 found
+                # and 3 missing for what was really 2 found.
+                tx_q = {'type': 'adjustment', 'med_name': name, 'stock_take_id': str(st['_id']),
+                        'timestamp': line['timestamp']}
+                tx = transactions.find_one(tx_q)
+                if tx and variance:
+                    transactions.update_one({'_id': tx['_id']}, {'$set': {
+                        'quantity': variance, 'counted': new_count, 'discrepancy_type': dtype}})
+                elif tx:
+                    transactions.delete_one({'_id': tx['_id']})
+                elif variance:
+                    before = medications.find_one({'name': name}) or {}
+                    transactions.insert_one({
+                        'type': 'adjustment', 'med_name': name, 'quantity': variance,
+                        'batch': before.get('batch'), 'price': before.get('price'),
+                        'expiry_date': before.get('expiry_date'),
+                        'schedule': before.get('schedule'),
+                        'system_balance': system_then, 'counted': new_count,
+                        'discrepancy_type': dtype,
+                        'stock_take_id': str(st['_id']), 'stock_take_reference': st['reference'],
+                        'user': line.get('counted_by'), 'timestamp': line['timestamp'],
+                    })
+                editor = session['user'].get('name') or session['user'].get('login') or ''
+                counts_col.update_one({'_id': line['_id']}, {
+                    '$set': {'counted': new_count, 'variance': variance,
+                             'discrepancy_type': dtype, 'method': 'counted'},
+                    '$push': {'edits': {'from': was, 'to': new_count, 'reason': reason,
+                                        'by': editor, 'at': datetime.utcnow()}}})
+                write_audit_entry('UPDATE', 'stock_take_count', f"{st['reference']} / {name}",
+                                  f"count edited: {'(none)' if was is None else was} -> {new_count} "
+                                  f"(variance {variance:+g}); balance {delta:+g}; reason: {reason}")
+                flash(f'{name}: count changed from {"(none)" if was is None else was} to {new_count}. '
+                      f'Balance {delta:+g}.')
+                return redirect(back)
+
             if action in ('count_sheet', 'post_uploaded'):
                 st = _load_stock_take(stock_takes, request.form.get('stock_take_id'))
                 if not st:

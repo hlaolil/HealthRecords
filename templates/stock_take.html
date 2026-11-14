@@ -339,7 +339,7 @@ may be left blank if you only need to fix an expiry date or a batch number
 </form>
 {% endif %}
 
-<h3>Counted Items ({{ counts|length }})</h3>
+<h3 id="counted">Counted Items ({{ counts|length }})</h3>
 {% if counts %}
 <form method="GET" action="{{ url_for('stock_take') }}" style="display:inline">
     <button type="submit" name="export" value="csv">Download CSV</button>
@@ -354,7 +354,7 @@ may be left blank if you only need to fix an expiry date or a batch number
     <thead>
         <tr><th>Counted At</th><th>Medication</th><th>System Balance</th><th>Physical Count</th>
             <th>Variance</th><th>Discrepancy Type</th><th>Expiry</th><th>Batch</th>
-            <th>Counted By</th><th>Note</th></tr>
+            <th>Counted By</th><th>Note</th>{% if active.status == 'open' %}<th></th>{% endif %}</tr>
     </thead>
     <tbody>
     {# A line with no count corrected an expiry or a batch and moved no stock,
@@ -365,7 +365,8 @@ may be left blank if you only need to fix an expiry date or a batch number
             <td>{{ c.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
             <td>{{ c.med_name }}</td>
             <td>{{ c.system_balance }}</td>
-            <td>{% if c.counted is none %}&ndash;{% else %}{{ c.counted }}{% endif %}</td>
+            <td>{% if c.counted is none %}&ndash;{% else %}{{ c.counted }}{% endif %}
+                {%- if c.edits %} <small class="st-edited" title="{% for e in c.edits %}{{ e.at.strftime('%d %b %H:%M') }}: {{ '(none)' if e['from'] is none else e['from'] }} &rarr; {{ e.to }} by {{ e.by }} &mdash; {{ e.reason }}{% if not loop.last %}&#10;{% endif %}{% endfor %}">edited</small>{% endif %}</td>
             <td>{% if c.variance is none %}&ndash;{% else %}{{ '%+g'|format(c.variance) }}{% endif %}</td>
             <td>{% if c.variance is none %}Detail only{% else %}{{ c.discrepancy_label }}{% if c.method == 'confirmed' %} <small>(ticked)</small>{% endif %}{% endif %}</td>
             <td>{% if c.expiry_after %}
@@ -379,12 +380,62 @@ may be left blank if you only need to fix an expiry date or a batch number
                     {%- else -%}{{ c.batch_after }}{%- endif -%}
                 {% else %}&ndash;{% endif %}</td>
             <td>{{ c.counted_by }}</td>
-            <td>{{ c.note or '-' }}</td>
+            <td>{{ c.note or '-' }}
+                {%- for e in c.edits or [] %}<br><small>Edited {{ e.at.strftime('%d %b %H:%M') }} by {{ e.by }}: {{ '(none)' if e['from'] is none else e['from'] }} &rarr; {{ e.to }} &mdash; {{ e.reason }}</small>{% endfor %}</td>
+            {% if active.status == 'open' %}
+            <td><button type="button" class="st-edit-btn" data-for="ed_{{ c._id }}">Edit</button></td>
+            {% endif %}
         </tr>
+        {% if active.status == 'open' %}
+        <tr class="st-edit-row" id="ed_{{ c._id }}" hidden>
+            <td colspan="11">
+                <form method="POST" action="{{ url_for('stock_take') }}" class="st-edit-form">
+                    <input type="hidden" name="action" value="edit_count">
+                    <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
+                    <input type="hidden" name="count_id" value="{{ c._id }}">
+                    <strong>{{ c.med_name }}</strong>
+                    <label>Correct count
+                        <input type="number" name="counted" min="0" step="1" required
+                               value="{{ c.counted if c.counted is not none else '' }}" inputmode="numeric"></label>
+                    <label>Why
+                        <input type="text" name="reason" required maxlength="200"
+                               placeholder="e.g. miscounted, a box was on the other shelf"></label>
+                    <button type="submit">Save</button>
+                    <button type="button" class="st-edit-cancel" data-for="ed_{{ c._id }}">Cancel</button>
+                    <small>System had {{ c.system_balance }} when counted. The balance moves by the difference only, so
+                        anything dispensed since stays counted.</small>
+                </form>
+            </td>
+        </tr>
+        {% endif %}
     {% else %}
-        <tr><td colspan="10">Nothing counted yet in this stock take.</td></tr>
+        <tr><td colspan="11">Nothing counted yet in this stock take.</td></tr>
     {% endfor %}
     </tbody>
 </table></div>
+<style>
+.st-edited { background: #fff3cd; color: #7a5a00; padding: 0 5px; border-radius: 8px; cursor: help; }
+.st-edit-btn { padding: 3px 10px; font-size: 13px; margin: 0; }
+.st-edit-row td { background: #f4f8fd; }
+.st-edit-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+    margin: 0; padding: 4px 0; background: none; box-shadow: none;
+    /* the table scrolls sideways on a phone; keep the form on screen */
+    position: sticky; left: 8px; max-width: calc(100vw - 56px); }
+.st-edit-form label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 14px; }
+.st-edit-form input[type=number] { width: 6em; }
+.st-edit-form input[type=text] { width: 22em; max-width: 100%; }
+.st-edit-form button { margin: 0; padding: 5px 12px; }
+.st-edit-form small { flex-basis: 100%; color: #555; }
+</style>
+<script>
+document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('.st-edit-btn, .st-edit-cancel');
+    if (!b) return;
+    var row = document.getElementById(b.dataset.for);
+    if (!row) return;
+    row.hidden = b.classList.contains('st-edit-cancel') ? true : !row.hidden;
+    if (!row.hidden) { var n = row.querySelector('input[type=number]'); if (n) { n.focus(); n.select(); } }
+});
+</script>
 {% endif %}
 {% endblock %}
