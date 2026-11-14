@@ -416,6 +416,7 @@ def init_db_collections() -> None:
         db['transactions'].create_index([('type', 1), ('timestamp', -1)])
         db['transactions'].create_index([('med_name', 1)])
         db['medications'].create_index([('name', 1)], unique=True)
+        db['medications'].create_index([('code', 1)], unique=True, sparse=True)
 
         # NEW (Stock Take): the stock-take page lists open sessions first and
         # sorts by start time; the audit view sorts counts by timestamp desc
@@ -2491,17 +2492,144 @@ def receive() -> ResponseReturnValue:
         ), 500
 
 
+# --- Product codes -----------------------------------------------------------
+# Every item carries a code that stays the same when its name is corrected.
+# The app numbers items itself (MED-0001, MED-0002 ...); an official code can
+# be typed over it on the Edit page. Records still carry the item's name -
+# every report reads them by name - so a rename moves the whole history to
+# the new name at once (_rename_medication), and the old name is kept as an
+# alias so spreadsheets that still use it keep matching.
+MED_CODE_PREFIX = 'MED-'
+MED_CODE_MAX = 30
+
+
+def _clean_code(raw: Any) -> str:
+    return re.sub(r'\s+', '', str(raw or '')).upper()[:MED_CODE_MAX]
+
+
+def _code_problem(code: str) -> str:
+    if not code:
+        return 'The code cannot be empty.'
+    if not re.fullmatch(r'[A-Z0-9][A-Z0-9./_-]*', code):
+        return 'A code can hold letters, numbers and - . / _ only.'
+    return ''
+
+
+def _top_med_code(medications: Collection) -> int:
+    top = 0
+    for m in medications.find({'code': {'$regex': '^MED-[0-9]+$'}}, {'_id': 0, 'code': 1}):
+        top = max(top, int(m['code'][len(MED_CODE_PREFIX):]))
+    return top
+
+
+def _next_med_code(medications: Collection) -> str:
+    return f'{MED_CODE_PREFIX}{_top_med_code(medications) + 1:04d}'
+
+
+def _assign_missing_codes(medications: Collection) -> int:
+    """Give every item without a code the next number, in list order."""
+    missing = sorted(medications.find({'code': {'$in': [None, '']}}, {'name': 1}),
+                     key=lambda m: _name_key(m.get('name') or ''))
+    if not missing:
+        return 0
+    top = _top_med_code(medications)
+    for m in missing:
+        top += 1
+        medications.update_one({'_id': m['_id'], 'code': {'$in': [None, '']}},
+                               {'$set': {'code': f'{MED_CODE_PREFIX}{top:04d}'}})
+    return len(missing)
+
+
+def _rename_medication(db: Database, old: str, new: str) -> dict[str, int]:
+    """Move an item, and every record that names it, from `old` to `new`.
+
+    The history moves first and the item itself last. If anything stops part
+    way, the item still has its old name, and saving again finishes the job:
+    each step only touches what still carries the old name.
+    """
+    moved = {
+        'ledger': db['transactions'].update_many(
+            {'med_name': old}, {'$set': {'med_name': new}}).modified_count,
+        'counts': db['stock_take_counts'].update_many(
+            {'med_name': old}, {'$set': {'med_name': new}}).modified_count,
+        'standard': db['dept_standards'].update_many(
+            {'med_name': old}, {'$set': {'med_name': new}}).modified_count,
+    }
+    n = 0
+    for d in db['dept_requests'].find({'lines.med_name': old}, {'lines': 1}):
+        lines = [dict(ln, med_name=new) if ln.get('med_name') == old else ln
+                 for ln in d.get('lines') or []]
+        db['dept_requests'].update_one({'_id': d['_id']}, {'$set': {'lines': lines}})
+        n += 1
+    moved['requests'] = n
+    n = 0
+    for d in db['upload_drafts'].find({'$or': [{'rows.name': old}, {'rows.med_name': old}]},
+                                      {'rows': 1}):
+        rows = []
+        for r in d.get('rows') or []:
+            r = dict(r)
+            for f in ('name', 'med_name'):
+                if r.get(f) == old:
+                    r[f] = new
+            rows.append(r)
+        db['upload_drafts'].update_one({'_id': d['_id']}, {'$set': {'rows': rows}})
+        n += 1
+    moved['drafts'] = n
+    db['medications'].update_one({'name': old}, {'$set': {'name': new},
+                                                 '$addToSet': {'former_names': old}})
+    # Renamed back to an earlier name: that name is current again, not former.
+    db['medications'].update_one({'name': new}, {'$pull': {'former_names': new}})
+    return moved
+
+
+def _assign_codes_at_start() -> None:
+    """Number any item without a code. Runs once as the app starts; cheap
+    when every item already has one."""
+    try:
+        _assign_missing_codes(get_mongo_client()['pharmacy_db']['medications'])
+    except Exception as e:                        # never stop the app over this
+        app.logger.warning(f'Could not assign product codes: {e}')
+
+
+def _med_aliases(names: list[str]) -> dict[str, str]:
+    """Codes and former names that should find an item, for the matcher."""
+    wanted = set(names)
+    out: dict[str, str] = {}
+    try:
+        db = get_mongo_client()['pharmacy_db']
+        for m in db['medications'].find({}, {'_id': 0, 'name': 1, 'code': 1, 'former_names': 1}):
+            if m.get('name') not in wanted:
+                continue
+            if m.get('code'):
+                out[m['code']] = m['name']
+            for f in m.get('former_names') or []:
+                out[f] = m['name']
+    except Exception:
+        return {}
+    return out
+
+
 def _create_medication(medications: Collection, transactions: Collection, name: str,
                        category: str, schedule: str, pack_size: int, pack_price: float,
                        opening: int, batch: str, expiry_date: str, stock_receiver: str,
-                       user: str) -> float:
+                       user: str, code: str = '') -> float:
     """Define one new item, with its opening stock if any. Returns the unit price.
 
     Shared by the Add Medication form and by an uploaded list of new items.
+    A code given is checked; none given takes the next number.
     """
+    code = _clean_code(code)
+    if code:
+        if _code_problem(code):
+            raise ValueError(_code_problem(code))
+        taken = medications.find_one({'code': code}, {'name': 1})
+        if taken:
+            raise ValueError(f'code {code} is already used by {taken["name"]}')
+    else:
+        code = _next_med_code(medications)
     price = _unit_price(pack_price, pack_size)
     medications.insert_one({
-        'name': name, 'category': category,
+        'name': name, 'code': code, 'category': category,
         'balance': opening, 'batch': batch,
         'price': price, 'pack_size': pack_size, 'pack_price': pack_price,
         'expiry_date': expiry_date, 'schedule': schedule,
@@ -2553,9 +2681,11 @@ def _schedule_from(v: Any) -> str:
 def _new_med_rows(upload: Any, existing: list[str]) -> Doc:
     """New items from a spreadsheet, each marked new, already on the list, or close."""
     table = _find_table(_read_upload(upload),
-                        ['med', 'category', 'schedule', 'pack_size', 'pack_price', 'unit_price',
-                         'opening', 'batch', 'expiry'], [['med']])
+                        ['med', 'code', 'category', 'schedule', 'pack_size', 'pack_price',
+                         'unit_price', 'opening', 'batch', 'expiry'], [['med']])
     cols, match = table['cols'], _med_matcher(existing)
+    codes_in_use = {a: n for a, n in _med_aliases(existing).items()
+                    if re.fullmatch(r'[A-Z0-9][A-Z0-9./_-]*', a)}
     out: Docs = []
     seen: set[str] = set()
     for r in table['rows']:
@@ -2595,8 +2725,13 @@ def _new_med_rows(upload: Any, existing: list[str]) -> Doc:
             problems.append(f'schedule "{_cell(r, cols, "schedule")}" not recognised')
         if bad_date:
             problems.append(f'expiry {bad_date}')
+        code = _clean_code(_cell(r, cols, 'code'))
+        if code and _code_problem(code):
+            problems.append(f'code "{code}": ' + _code_problem(code).lower())
+        elif code and code in codes_in_use and status == 'new':
+            problems.append(f'code {code} is already used by {codes_in_use[code]}')
         seen.add(key)
-        out.append({'name': name, 'status': status, 'note': note,
+        out.append({'name': name, 'code': code, 'status': status, 'note': note,
                     'category': cat or CATEGORY_PHARM, 'schedule': sch or 'not controlled',
                     'pack_size': pack_size, 'pack_price': '' if pp is None else round(pp, 2),
                     'opening': '' if ob is None else _num(ob),
@@ -2646,12 +2781,14 @@ def add_medication() -> ResponseReturnValue:
             for i in range(min(int(request.form.get('n') or 0), UPLOAD_MAX_ROWS)):
                 g = lambda f: (request.form.get(f'{f}__{i}') or '').strip()
                 rows.append({'include': bool(request.form.get(f'inc__{i}')), 'name': ' '.join(g('name').split()),
+                             'code': _clean_code(g('code')),
                              'category': g('category'), 'schedule': g('schedule'),
                              'pack_size': g('pack_size'), 'pack_price': g('pack_price'),
                              'opening': g('opening'), 'batch': g('batch'), 'expiry': g('expiry'),
                              'status': g('status') or 'new', 'note': g('note')})
             have = {_match_key(n) for n in existing}
             plan, problems, seen = [], [], set()
+            codes_seen: set[str] = set()
             for i, r in enumerate(rows):
                 if not r['include']:
                     continue
@@ -2678,8 +2815,18 @@ def add_medication() -> ResponseReturnValue:
                 if r['expiry'] and not _parse_expiry(r['expiry']):
                     problems.append(f'{label}: the expiry is not a date')
                     continue
+                if r['code']:
+                    taken = medications.find_one({'code': r['code']}, {'name': 1})
+                    if _code_problem(r['code']) or taken or r['code'] in codes_seen:
+                        problems.append(f"{label}: code {r['code']} "
+                                        + (f"is already used by {taken['name']}" if taken
+                                           else 'is on this list twice' if r['code'] in codes_seen
+                                           else 'is not a valid code'))
+                        continue
+                    codes_seen.add(r['code'])
                 seen.add(k)
-                plan.append((r['name'], r['category'], r['schedule'], ps, pp, ob, r['batch'], r['expiry']))
+                plan.append((r['name'], r['category'], r['schedule'], ps, pp, ob, r['batch'],
+                             r['expiry'], r['code']))
             # Nothing is created until every ticked row is right.
             if problems or not plan:
                 _draft_put(db, login, 'medications', '', rows,
@@ -2687,9 +2834,9 @@ def add_medication() -> ResponseReturnValue:
                 flash('Nothing was added: ' + (_brief(problems) if problems
                                               else 'no new item is ticked') + '.')
                 return redirect(url_for('add_medication', _anchor='upload-review'))
-            for name, cat, sch, ps, pp, ob, batch, exp in plan:
+            for name, cat, sch, ps, pp, ob, batch, exp, code in plan:
                 _create_medication(medications, transactions, name, cat, sch, ps, pp, ob,
-                                   batch, exp, '', current_user)
+                                   batch, exp, '', current_user, code=code)
             write_audit_entry('CREATE', 'medication', f'{len(plan)} items',
                               f'added from an uploaded list by {current_user}: '
                               + ', '.join(p_[0] for p_ in plan))
@@ -2732,12 +2879,14 @@ def add_medication() -> ResponseReturnValue:
                 price = _create_medication(
                     medications, transactions, med_name, category, schedule, pack_size,
                     pack_price, initial_balance, batch, expiry_date, stock_receiver,
-                    current_user)
+                    current_user, code=request.form.get('code') or '')
+                new_code = (medications.find_one({'name': med_name}, {'code': 1}) or {}).get('code')
                 if initial_balance > 0:
                     message = (f'Medication added with an opening balance of '
-                               f'{initial_balance} units (unit price R{price:.4f}).')
+                               f'{initial_balance} units (unit price R{price:.4f}). Code {new_code}.')
                 else:
-                    message = 'Medication added successfully! Receive stock against a delivery.'
+                    message = (f'Medication added successfully! Code {new_code}. '
+                               f'Receive stock against a delivery.')
                 return render_template('add_medication.html', nav_links=get_nav_links(), message=message,
                      current_user=session.get('user', {}).get('name', ''),
                                                   categories=CATEGORIES)
@@ -2794,6 +2943,7 @@ def edit_medication() -> ResponseReturnValue:
                                           categories=CATEGORIES,
                                           message=message, med_data=None, med_name=None)
 
+        _assign_missing_codes(medications)    # cheap when none are missing
         med = medications.find_one({'name': med_name})
         if not med:
             message = f'Medication "{med_name}" not found.'
@@ -2826,6 +2976,43 @@ def edit_medication() -> ResponseReturnValue:
                 price       = _unit_price(pack_price, pack_size)
                 expiry_date = request.form['expiry_date']
                 schedule    = request.form['schedule']
+
+                # Name and code. The code stays with the item through any
+                # change of name; a new name carries the whole history with it.
+                new_name = ' '.join((request.form.get('new_name') or med_name).split())
+                new_code = _clean_code(request.form.get('code') or med.get('code') or '')
+                if not new_name:
+                    raise ValueError('the name cannot be empty')
+                if new_code and _code_problem(new_code):
+                    raise ValueError(_code_problem(new_code).rstrip('.').lower())
+                if new_code:
+                    taken = medications.find_one({'code': new_code, 'name': {'$ne': med_name}},
+                                                 {'name': 1})
+                    if taken:
+                        raise ValueError(f'code {new_code} is already used by {taken["name"]}')
+                renamed = ''
+                if new_name != med_name:
+                    clash = [m['name'] for m in medications.find(
+                        {'name': {'$ne': med_name}}, {'_id': 0, 'name': 1})
+                        if _match_key(m['name']) == _match_key(new_name)]
+                    if clash:
+                        raise ValueError(f'"{clash[0]}" is already on the list - two items '
+                                         f'cannot share a name')
+                    moved = _rename_medication(db, med_name, new_name)
+                    write_audit_entry('UPDATE', 'medication', new_name,
+                                      f'renamed from "{med_name}" to "{new_name}" '
+                                      f'(code {new_code or med.get("code") or "-"}); moved with it: '
+                                      f'{moved["ledger"]} ledger entries, {moved["counts"]} '
+                                      f'stock-take counts, {moved["requests"]} requests, '
+                                      f'{moved["standard"]} standard-list items')
+                    renamed = (f' Renamed from "{med_name}" - its history moved with it '
+                               f'({moved["ledger"]} record(s)).')
+                    med_name = new_name
+                if new_code and new_code != (med.get('code') or ''):
+                    medications.update_one({'name': med_name}, {'$set': {'code': new_code}})
+                    write_audit_entry('UPDATE', 'medication', med_name,
+                                      f'code {med.get("code") or "(none)"} -> {new_code}')
+
                 medications.update_one(
                     {'name': med_name},
                     # balance deliberately absent — see the note in the template
@@ -2833,7 +3020,7 @@ def edit_medication() -> ResponseReturnValue:
                               'pack_size': pack_size, 'pack_price': pack_price,
                               'expiry_date': expiry_date, 'schedule': schedule}}
                 )
-                message = 'Medication updated successfully!'
+                message = 'Medication updated successfully!' + renamed
                 med_data = medications.find_one({'name': med_name})
                 return render_template('edit_medication.html', nav_links=get_nav_links(),
                                           categories=CATEGORIES,
@@ -5924,6 +6111,7 @@ UPLOAD_HEADINGS: dict[str, list[str]] = {
     'category': ['category'],
     'schedule': ['schedule', 'controlled'],
     'opening': ['opening balance', 'opening stock', 'initial balance', 'stock on hand'],
+    'code': ['code', 'product code', 'med code', 'nmc code'],
 }
 
 
@@ -6092,7 +6280,8 @@ def _num_key(s: str) -> list[int]:
     return [int(n) for n in re.findall(r'\d+', s or '')]
 
 
-def _med_matcher(names: list[str]) -> Callable[[str], tuple[str | None, list[str], bool]]:
+def _med_matcher(names: list[str], aliases: dict[str, str] | None = None
+                 ) -> Callable[[str], tuple[str | None, list[str], bool]]:
     """Match a name from a spreadsheet to one on the medication list.
 
     Returns (name on file or None, suggestions, guessed). An exact match,
@@ -6106,6 +6295,10 @@ def _med_matcher(names: list[str]) -> Callable[[str], tuple[str | None, list[str
     by_key: dict[str, str] = {}
     for n in names:
         by_key.setdefault(_match_key(n), n)
+    # An item's code and its former names find it too - after the real
+    # names, so a current name always wins over somebody's old one.
+    for a, n in (_med_aliases(names) if aliases is None else aliases).items():
+        by_key.setdefault(_match_key(a), n)
     keys = list(by_key)
 
     def match(raw: str) -> tuple[str | None, list[str], bool]:
@@ -9494,22 +9687,31 @@ def stock_take() -> ResponseReturnValue:
                     return redirect(url_for('stock_take', stock_take_id=str(st['_id'])))
                 try:
                     table = _find_table(_read_upload(_uploaded('sheet')),
-                                        ['med', 'counted', 'qty', 'expiry', 'batch', 'note'],
+                                        ['med', 'code', 'counted', 'qty', 'expiry', 'batch', 'note'],
                                         [['med'], ['counted', 'qty', 'expiry', 'batch']])
                 except ValueError as e:
                     flash(f'The count sheet could not be read: {e}.')
                     return redirect(url_for('stock_take', stock_take_id=str(st['_id']),
                                             _anchor='upload'))
                 cols = table['cols']
-                match = _med_matcher([m['name'] for m in medications.find(
-                    _active(), {'_id': 0, 'name': 1})])
+                active_meds = list(medications.find(_active(), {'_id': 0, 'name': 1, 'code': 1}))
+                match = _med_matcher([m['name'] for m in active_meds])
+                # The downloaded sheet carries each item's code. A code is the
+                # surest match - it holds even if the name was corrected after
+                # the sheet was printed - so it is tried first.
+                by_code = {m['code']: m['name'] for m in active_meds if m.get('code')}
                 filled: dict[str, Doc] = {}
                 unknown, guesses, bad = [], [], []
                 for r in table['rows']:
                     raw = str(_cell(r, cols, 'med') or '').strip()
-                    if not raw:
+                    code_cell = _clean_code(_cell(r, cols, 'code'))
+                    if not raw and not code_cell:
                         continue
-                    name, sugg, guessed = match(raw)
+                    sugg: list[str] = []
+                    if code_cell in by_code:
+                        name, guessed = by_code[code_cell], False
+                    else:
+                        name, sugg, guessed = match(raw)
                     if not name:
                         unknown.append(raw + (f' (did you mean {sugg[0]}?)' if sugg else ''))
                         continue
@@ -9903,8 +10105,9 @@ def stock_take() -> ResponseReturnValue:
             # trade: a figure on the page is easier to agree with than to
             # check. So agreeing is a tick per row, recorded as "confirmed"
             # rather than "counted", and the register keeps the difference.
+            _assign_missing_codes(medications)    # the sheet carries every code
             sheet_docs = _by_name(medications.find(
-                _active(), {'_id': 0, 'name': 1, 'balance': 1,
+                _active(), {'_id': 0, 'name': 1, 'balance': 1, 'code': 1,
                             'expiry_date': 1, 'batch': 1,
                             'category': 1, 'schedule': 1}))
             med_names = [m['name'] for m in sheet_docs]
@@ -9915,7 +10118,7 @@ def stock_take() -> ResponseReturnValue:
                 'med_name',
                 {'stock_take_id': str(active['_id']), 'counted': {'$ne': None}}))
             uncounted = [m for m in med_names if m not in done]
-            sheet = [{'name': m['name'], 'balance': m.get('balance', 0),
+            sheet = [{'name': m['name'], 'code': m.get('code') or '', 'balance': m.get('balance', 0),
                       'expiry': _expiry_iso(m.get('expiry_date')),
                       'batch': (m.get('batch') or '').strip(),
                       'group': _count_group(m)}
@@ -9940,8 +10143,9 @@ def stock_take() -> ResponseReturnValue:
                 slug = ('-' + title.lower().replace(' ', '-')) if grp in labels else ''
                 return _xlsx_download(
                     f"{active['reference']}-count-sheet{slug}.xlsx", title,
-                    ['Medication', 'On system', 'Physical count', 'Expiry date', 'Batch', 'Note'],
-                    [[r['name'], r['balance'], None, r['expiry'] or None, r['batch'] or None, None]
+                    ['Code', 'Medication', 'On system', 'Physical count', 'Expiry date', 'Batch', 'Note'],
+                    [[r['code'] or None, r['name'], r['balance'], None, r['expiry'] or None,
+                      r['batch'] or None, None]
                      for r in rows_out],
                     f"{title} for {active['reference']}, {len(rows_out)} item(s) not yet counted.\n"
                     'Physical count: what is on the shelf. Leave it blank for an item you did '
@@ -11371,9 +11575,9 @@ UPLOAD_TEMPLATES: dict[str, tuple[str, list[str], list[list[Any]], str]] = {
                 'Unit price, Batch and Expiry are all recognised.'),
     'medications': ('new-medications.xlsx',
                     ['Medication', 'Category', 'Schedule', 'Pack size', 'Price per pack',
-                     'Opening balance', 'Batch', 'Expiry date'],
+                     'Opening balance', 'Batch', 'Expiry date', 'Code'],
                     [['Cetirizine tabs, 10 mg', 'Pharmaceutical', 'not controlled', 30, 18.50,
-                      0, '', '']],
+                      0, '', '', '']],
                     'One row per NEW item. Items already on the list are shown and skipped.\n'
                     'Category: Pharmaceutical, Medical Supply or Donor Funded '
                     '(blank means Pharmaceutical).\n'
@@ -11381,7 +11585,9 @@ UPLOAD_TEMPLATES: dict[str, tuple[str, list[str], list[list[Any]], str]] = {
                     'Opening balance: stock already on the shelf, if any; it needs a batch '
                     'and expiry.\n'
                     'Name items the way the list does, e.g. "Paracetamol tabs, 500 mg", so '
-                    'they sort and match properly.'),
+                    'they sort and match properly.\n'
+                    'Code: optional - an official product code. Left blank, the item is '
+                    'numbered MED-0001, MED-0002 and so on.'),
     'list': ('item-list.xlsx', ['Medication', 'Quantity'],
              [['Paracetamol tabs, 500 mg', 200], ['Gauze swabs', 20]],
              'One row per item: the medication and the quantity in single units.'),
@@ -11510,6 +11716,10 @@ try:
     init_audit(app)
 except Exception as e:
     app.logger.error(f"Failed to load audit logger: {e}")
+
+
+# Number any medication without a product code (see _assign_missing_codes).
+_assign_codes_at_start()
 
 
 if __name__ == '__main__':

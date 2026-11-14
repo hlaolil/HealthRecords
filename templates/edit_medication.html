@@ -5,8 +5,10 @@
     <p class="message {% if 'successfully' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
 <h2>Edit {{ med_data.name if med_data else '' }}</h2>
-<p style="font-size:13px;">Changes the item's details: pack size, price, batch,
-expiry and schedule. It does <strong>not</strong> change the quantity on hand
+<p style="font-size:13px;">Changes the item's details: name, code, pack size, price, batch,
+expiry and schedule. <strong>Changing the name keeps the history</strong>: every
+dispense, receipt, issue, count and request moves to the new name with it, and the
+old name still finds the item in uploaded spreadsheets. It does <strong>not</strong> change the quantity on hand
 &mdash; stock moves only through receiving, dispensing, a stock-take count or an
 expiry write-off, so that every change has a record behind it. To correct a
 balance, run a stock take and enter the physical count.</p>
@@ -14,7 +16,17 @@ balance, run a stock take and enter the physical count.</p>
     <div class="common-section">
         <div>
             <label>Medication Name:</label>
-            <input name="med_name" value="{{ med_data.name if med_data else '' }}" readonly>
+            <input type="hidden" name="med_name" value="{{ med_data.name if med_data else '' }}">
+            <input name="new_name" value="{{ med_data.name if med_data else '' }}" required maxlength="120">
+            {% if med_data and med_data.get('former_names') %}
+            <small>Formerly: {{ med_data.former_names|join(', ') }}</small>
+            {% endif %}
+        </div>
+        <div>
+            <label>Product Code:</label>
+            <input name="code" value="{{ med_data.get('code') or '' if med_data else '' }}" maxlength="30"
+                   placeholder="e.g. MED-0042 or the official code" style="text-transform:uppercase;">
+            <small>Stays with the item if the name changes. Type over it to use an official code.</small>
         </div>
         {# FIX (Data integrity): the Balance field used to live here, and writing to
    it changed stock with NO transaction behind it — the one remaining way to

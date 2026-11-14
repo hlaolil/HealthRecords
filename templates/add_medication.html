@@ -27,6 +27,13 @@ Receiving page.</p>
             spelling.</p>
         </div>
         <div>
+            <label>Product Code (optional):</label>
+            <input name="code" maxlength="30" placeholder="blank = next MED- number"
+                   style="text-transform:uppercase;">
+            <p style="font-size:12px; color:#555; margin:4px 0 0;">Stays with the item even
+            if its name is corrected later. Use an official code if there is one.</p>
+        </div>
+        <div>
             <label>Category:</label>
             <select name="category" required>
                 {% for opt in categories %}
@@ -104,7 +111,7 @@ cannot be added again.</p>
     <input type="hidden" name="action" value="meds_bulk">
     <input type="hidden" name="n" value="{{ rows|length }}">
     <div class="table-scroll"><table class="up-sticky">
-        <thead><tr><th>Medication</th><th>Add</th><th>Category</th><th>Schedule</th><th>Pack size</th>
+        <thead><tr><th>Medication</th><th>Add</th><th>Code</th><th>Category</th><th>Schedule</th><th>Pack size</th>
             <th>Price per pack (R)</th><th>Opening balance</th><th>Batch</th><th>Expiry</th></tr></thead>
         <tbody>
         {% for r in rows %}{% set i = loop.index0 %}
@@ -115,6 +122,7 @@ cannot be added again.</p>
                 {% if r.note or r.problem %}<span class="up-why">{{ r.note }}{% if r.note and r.problem %}; {% endif %}{{ r.problem }}</span>{% endif %}</td>
             <td><input type="checkbox" class="up-inc" name="inc__{{ i }}" value="1"
                        {% if r.status == 'exists' %}disabled{% elif r.include is defined %}{% if r.include %}checked{% endif %}{% elif not r.problem %}checked{% endif %}></td>
+            <td><input name="code__{{ i }}" value="{{ r.code or '' }}" placeholder="auto" style="width:7em;text-transform:uppercase;"></td>
             <td><select name="category__{{ i }}" style="width:auto;">
                 {% for cat in categories %}<option value="{{ cat }}" {% if cat == r.category %}selected{% endif %}>{{ cat }}</option>{% endfor %}
             </select></td>
