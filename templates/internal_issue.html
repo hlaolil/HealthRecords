@@ -53,6 +53,11 @@ item's AMC and the order request will replace it.</p>
     <input type="hidden" name="action" value="issue">
     <div class="common-section">
         <div>
+            <label>Date issued:</label>
+            {# Today unless the issue is being entered late from paper. #}
+            <input name="issue_date" type="date" value="{{ today }}" max="{{ today }}" min="{{ earliest }}" required>
+        </div>
+        <div>
             <label>Department:</label>
             <select name="department" required>
                 <option value="">-- Select Department --</option>
@@ -148,7 +153,10 @@ inflate AMC and the order request will not reorder against it.</p>
     <tbody>
     {% for r in recent %}
         <tr class="{% if r.type == 'damage' %}expired{% else %}normal{% endif %}">
-            <td>{{ r.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+            {# A back-dated issue was recorded at midday on its day, a time
+               nobody chose, so only its date is shown. #}
+            {% set entered_late = r.get('recorded_at') and (r.recorded_at|local('%Y-%m-%d')) != (r.timestamp|local('%Y-%m-%d')) %}
+            <td>{% if entered_late %}{{ r.timestamp|local('%Y-%m-%d') }}<br><small>entered {{ r.recorded_at|local('%d %b') }}</small>{% else %}{{ r.timestamp|local }}{% endif %}</td>
             <td>{% if r.type == 'damage' %}Loss{% else %}Issue{% endif %}</td>
             <td>{{ r.med_name }}</td>
             <td>{{ r.quantity if r.type != 'damage' else -r.quantity }}</td>
@@ -174,10 +182,12 @@ inflate AMC and the order request will not reorder against it.</p>
                     <input type="hidden" name="tx_id" value="{{ r._id }}">
                     <strong>{{ r.med_name }}</strong>
                     {% if fixed %}
+                    <input type="hidden" name="issue_date" value="{{ r.timestamp|local('%Y-%m-%d') }}">
                     <input type="hidden" name="quantity" value="{{ r.quantity }}">
                     <input type="hidden" name="department" value="{{ r.department }}">
-                    <span class="ii-fixed">{{ r.quantity }} to {{ r.department }} &mdash; given against request {{ fixed }}, so these follow the request</span>
+                    <span class="ii-fixed">{{ r.quantity }} to {{ r.department }} on {{ r.timestamp|local('%d %b %Y') }} &mdash; given against request {{ fixed }}, so these follow the request</span>
                     {% else %}
+                    <label>Date <input type="date" name="issue_date" required value="{{ r.timestamp|local('%Y-%m-%d') }}" max="{{ today }}" min="{{ earliest }}"></label>
                     <label>Quantity <input type="number" name="quantity" min="1" step="1" required value="{{ r.quantity }}" inputmode="numeric"></label>
                     <label>Department
                         <select name="department" required>

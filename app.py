@@ -260,6 +260,37 @@ def local_now() -> datetime:
     return datetime.now(timezone.utc).astimezone(PHARMACY_TZ).replace(tzinfo=None)
 
 
+# How far back an entry may be dated. Past dates are allowed because paper
+# records get entered later; a year is the guard against a mistyped year.
+BACKDATE_MAX_DAYS = 365
+
+
+def _entry_time(day: str) -> tuple[datetime | None, str]:
+    """The stored (UTC) time for an entry dated `day` (YYYY-MM-DD, the
+    pharmacy's calendar), or None and the reason it was refused.
+
+    Today keeps the exact time. A past day is recorded at midday there, so
+    the hours between UTC and the pharmacy clock can never move it onto the
+    day before or after, and every report puts it on the day chosen.
+    """
+    day = (day or '').strip()
+    today = local_now().date()
+    if not day:
+        return datetime.utcnow(), ''
+    try:
+        d = datetime.strptime(day, '%Y-%m-%d').date()
+    except ValueError:
+        return None, 'The date could not be read.'
+    if d > today:
+        return None, 'The date cannot be in the future.'
+    if (today - d).days > BACKDATE_MAX_DAYS:
+        return None, f'The date is more than {BACKDATE_MAX_DAYS} days ago - check the year.'
+    if d == today:
+        return datetime.utcnow(), ''
+    return (datetime(d.year, d.month, d.day, 12)
+            - timedelta(hours=PHARMACY_UTC_OFFSET_HOURS)), ''
+
+
 def local_session() -> str:
     """Which round a check done right now belongs to."""
     return 'Morning' if local_now().hour < TEMP_NOON_HOUR else 'Afternoon'
@@ -5001,9 +5032,13 @@ def internal_issue() -> ResponseReturnValue:
                     flash('Department and the person receiving are both required.')
                     return redirect(url_for('internal_issue'))
 
+                when, why = _entry_time(request.form.get('issue_date') or '')
+                if when is None:
+                    flash(f'Nothing was issued. {why}')
+                    return redirect(url_for('internal_issue'))
                 names = request.form.getlist('med_name')
                 qtys = request.form.getlist('quantity')
-                issue_id = f"ISS-{datetime.utcnow().strftime('%Y%m%d')}-{uuid4().hex[:4].upper()}"
+                issue_id = f"ISS-{to_local(when, '%Y%m%d')}-{uuid4().hex[:4].upper()}"
                 done, problems = [], []
                 for name, raw in zip(names, qtys):
                     name = (name or '').strip()
@@ -5036,13 +5071,18 @@ def internal_issue() -> ResponseReturnValue:
                         'price': price, 'line_value': given * price,
                         'department': dept, 'issued_to': issued_to, 'note': note,
                         'batch': med.get('batch'), 'schedule': med.get('schedule'),
-                        'user': current_user, 'timestamp': datetime.utcnow(),
+                        'user': current_user, 'timestamp': when,
+                        'recorded_at': datetime.utcnow(),
                     })
                     done.append(f'{name} x{given}')
                 if done:
+                    dated = to_local(when, '%Y-%m-%d')
+                    past = dated != local_now().strftime('%Y-%m-%d')
                     write_audit_entry('UPDATE', 'internal_issue', issue_id,
-                                      f'issued to {dept} ({issued_to}): {", ".join(done)}')
-                    msg = f'Issue to {dept} recorded: {", ".join(done)}.'
+                                      f'issued to {dept} ({issued_to}): {", ".join(done)}'
+                                      + (f' - dated {dated}' if past else ''))
+                    msg = (f'Issue to {dept} recorded: {", ".join(done)}'
+                           + (f', dated {to_local(when, "%d %b %Y")}.' if past else '.'))
                     _draft_drop(db, session['user'].get('login'), 'issue')
                 else:
                     msg = 'Nothing was issued.'
@@ -5108,6 +5148,19 @@ def internal_issue() -> ResponseReturnValue:
                 if not dept or not issued_to:
                     flash('Department and the person receiving are both required.')
                     return redirect(url_for('internal_issue') + '#recent')
+                old_day = to_local(tx['timestamp'], '%Y-%m-%d')
+                new_day = (request.form.get('issue_date') or '').strip() or old_day
+                new_when = tx['timestamp']
+                if new_day != old_day:
+                    new_when, why = _entry_time(new_day)
+                    if new_when is None:
+                        flash(f'{name}: not changed. {why}')
+                        return redirect(url_for('internal_issue') + '#recent')
+                if from_request and new_day != old_day:
+                    flash(f'{name} was given against request {from_request}, so its date is the '
+                          f'day the request was served. Only who received it and the note can be '
+                          f'changed here.')
+                    return redirect(url_for('internal_issue') + '#recent')
                 if from_request and (new_qty != old_qty or dept != tx.get('department')):
                     # The request holds what was given and records any
                     # shortfall as unmet demand; changing the issue alone
@@ -5132,6 +5185,8 @@ def internal_issue() -> ResponseReturnValue:
                 changes = []
                 if delta:
                     changes.append(f'quantity {old_qty} -> {new_qty} (balance {-delta:+d})')
+                if new_day != old_day:
+                    changes.append(f'date {old_day} -> {new_day}')
                 if dept != tx.get('department'):
                     changes.append(f"department {tx.get('department')} -> {dept}")
                 if issued_to != (tx.get('issued_to') or ''):
@@ -5144,6 +5199,7 @@ def internal_issue() -> ResponseReturnValue:
                 price = tx.get('price', 0) or 0
                 transactions.update_one({'_id': tx['_id']}, {
                     '$set': {'quantity': new_qty, 'line_value': new_qty * price,
+                             'timestamp': new_when,
                              'department': dept, 'issued_to': issued_to, 'note': note,
                              'edited_by': editor, 'edited_at': datetime.utcnow()},
                     '$push': {'edits': {'by': editor, 'at': datetime.utcnow(),
@@ -5197,15 +5253,19 @@ def internal_issue() -> ResponseReturnValue:
             flash('Unknown action.')
             return redirect(url_for('internal_issue'))
 
+        # Newest ENTERED first, not newest dated: an issue entered today for
+        # last week must still be at the top, where it can be checked.
         recent = list(transactions.find(
             {'type': {'$in': ['internal_issue', 'damage']}}
-        ).sort('timestamp', -1).limit(100))
+        ).sort('_id', -1).limit(100))
         return render_template(
             'internal_issue.html', nav_links=get_nav_links(), message=message,
             current_user=session['user']['name'],
             past_receivers=_past_receivers(db),
             departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=recent,
             is_admin=session['user'].get('role') == 'admin',
+            today=local_now().strftime('%Y-%m-%d'),
+            earliest=(local_now() - timedelta(days=BACKDATE_MAX_DAYS)).strftime('%Y-%m-%d'),
             upload_draft=_draft_get(db, session['user'].get('login'), 'issue'))
     except ServerSelectionTimeoutError:
         return render_template(
