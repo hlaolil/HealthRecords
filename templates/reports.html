@@ -228,7 +228,10 @@ shelf as it was then, and Amount to Order is what that shelf needed.</p>
 Balance</strong>.</p>
 <p style="font-size:13px;"><strong>Issued</strong> is everything that left the
 shelf, whatever the reason &mdash; dispensed to patients, sent to departments,
-expired, damaged &mdash; less any extra stock found at a stock take. The
+expired, damaged &mdash; plus any stock found missing at a stock take. Extra stock
+found at a stock take comes off Issued; any extra beyond what was issued (it cannot
+go below zero) is added to <strong>Received</strong>, as a delivery that was not
+recorded. The
 breakdown is kept elsewhere: the registers for dispensing and internal issues,
 Losses for expiry and damage, and Audit &rarr; Stock Take for counts.
 <strong>Adjusted AMC</strong> is average monthly consumption with the demand
@@ -251,7 +254,7 @@ the shelf.</p>
             <td>{{ row.med_name }}{% if not row.reconciles %} <strong>&#9888;</strong>{% endif %}</td>
             {% if category == 'both' %}<td>{{ row.category }}</td>{% endif %}
             <td>{{ row.beginning_balance }}</td>
-            <td>{{ row.received }}</td>
+            <td>{{ row.received_total }}</td>
             <td>{{ row.issued_total }}</td>
             <td>{{ row.current_balance }}</td>
             <td>{{ row.adjusted_amc }}</td>

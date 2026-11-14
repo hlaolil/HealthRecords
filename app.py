@@ -3554,16 +3554,26 @@ def reports() -> ResponseReturnValue:
                             amount_to_order   = max(0, 3 * adjusted_amc - current_balance)
                             # Everything that left the shelf, whatever the
                             # reason: dispensed, issued to a department, expired,
-                            # damaged, and the net of stock-take corrections.
-                            # Expired, damaged and corrections are stored signed
-                            # (negative when stock goes), so they are subtracted;
-                            # stock FOUND at a count therefore comes off Issued,
-                            # as asked. One column, so the row always reads
+                            # damaged, and stock found MISSING at a stock take.
+                            # Expired and damaged are stored signed (negative
+                            # when stock goes), so they are subtracted. One
+                            # column, so the row always reads
                             #   Beginning + Received - Issued = Current
                             # and the breakdown is in the registers, the expiry
                             # write-offs and Audit > Stock Take.
-                            issued_total      = (dispensed + issued - adjustment
+                            # Stock FOUND at a count comes off Issued first:
+                            # in a period with movement, extra on the shelf is
+                            # most often an issue recorded that never happened
+                            # (a dispense entered twice, say). Only what Issued
+                            # cannot absorb - the item hardly moved, so there is
+                            # nothing to take it from - is shown with Received,
+                            # as a delivery that was never booked in. Neither
+                            # column can go below zero, and the row still reads
+                            #   Beginning + Received - Issued = Current.
+                            issued_gross      = (dispensed + issued + mv['missing']
                                                  - expired - damaged)
+                            issued_total      = max(0, issued_gross - mv['found'])
+                            received_total    = received + max(0, mv['found'] - issued_gross)
 
                             report_data.append({
                                 'med_name': med_name, 'category': _cat_of(med),
@@ -3591,7 +3601,8 @@ def reports() -> ResponseReturnValue:
                                 # be negative and is shown as 0, so the row no
                                 # longer adds up. Flagged on the page rather
                                 # than forced to balance with an invented figure.
-                                'reconciles': (beginning_balance + received
+                                'received_total': _tidy(received_total),
+                                'reconciles': (beginning_balance + received_total
                                                - issued_total == current_balance),
                                 'amc': _tidy(amc),
                                 'unmet': unmet, 'adjusted_amc': adjusted_amc,
@@ -4389,7 +4400,7 @@ def _monthly_movement(transactions: Collection, window_start: datetime) -> dict[
 # failure is visible instead of silent.
 # -----------------------------------------------------------------------
 _ZERO_MOVEMENT = {'dispensed': 0, 'received': 0, 'adjusted': 0, 'expired': 0,
-                  'issued': 0, 'damaged': 0}
+                  'issued': 0, 'damaged': 0, 'found': 0, 'missing': 0}
 
 
 def _movement_by_med(transactions: Collection, time_filter: Query,
@@ -4417,6 +4428,14 @@ def _movement_by_med(transactions: Collection, time_filter: Query,
             'received':  {'$sum': {'$cond': [{'$in': ['$type', ['receive', 'opening_balance']]},
                                              '$quantity', 0]}},
             'adjusted':  {'$sum': {'$cond': [{'$eq': ['$type', 'adjustment']}, '$quantity', 0]}},
+            # The two directions of a stock-take correction, kept apart so
+            # extra stock can show as received and missing stock as issued.
+            'found':     {'$sum': {'$cond': [{'$and': [{'$eq': ['$type', 'adjustment']},
+                                                       {'$gt': ['$quantity', 0]}]},
+                                             '$quantity', 0]}},
+            'missing':   {'$sum': {'$cond': [{'$and': [{'$eq': ['$type', 'adjustment']},
+                                                       {'$lt': ['$quantity', 0]}]},
+                                             {'$subtract': [0, '$quantity']}, 0]}},
             'expired':   {'$sum': {'$cond': [{'$eq': ['$type', 'expiry_removal']}, '$quantity', 0]}},
             'issued':    {'$sum': {'$cond': [{'$eq': ['$type', 'internal_issue']}, '$quantity', 0]}},
             'damaged':   {'$sum': {'$cond': [{'$eq': ['$type', 'damage']}, '$quantity', 0]}},
@@ -4428,7 +4447,9 @@ def _movement_by_med(transactions: Collection, time_filter: Query,
                            'adjusted':  r.get('adjusted', 0) or 0,
                            'expired':   r.get('expired', 0) or 0,
                            'issued':    r.get('issued', 0) or 0,
-                           'damaged':   r.get('damaged', 0) or 0}
+                           'damaged':   r.get('damaged', 0) or 0,
+                           'found':     r.get('found', 0) or 0,
+                           'missing':   r.get('missing', 0) or 0}
                 for r in transactions.aggregate(pipeline)}
     except Exception as e:
         app.logger.warning(f"Movement aggregation unavailable, falling back: {e}")
@@ -4449,6 +4470,10 @@ def _movement_by_med(transactions: Collection, time_filter: Query,
                 b['damaged'] += qty
             else:
                 b['adjusted'] += qty
+                if qty > 0:
+                    b['found'] += qty
+                else:
+                    b['missing'] -= qty
         return out
 
 
@@ -4607,7 +4632,7 @@ def _pager(page: int, page_size: int, total: int) -> Doc:
 # download follows the screen exactly.
 INVENTORY_COLUMNS = [
     ('med_name', 'Item'), ('category', 'Category'),
-    ('beginning_balance', 'Beginning Balance'), ('received', 'Received'),
+    ('beginning_balance', 'Beginning Balance'), ('received_total', 'Received'),
     ('issued_total', 'Issued'), ('current_balance', 'Current Balance'),
     ('adjusted_amc', 'Adjusted AMC'), ('amount_to_order', 'Amount to Order')]
 INVENTORY_COLUMNS_ADMIN = INVENTORY_COLUMNS
