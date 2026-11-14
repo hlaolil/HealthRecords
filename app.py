@@ -511,92 +511,19 @@ init_db_collections()
 # record is not rewritten after the fact — so every wording this list has ever
 # carried lives on in DIAGNOSIS_SEARCH_TERMS and still finds its entry, and
 # DIAGNOSIS_RENAMES below keeps the reports counting it as one condition.
-DIAGNOSES_OPTIONS = [
-    'Abrasion', 'Abscess, site unspecified', 'Acne', 'Acute appendicitis',
-    'Acute bronchitis', 'Acute gastroenteritis (AGE)', 'Acute kidney injury',
-    'Acute myocardial infarction', 'Acute nasopharyngitis [common cold]',
-    'Acute otitis media', 'Acute sinusitis', 'Acute stress disorder',
-    'Acute tonsillitis and pharyngitis', 'Acute urinary retention',
-    'Alcohol intoxication', 'Allergic conjunctivitis', 'Allergic rhinitis',
-    'Allergic skin reaction', 'Allergy, unspecified', 'Anaemia',
-    'Anal fissure', 'Anaphylaxis', 'Angina', 'Angio-oedema',
-    'Antiphospholipid syndrome', 'Anxiety disorder',
-    'Aphthous ulcer and other oral lesions', 'Aquagenic pruritus', 'ARDS',
-    'Arthralgia', 'Asthma', 'Awaiting PCR results',
-    'Bacterial conjunctivitis', 'Bereavement reaction', 'Bipolar disorder',
-    'Bladder stone', 'Boutonniere deformity', 'Bowel obstruction', 'BPH',
-    'Brachial plexus compression', 'Breast lump', 'Bullous skin lesions',
-    'Burn, site and degree unspecified', 'Bursitis', 'Calcaneal spur',
-    'Candidiasis of mouth or oesophagus', 'Cardiac dysrhythmia',
-    'Cardiomegaly', 'Cataract', 'CCF', 'Cellulitis', 'Cervixitis',
-    'Chalazion', 'Chemical burn', 'Chemical conjunctivitis',
-    'Chemical pneumonitis', 'Chronic fatigue syndrome',
-    'Chronic kidney disease', 'Chronic sinusitis',
-    'Chronic suppurative otitis media (CSOM)', 'Circumcision', 'Common cold',
-    'Constipation', 'Contusion', 'COPD', 'Corneal abrasion',
-    'Corns and callosities', 'Costochondritis', 'COVID-19', 'Crush syndrome',
-    'CVA', 'Dehydration', 'Dental abscess', 'Dental caries',
-    'Depressive disorder', 'Dermatitis and eczema', 'Dermatophytosis [tinea]',
-    'Diarrhoea', 'Disc herniation', 'Dislocation, site unspecified', 'DKA',
-    'DM', 'Dog bite', 'Drug-induced kidney injury', 'Dry eyes', 'DVT',
-    'Dysentery', 'Dysfunctional uterine bleeding', 'Dysmenorrhoea',
-    'Ear wax impaction', 'Emergency contraception', 'Emphysema',
-    'Epidermoid cyst', 'Epididymo-orchitis', 'Epilepsy', 'Epistaxis',
-    'Erectile dysfunction', 'Eyelid infection', 'Faecal incontinence',
-    'Family planning', 'Fibroid uterus', 'Fitness to work examination',
-    'Foreign body (in soft tissue)', 'Foreign body ear',
-    'Foreign body, site unspecified', 'Fracture, site unspecified',
-    'Ganglion cyst', 'Gastritis', 'Gastro-oesophageal reflux disease [GERD]',
-    'Gingivitis', "Golfer's elbow", 'Gout', 'Haemorrhoids',
-    'Hairy leucoplakia', 'Hallux valgus deformity', 'Head injury',
-    'Headache (tension, migraine, cluster etc)', 'Heat exhaustion',
-    'Heat stroke', 'Hepatitis, unspecified', 'Herpes labialis (cold sore)',
-    'Herpes zoster', 'HHS', 'Hiccups', 'High altitude syndrome', 'HIV',
-    'HIV-associated vasculitis', 'Hormonal imbalance', 'HTN', 'Hydrocele',
-    'Hypercholesterolaemia', 'Hyperglycaemia', 'Hypertriglyceridaemia',
-    'Hypoglycaemia', 'Hypotension', 'I & D', 'Iliotibial band syndrome',
-    'Immunisation', 'Indigestion', 'Inflammatory bowel disease', 'Influenza',
-    'Ingrown toenail', 'Inhibited sexual desire', 'Injury (RTA)',
-    'Injury on duty', 'Injury, site unspecified', 'Insect bite', 'Insomnia',
-    'Insufficient sleep syndrome', 'Irritable bowel syndrome',
-    "Kaposi's sarcoma", 'Kidney stone', 'Laceration', 'Laryngitis',
-    'Ligament sprain', 'Lightning injury', 'Lipoma', 'Loose teeth',
-    'Lower GI bleed', 'LRTI', 'Lymphadenitis', 'Mechanical low back pain',
-    'Medication side effects', 'Medication-induced cough (ACE-I etc)',
-    'Menorrhagia', 'Miscarriage', 'Mucus hypersecretion', 'Muscle strain',
-    'Myalgia and muscle spasm', 'Nasal lesion and infection', 'Nasal polyp',
-    'Nausea and vomiting', 'Negative on AgRDT',
-    'Neoplasm, nature unspecified', 'Neuralgia and neuritis, unspecified',
-    'Noise-induced hearing loss', 'Non-specific spinal pain',
-    'Normal menstrual period', 'Obstructive sleep apnoea', 'Oral lesion(s)',
-    'Osteoarthritis', 'Otitis externa', 'Ovarian cyst', 'Overdose',
-    'Pancreatitis', 'Panic disorder', 'Papules, pustules', 'Paraesthesia',
-    'PCOS', 'Pelvic congestion syndrome', 'Pelvic mass',
-    'Peri-orbital lesion', 'Perianal abscess', 'Periodontitis',
-    'Peripheral neuropathy', 'Peripheral vascular disease', 'Pica', 'PID',
-    'Pinguecula', 'PJP', 'Plantar fasciitis', 'Pleural effusion', 'Pleurisy',
-    'Pneumoconiosis', 'Pneumonia', 'Poisoning', 'Polyarthralgia',
-    'Positive on AgRDT', 'Post HIV exposure',
-    'Post-COVID hyperactive airway disease', 'Post-menopausal bleeding',
-    'Post-menopausal syndrome', 'Post-operative adhesions', 'Pregnancy',
-    'Preseptal cellulitis', 'Psychosomatic disorder', 'Pterygium', 'PUD',
-    'Rabies exposure', 'Radiculopathy', "Raynaud's phenomenon",
-    'Rheumatoid arthritis', 'Scabies', 'Sciatica', 'Secondary amenorrhoea',
-    'Seizure, unspecified', 'Septic nasal piercing',
-    'Smoke inhalation injury', 'Snake bite', 'Spinal abnormality',
-    'Spondylolisthesis', 'Spondylosis',
-    'STI (MUS, VDS, herpes genitalia, syphilis etc)', 'Stye (hordeolum)',
-    'Supplementation', 'Surgical site infection', 'Swan neck deformity',
-    'Syncope', 'TB', 'TB meningitis', 'Temporal arteritis', 'Tendon injury',
-    'Tendonitis', 'Tennis elbow', 'Tetanus prophylaxis', 'Thoracic back pain',
-    'TIA', 'Tinnitus', 'Toothache', 'Torticollis', 'Traumatic conjunctivitis',
-    'Typhoid', 'Ulcer, site unspecified', 'Upper GI bleed',
-    'Urethral stricture and bladder outlet obstruction',
-    'Urinary catheter blockage', 'Urinary incontinence', 'URTI', 'Urticaria',
-    'UTI', 'Vaginal candidiasis', 'Venous insufficiency',
-    'Viral conjunctivitis', 'Visual impairment, unspecified', 'Warts',
-    'Welding flash (arc eye)', 'Worm infestation', 'Wound care (dressing)',
-]
+# Since 14 November 2026 the list itself lives in diagnosis_list.py: the
+# conditions of the Lesotho Standard Treatment Guidelines 2022 merged with the
+# clinic's own, each with its ICD-10 code and level of care (primary or
+# secondary). The October history above still holds: every older wording
+# finds its entry and counts as it.
+import diagnosis_list as _dxl
+
+# Alphabetical, as the list has always been, so typing never jumps about;
+# diagnosis_list.py keeps them by STG chapter, which is easier to review.
+DIAGNOSES_OPTIONS = sorted((d[0] for d in _dxl.DIAGNOSES), key=str.lower)
+DIAGNOSIS_CODES = {d[0]: d[1] for d in _dxl.DIAGNOSES}
+DIAGNOSIS_LEVELS = {d[0]: d[2] for d in _dxl.DIAGNOSES}
+DIAGNOSIS_STG = {d[0]: d[3] for d in _dxl.DIAGNOSES}
 
 # What each renamed entry used to be called.
 #
@@ -1006,8 +933,57 @@ DIAGNOSIS_SEARCH_TERMS = {
 }
 
 
-_DIAGNOSIS_CANONICAL = {old.strip().lower(): new
-                        for old, new in DIAGNOSIS_RENAMES.items()}
+def _final_name(name: str) -> str:
+    """Follow renames to the name used now: "Abscess" became "Abscess, site
+    unspecified" in October, which became "Furuncle, carbuncle and skin
+    abscess" in November - an old record must land on the last of these."""
+    seen = set()
+    while name not in seen:
+        seen.add(name)
+        nxt = _dxl.RENAMED.get(name) or DIAGNOSIS_RENAMES.get(name)
+        if not nxt:
+            break
+        name = nxt
+    return name
+
+
+DIAGNOSIS_RENAMES = {**DIAGNOSIS_RENAMES, **_dxl.RENAMED}
+DIAGNOSIS_RENAMES = {old: _final_name(old) for old in DIAGNOSIS_RENAMES}
+# Any case or spacing of a current name is that name too: a visit typed as
+# "influenza" is the list's "Influenza", and counts and codes as it.
+_DIAGNOSIS_CANONICAL = {' '.join(n.lower().split()): n for n in DIAGNOSES_OPTIONS}
+_DIAGNOSIS_CANONICAL.update({' '.join(old.lower().split()): new
+                             for old, new in DIAGNOSIS_RENAMES.items()})
+
+# Search words: the October ones, moved onto the entry each now belongs to,
+# plus the new list's own, plus every old name and the ICD-10 code itself -
+# so "HTN", "hypertension" and "I10" all find Hypertension.
+_merged_terms: dict[str, list[str]] = {n: [] for n in DIAGNOSES_OPTIONS}
+for _label, _words in DIAGNOSIS_SEARCH_TERMS.items():
+    _to = _final_name(_label)
+    if _to in _merged_terms:
+        _merged_terms[_to].extend(_words)
+for _name, _code, _lvl, _stg, _words in _dxl.DIAGNOSES:
+    _merged_terms[_name].extend(_words)
+    if _code:
+        _merged_terms[_name].append(_code.lower())
+for _old, _to in DIAGNOSIS_RENAMES.items():
+    if _to in _merged_terms and _old.lower() != _to.lower():
+        _merged_terms[_to].append(_old.lower())
+DIAGNOSIS_SEARCH_TERMS = {n: sorted({w.lower() for w in ws if w}) for n, ws in _merged_terms.items()}
+
+
+def _diagnosis_code(name: str) -> str | None:
+    """The ICD-10 code of a recorded diagnosis, under any wording it has had."""
+    return DIAGNOSIS_CODES.get(_canonical_diagnosis(name or ''))
+
+
+def _icd10_text(diagnoses: Any) -> str:
+    """The codes of a visit's diagnoses for a report column, in order;
+    a wording off the list shows as a dash so the columns still line up."""
+    if isinstance(diagnoses, str):
+        diagnoses = [diagnoses]
+    return ', '.join(_diagnosis_code(d) or '-' for d in (diagnoses or []) if d)
 
 
 def _canonical_diagnosis(name: str) -> str:
@@ -1020,7 +996,7 @@ def _canonical_diagnosis(name: str) -> str:
     """
     if not name:
         return name
-    return _DIAGNOSIS_CANONICAL.get(name.strip().lower(), name.strip())
+    return _DIAGNOSIS_CANONICAL.get(' '.join(name.lower().split()), name.strip())
 
 # Login required decorator
 def login_required(f: Callable[..., Any]) -> Callable[..., Any]:
@@ -1805,6 +1781,9 @@ def dispense() -> ResponseReturnValue:
                                     'outcome': outcome,
                                     'outcome_days': outcome_days,
                                     'diagnoses': diagnoses,
+                                    # ICD-10 for each diagnosis, in the same
+                                    # order; None for wording off the list.
+                                    'diagnosis_codes': [_diagnosis_code(d) for d in diagnoses],
                                     'prescriber': prescriber,
                                     'dispenser': dispenser,
                                     'user': current_user,
@@ -3876,6 +3855,7 @@ def reports() -> ResponseReturnValue:
                                 'company': t.get('company'),
                                 'days': days,
                                 'diagnoses': ', '.join(dx) if isinstance(dx, list) else (dx or ''),
+                                'icd10': _icd10_text(dx),
                                 'prescriber': t.get('prescriber'),
                                 'dispenser': t.get('dispenser'),
                             })
@@ -4872,7 +4852,7 @@ CSV_REPORTS = {
         ('expiry_date', 'Expiry Date'), ('batch', 'Batch')]),
     'sick_leave': ('Sick Leave Register', 'sick_leave', [
         ('date', 'Date'), ('patient', 'Name'), ('company', 'Company'),
-        ('days', 'Days Given'), ('diagnoses', 'Diagnosis'),
+        ('days', 'Days Given'), ('diagnoses', 'Diagnosis'), ('icd10', 'ICD-10'),
         ('prescriber', 'Prescriber')]),
     'expiry_writeoffs': ('Losses', 'writeoffs', [
         ('date', 'Date'), ('med_name', 'Item Description'), ('quantity', 'Qty'),
@@ -4980,7 +4960,7 @@ DISPENSE_CSV_COLUMNS = [
     ('date', 'Date'), ('timestamp', 'Timestamp'), ('patient', 'Patient'),
     ('company', 'Company'), ('position', 'Position'), ('gender', 'Gender'),
     ('birth_decade', 'Born'), ('outcome', 'Outcome'),
-    ('outcome_days', 'Days'), ('diagnoses', 'Diagnoses'),
+    ('outcome_days', 'Days'), ('diagnoses', 'Diagnoses'), ('icd10', 'ICD-10'),
     ('prescriber', 'Prescriber'), ('dispenser', 'Dispenser'),
     ('med_name', 'Medication'), ('quantity', 'Quantity'),
     ('price', 'Unit Cost'), ('line_cost', 'Line Cost'),
@@ -5030,6 +5010,7 @@ def _dispense_csv(transactions: Collection, base_query: Query) -> tuple[str, str
             row['timestamp'] = ts.strftime('%Y-%m-%d %H:%M:%S') if ts else ''
             if not row.get('date') and ts:
                 row['date'] = ts.strftime('%Y-%m-%d')
+            row['icd10'] = _icd10_text(r.get('diagnoses'))
             writer.writerow([_csv_value(row.get(f))
                              for f, _lab in DISPENSE_CSV_COLUMNS])
     stamp = local_now().strftime('%Y%m%d')
@@ -5125,6 +5106,7 @@ def _clinical_by_month(transactions: Collection, window_start: datetime,
                       'days': v['days']}
                      for k, v in sorted(outcomes.items(), key=lambda kv: -sum(kv[1]['counts']))],
         'diagnoses': [{'name': k, 'counts': dx_month[k], 'total': v,
+                       'code': DIAGNOSIS_CODES.get(k), 'level': DIAGNOSIS_LEVELS.get(k),
                        'trend': _dx_trend(dx_month[k])} for k, v in top],
         'episodes': len(seen),
         'patients': patients,
@@ -10759,7 +10741,11 @@ def _diagnosis_matches(query: str, limit: int = DIAGNOSIS_SUGGESTION_LIMIT) -> l
         terms = [(label.lower(), 0)] + [
             (t, 1) for t in DIAGNOSIS_SEARCH_TERMS.get(label, ())]
         for text, offset in terms:
-            if text.startswith(q):
+            if text == q:
+                # Typed exactly - the name, its short form ("tb") or an old
+                # name ("abscess"): that entry first, whatever else matches.
+                rank, offset = -1, 0
+            elif text.startswith(q):
                 rank = 0
             elif re.search(r'\b' + re.escape(q), text):
                 rank = 1
@@ -10770,9 +10756,12 @@ def _diagnosis_matches(query: str, limit: int = DIAGNOSIS_SUGGESTION_LIMIT) -> l
             rank += offset
             best = rank if best is None else min(best, rank)
         if best is not None:
-            scored.append((best, len(label), label.lower(), label))
+            # Equal matches: primary-care conditions first - they are what a
+            # clinic dispenses for most - then the shorter, everyday name.
+            secondary = DIAGNOSIS_LEVELS.get(label) == 'Secondary'
+            scored.append((best, secondary, len(label), label.lower(), label))
     scored.sort()
-    return [label for _r, _n, _l, label in scored[:limit]]
+    return [label for _r, _s, _n, _l, label in scored[:limit]]
 
 
 # Every register answers the same question on paper: "can I have this as a
@@ -11120,7 +11109,12 @@ def people_options() -> ResponseReturnValue:
 @app.route('/api/diagnoses', methods=['GET'])
 @login_required
 def get_diagnosis_suggestions() -> ResponseReturnValue:
-    return jsonify(_diagnosis_matches(request.args.get('query', '')))
+    names = _diagnosis_matches(request.args.get('query', ''))
+    if request.args.get('detail'):
+        # The dispensing form shows the code and level beside each name.
+        return jsonify([{'name': n, 'code': DIAGNOSIS_CODES.get(n),
+                         'level': DIAGNOSIS_LEVELS.get(n)} for n in names])
+    return jsonify(names)
 
 
 # These names SEED an empty database. They are not the suggestion list any

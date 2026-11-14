@@ -332,7 +332,7 @@ items on one visit was given one period of leave, not three.</p>
 <div class="table-scroll"><table>
     <thead>
         <tr><th>Date</th><th>Patient</th><th>Company</th><th>Days</th>
-            <th>Diagnoses</th><th>Prescriber</th><th>Dispenser</th></tr>
+            <th>Diagnoses</th><th>ICD-10</th><th>Prescriber</th><th>Dispenser</th></tr>
     </thead>
     <tbody>
     {% for l in sick_leave %}
@@ -342,11 +342,12 @@ items on one visit was given one period of leave, not three.</p>
             <td>{{ l.company or '-' }}</td>
             <td><strong>{{ l.days }}</strong></td>
             <td>{{ l.diagnoses or '-' }}</td>
+            <td>{{ l.icd10 or '-' }}</td>
             <td>{{ l.prescriber or '-' }}</td>
             <td>{{ l.dispenser or '-' }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="7">No sick leave was recorded in this period.</td></tr>
+        <tr><td colspan="8">No sick leave was recorded in this period.</td></tr>
     {% endfor %}
     </tbody>
 </table></div>

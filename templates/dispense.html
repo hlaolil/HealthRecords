@@ -493,14 +493,18 @@ function addInputListener(input, type) {
                 break;
             case 'diagnosis':
                 datalist = document.getElementById('diag_suggestions');
-                fetch(`/api/diagnoses?query=${encodeURIComponent(query)}`)
+                // The name is what gets recorded; the ICD-10 code and level
+                // of care show beside it to help pick the right entry.
+                fetch(`/api/diagnoses?detail=1&query=${encodeURIComponent(query)}`)
                     .then(r => r.json())
                     .then(suggestions => {
                         if (suggestions.error) return;
                         datalist.innerHTML = '';
                         suggestions.forEach(s => {
                             const o = document.createElement('option');
-                            o.value = s;
+                            o.value = s.name;
+                            o.label = [s.code, s.level === 'Secondary' ? 'secondary care' : 'primary care']
+                                .filter(Boolean).join(' \u00b7 ');
                             datalist.appendChild(o);
                         });
                     })

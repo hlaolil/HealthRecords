@@ -134,16 +134,17 @@ leave and admission.</p>
 <h2>Disease Trends</h2>
 <div class="table-scroll"><table>
     <thead>
-        <tr><th>Diagnosis</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
+        <tr><th>Diagnosis</th><th>ICD-10</th><th>Level</th>{% for lbl in month_labels %}<th>{{ lbl }}</th>{% endfor %}
             <th>Total</th><th>Trend</th></tr>
     </thead>
     <tbody>
     {% for d in clinical.diagnoses %}
-        <tr><td>{{ d.name }}</td>
+        <tr><td>{{ d.name }}</td><td>{{ d.code or '-' }}</td>
+            <td>{{ 'Secondary' if d.level == 'Secondary' else ('Primary' if d.level else '-') }}</td>
             {% for v in d.counts %}<td>{{ v }}</td>{% endfor %}
             <td>{{ d.total }}</td><td>{{ d.trend }}</td></tr>
     {% else %}
-        <tr><td colspan="{{ month_labels|length + 2 }}">No diagnoses recorded yet.</td></tr>
+        <tr><td colspan="{{ month_labels|length + 5 }}">No diagnoses recorded yet.</td></tr>
     {% endfor %}
     </tbody>
 </table></div>
