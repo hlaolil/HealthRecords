@@ -5051,6 +5051,108 @@ def internal_issue() -> ResponseReturnValue:
                 flash(msg)
                 return redirect(url_for('internal_issue'))
 
+            if action in ('edit_issue', 'delete_issue'):
+                # Correcting an issue line. Admin only, like editing a loss or
+                # deleting a dispense: these change stock after the fact.
+                if session['user'].get('role') != 'admin':
+                    flash('Only admins can change a recorded issue.')
+                    return redirect(url_for('internal_issue'))
+                try:
+                    tx = transactions.find_one({'_id': ObjectId(request.form.get('tx_id') or ''),
+                                                'type': 'internal_issue'})
+                except (InvalidId, TypeError):
+                    tx = None
+                if not tx:
+                    flash('That issue was not found.')
+                    return redirect(url_for('internal_issue') + '#recent')
+                name = tx['med_name']
+                old_qty = tx.get('quantity', 0) or 0
+                from_request = tx.get('request_ref')
+                editor = session['user'].get('name') or ''
+                med = medications.find_one({'name': name})
+
+                if action == 'delete_issue':
+                    if from_request:
+                        flash(f'{name} was given against request {from_request}, so it stays: '
+                              f'the request records what was given. Correct who received it '
+                              f'or the note instead.')
+                        return redirect(url_for('internal_issue') + '#recent')
+                    if not med:
+                        flash(f'"{name}" is no longer on file, so its stock cannot be put back.')
+                        return redirect(url_for('internal_issue') + '#recent')
+                    # Nothing left the shelf after all: the stock goes back.
+                    medications.update_one({'name': name}, {'$inc': {'balance': old_qty}})
+                    transactions.delete_one({'_id': tx['_id']})
+                    write_audit_entry('DELETE', 'internal_issue', tx.get('issue_id') or str(tx['_id']),
+                                      f"deleted {name} x{old_qty} issued to {tx.get('department')} "
+                                      f"({tx.get('issued_to')}) on "
+                                      f"{tx['timestamp'].strftime('%Y-%m-%d %H:%M')}; "
+                                      f"{old_qty} back on the shelf")
+                    flash(f'Issue deleted: {name} x{old_qty} to {tx.get("department")}. '
+                          f'{old_qty} back on the shelf.')
+                    return redirect(url_for('internal_issue') + '#recent')
+
+                dept = (request.form.get('department') or '').strip()
+                if dept == 'Other':
+                    dept = (request.form.get('department_other') or '').strip() or 'Other'
+                issued_to = (request.form.get('issued_to') or '').strip()
+                note = (request.form.get('note') or '').strip()
+                try:
+                    new_qty = int((request.form.get('quantity') or '').strip())
+                except ValueError:
+                    new_qty = 0
+                if new_qty < 1:
+                    flash('Quantity must be a whole number, at least 1. To take the line off '
+                          'altogether, use Delete.')
+                    return redirect(url_for('internal_issue') + '#recent')
+                if not dept or not issued_to:
+                    flash('Department and the person receiving are both required.')
+                    return redirect(url_for('internal_issue') + '#recent')
+                if from_request and (new_qty != old_qty or dept != tx.get('department')):
+                    # The request holds what was given and records any
+                    # shortfall as unmet demand; changing the issue alone
+                    # would make the two disagree.
+                    flash(f'{name} was given against request {from_request}, so its quantity and '
+                          f'department follow the request. Only who received it and the note '
+                          f'can be changed here.')
+                    return redirect(url_for('internal_issue') + '#recent')
+                delta = new_qty - old_qty            # >0 means MORE went out
+                if delta:
+                    if not med:
+                        flash(f'"{name}" is no longer on file, so the quantity cannot be changed.')
+                        return redirect(url_for('internal_issue') + '#recent')
+                    on_hand = med.get('balance', 0) or 0
+                    if delta > on_hand:
+                        flash(f'Cannot raise this issue to {new_qty}: that needs {delta} more '
+                              f'and only {on_hand} are on hand.')
+                        return redirect(url_for('internal_issue') + '#recent')
+                    # Stock moves by the difference only: 10 recorded when 6
+                    # went out puts 4 back on the shelf.
+                    medications.update_one({'name': name}, {'$inc': {'balance': -delta}})
+                changes = []
+                if delta:
+                    changes.append(f'quantity {old_qty} -> {new_qty} (balance {-delta:+d})')
+                if dept != tx.get('department'):
+                    changes.append(f"department {tx.get('department')} -> {dept}")
+                if issued_to != (tx.get('issued_to') or ''):
+                    changes.append(f"received by {tx.get('issued_to') or '(none)'} -> {issued_to}")
+                if note != (tx.get('note') or ''):
+                    changes.append('note changed')
+                if not changes:
+                    flash(f'{name}: nothing was changed.')
+                    return redirect(url_for('internal_issue') + '#recent')
+                price = tx.get('price', 0) or 0
+                transactions.update_one({'_id': tx['_id']}, {
+                    '$set': {'quantity': new_qty, 'line_value': new_qty * price,
+                             'department': dept, 'issued_to': issued_to, 'note': note,
+                             'edited_by': editor, 'edited_at': datetime.utcnow()},
+                    '$push': {'edits': {'by': editor, 'at': datetime.utcnow(),
+                                        'changes': '; '.join(changes)}}})
+                write_audit_entry('UPDATE', 'internal_issue', tx.get('issue_id') or str(tx['_id']),
+                                  f'{name}: ' + '; '.join(changes))
+                flash(f'Issue corrected - {name}: ' + '; '.join(changes) + '.')
+                return redirect(url_for('internal_issue') + '#recent')
+
             if action == 'damage':
                 name = (request.form.get('med_name') or '').strip()
                 try:
@@ -5103,6 +5205,7 @@ def internal_issue() -> ResponseReturnValue:
             current_user=session['user']['name'],
             past_receivers=_past_receivers(db),
             departments=DEPARTMENTS, damage_reasons=DAMAGE_REASONS, recent=recent,
+            is_admin=session['user'].get('role') == 'admin',
             upload_draft=_draft_get(db, session['user'].get('login'), 'issue'))
     except ServerSelectionTimeoutError:
         return render_template(

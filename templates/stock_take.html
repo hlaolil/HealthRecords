@@ -23,6 +23,31 @@
   .st-agree input { width: 22px; height: 22px; }
   .st-changed { background: #fff3cd; border-color: #e0a800 !important; }
 </style>
+<style>
+.st-downloads { font-size: 13px; margin: -4px 0 12px; }
+.st-downloads ul { list-style: none; padding: 0; margin: 6px 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.st-n { color: #666; }
+.st-groups { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+#st_sheet_form .st-groups button { padding: 5px 11px; font-size: 13px; margin: 0; width: auto;
+    min-height: 0; border-radius: 14px; background: #fff; color: #0056b3; border: 1px solid #0056b3;
+    box-shadow: none; transition: none; transform: none; opacity: 1; font-weight: 600; }
+#st_sheet_form .st-groups button span { font-weight: 400; opacity: .8; }
+#st_sheet_form .st-groups button.on { background: #0056b3; color: #fff; }
+</style>
+<style>
+.st-edited { background: #fff3cd; color: #7a5a00; padding: 0 5px; border-radius: 8px; cursor: help; }
+.st-edit-btn { padding: 3px 10px; font-size: 13px; margin: 0; }
+.st-edit-row td { background: #f4f8fd; }
+.st-edit-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+    margin: 0; padding: 4px 0; background: none; box-shadow: none;
+    /* the table scrolls sideways on a phone; keep the form on screen */
+    position: sticky; left: 8px; max-width: calc(100vw - 56px); }
+.st-edit-form label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 14px; }
+.st-edit-form input[type=number] { width: 6em; }
+.st-edit-form input[type=text] { width: 22em; max-width: 100%; }
+.st-edit-form button { margin: 0; padding: 5px 12px; }
+.st-edit-form small { flex-basis: 100%; color: #555; }
+</style>
 {% endblock %}
 {% block content %}{% if message %}
     <p class="message {% if 'success' in message|lower or 'recorded' in message|lower or 'closed' in message|lower or 'opened' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
@@ -114,17 +139,6 @@ ticking.</p>
     </ul>
     <small>Upload each one when it is counted. The uploads add up, so you can post them together or one at a time.</small>
 </div>
-<style>
-.st-downloads { font-size: 13px; margin: -4px 0 12px; }
-.st-downloads ul { list-style: none; padding: 0; margin: 6px 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
-.st-n { color: #666; }
-.st-groups { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
-#st_sheet_form .st-groups button { padding: 5px 11px; font-size: 13px; margin: 0; width: auto;
-    min-height: 0; border-radius: 14px; background: #fff; color: #0056b3; border: 1px solid #0056b3;
-    box-shadow: none; transition: none; transform: none; opacity: 1; font-weight: 600; }
-#st_sheet_form .st-groups button span { font-weight: 400; opacity: .8; }
-#st_sheet_form .st-groups button.on { background: #0056b3; color: #fff; }
-</style>
 {% if upload_draft %}
 <div class="message partial" style="font-size:14px;">
     <strong>{{ upload_draft.rows|length }} row(s) filled from &ldquo;{{ upload_draft.meta.sheet }}&rdquo;</strong>,
@@ -413,20 +427,6 @@ may be left blank if you only need to fix an expiry date or a batch number
     {% endfor %}
     </tbody>
 </table></div>
-<style>
-.st-edited { background: #fff3cd; color: #7a5a00; padding: 0 5px; border-radius: 8px; cursor: help; }
-.st-edit-btn { padding: 3px 10px; font-size: 13px; margin: 0; }
-.st-edit-row td { background: #f4f8fd; }
-.st-edit-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
-    margin: 0; padding: 4px 0; background: none; box-shadow: none;
-    /* the table scrolls sideways on a phone; keep the form on screen */
-    position: sticky; left: 8px; max-width: calc(100vw - 56px); }
-.st-edit-form label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 14px; }
-.st-edit-form input[type=number] { width: 6em; }
-.st-edit-form input[type=text] { width: 22em; max-width: 100%; }
-.st-edit-form button { margin: 0; padding: 5px 12px; }
-.st-edit-form small { flex-basis: 100%; color: #555; }
-</style>
 <script>
 document.addEventListener('click', function (e) {
     var b = e.target.closest && e.target.closest('.st-edit-btn, .st-edit-cancel');

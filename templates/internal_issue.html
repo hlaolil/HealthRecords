@@ -1,6 +1,22 @@
 {% extends "base.html" %}
 {% block title %}Internal Issues &amp; Damage &middot; NMC Pharmacy{% endblock %}
 {% block heading %}Internal Issues &amp; Damage{% endblock %}
+{% block page_styles %}
+<style>
+.ii-edit-btn { padding: 3px 10px; font-size: 13px; margin: 0; }
+.ii-edit-row td { background: #f4f8fd; }
+.ii-edit-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+    margin: 0; padding: 4px 0; background: none; box-shadow: none;
+    position: sticky; left: 8px; max-width: calc(100vw - 56px); }
+.ii-edit-form label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 14px; }
+.ii-edit-form input[type=number] { width: 6em; }
+.ii-edit-form input[type=text], .ii-edit-form select { width: 13em; max-width: 100%; }
+.ii-edit-form button { margin: 0; padding: 5px 12px; }
+.ii-edit-form small { flex-basis: 100%; color: #555; }
+.ii-fixed { font-size: 13px; color: #555; }
+.ii-edited { color: #7a5a00; }
+</style>
+{% endblock %}
 {% block content %}{% include "_medication_options.html" %}
 {% if message %}
     <p class="message {% if 'recorded' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
@@ -123,11 +139,11 @@ inflate AMC and the order request will not reorder against it.</p>
     <div class="form-buttons"><input type="submit" value="Record Loss"></div>
 </form>
 
-<h2>Recent Internal Issues &amp; Losses ({{ recent|length }})</h2>
+<h2 id="recent">Recent Internal Issues &amp; Losses ({{ recent|length }})</h2>
 <div class="table-scroll"><table>
     <thead>
         <tr><th>Date</th><th>Type</th><th>Medication</th><th>Quantity</th><th>Value</th>
-            <th>Department / Reason</th><th>To / Note</th><th>User</th></tr>
+            <th>Department / Reason</th><th>To / Note</th><th>User</th>{% if is_admin %}<th></th>{% endif %}</tr>
     </thead>
     <tbody>
     {% for r in recent %}
@@ -142,15 +158,66 @@ inflate AMC and the order request will not reorder against it.</p>
                         else (r.get('quantity') or 0) * (r.get('price') or 0) %}
             <td>R{{ "%.2f"|format(rv if rv >= 0 else -rv) }}</td>
             <td>{{ r.get('department') or r.get('reason') or '-' }}</td>
-            <td>{{ r.get('issued_to') or r.get('note') or '-' }}</td>
+            <td>{{ r.get('issued_to') or r.get('note') or '-' }}
+                {%- if r.get('issued_to') and r.get('note') %}<br><small>{{ r.note }}</small>{% endif %}
+                {%- for e in r.get('edits') or [] %}<br><small class="ii-edited">Edited {{ e.at.strftime('%d %b %H:%M') }} by {{ e.by }}: {{ e.changes }}</small>{% endfor %}</td>
             <td>{{ r.user }}</td>
+            {% if is_admin %}
+            <td>{% if r.type == 'internal_issue' %}<button type="button" class="ii-edit-btn" data-for="ie_{{ r._id }}">Edit</button>{% endif %}</td>
+            {% endif %}
         </tr>
+        {% if is_admin and r.type == 'internal_issue' %}
+        {% set fixed = r.get('request_ref') %}
+        <tr class="ii-edit-row" id="ie_{{ r._id }}" hidden>
+            <td colspan="9">
+                <form method="POST" action="{{ url_for('internal_issue') }}" class="ii-edit-form">
+                    <input type="hidden" name="tx_id" value="{{ r._id }}">
+                    <strong>{{ r.med_name }}</strong>
+                    {% if fixed %}
+                    <input type="hidden" name="quantity" value="{{ r.quantity }}">
+                    <input type="hidden" name="department" value="{{ r.department }}">
+                    <span class="ii-fixed">{{ r.quantity }} to {{ r.department }} &mdash; given against request {{ fixed }}, so these follow the request</span>
+                    {% else %}
+                    <label>Quantity <input type="number" name="quantity" min="1" step="1" required value="{{ r.quantity }}" inputmode="numeric"></label>
+                    <label>Department
+                        <select name="department" required>
+                            {% set known = r.department in departments %}
+                            {% for d in departments %}<option value="{{ d }}"{% if d == r.department or (d == 'Other' and not known) %} selected{% endif %}>{{ d }}</option>{% endfor %}
+                        </select></label>
+                    <label>If Other <input type="text" name="department_other" value="{{ '' if r.department in departments else r.department }}"></label>
+                    {% endif %}
+                    <label>Received by <input type="text" name="issued_to" required list="receiver_suggestions" value="{{ r.get('issued_to') or '' }}"></label>
+                    <label>Note <input type="text" name="note" value="{{ r.get('note') or '' }}"></label>
+                    <button type="submit" name="action" value="edit_issue">Save</button>
+                    <button type="button" class="ii-edit-cancel" data-for="ie_{{ r._id }}">Cancel</button>
+                    {% if not fixed %}
+                    <button type="submit" name="action" value="delete_issue" class="delete-btn ii-delete"
+                            formnovalidate
+                            data-confirm="Delete this issue of {{ r.med_name }} x{{ r.quantity }}? The {{ r.quantity }} go back on the shelf.">Delete</button>
+                    {% endif %}
+                    <small>Changing the quantity moves stock by the difference only: recording 6 instead of 10 puts 4 back on the shelf.</small>
+                </form>
+            </td>
+        </tr>
+        {% endif %}
     {% else %}
-        <tr><td colspan="8">Nothing recorded yet.</td></tr>
+        <tr><td colspan="9">Nothing recorded yet.</td></tr>
     {% endfor %}
     </tbody>
 </table></div>
 <script>
+document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('.ii-edit-btn, .ii-edit-cancel');
+    if (!b) return;
+    var row = document.getElementById(b.dataset.for);
+    if (!row) return;
+    row.hidden = b.classList.contains('ii-edit-cancel') ? true : !row.hidden;
+});
+// Ask before deleting; the button carries its own question.
+document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('.ii-delete');
+    if (b && !window.confirm(b.dataset.confirm)) { e.preventDefault(); }
+});
 document.addEventListener('DOMContentLoaded', async function() {
     const options = await getMedicationOptions();
     ['med_suggestions', 'med_suggestions2'].forEach(function(id) {
