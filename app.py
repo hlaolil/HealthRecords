@@ -16,7 +16,7 @@ import requests
 from flask import Flask, request, render_template, jsonify, redirect, url_for, session, get_flashed_messages, make_response
 from flask import flash as _flask_flash
 from functools import wraps
-from pymongo import MongoClient, ReturnDocument
+from pymongo import MongoClient, ReturnDocument, UpdateMany, UpdateOne
 from pymongo.errors import ServerSelectionTimeoutError, DuplicateKeyError
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence, cast
@@ -2512,10 +2512,14 @@ def _assign_missing_codes(medications: Collection) -> int:
     if not missing:
         return 0
     top = _top_med_code(medications)
+    # One request for all of them: written one at a time, 300 items is 300
+    # round trips to the database - enough to run a page out of time.
+    ops = []
     for m in missing:
         top += 1
-        medications.update_one({'_id': m['_id'], 'code': {'$in': [None, '']}},
-                               {'$set': {'code': f'{MED_CODE_PREFIX}{top:04d}'}})
+        ops.append(UpdateOne({'_id': m['_id'], 'code': {'$in': [None, '']}},
+                             {'$set': {'code': f'{MED_CODE_PREFIX}{top:04d}'}}))
+    medications.bulk_write(ops, ordered=False)
     return len(missing)
 
 
@@ -2557,7 +2561,9 @@ def _rename_rows(upload: Any, medications: Collection) -> Doc:
             k = _match_key(r['new'])
             targets[k] = targets.get(k, 0) + 1
     for r in rows:
-        if r['current'] not in have:
+        if r['current'] not in have and r['new'] in have:
+            r['status'], r['why'] = 'done', 'already renamed'
+        elif r['current'] not in have:
             r['status'], r['why'] = 'missing', 'no item has this name now'
         elif not r['new']:
             r['status'], r['why'] = 'empty', 'no new name given'
@@ -2574,67 +2580,110 @@ def _rename_rows(upload: Any, medications: Collection) -> Doc:
     return {'rows': rows, 'sheet': table['sheet']}
 
 
-def _apply_renames(db: Database, pairs: list[tuple[str, str]]) -> tuple[list[str], list[str]]:
-    """Rename each (current, new), carrying history. An item whose new name
-    is still held by another item waiting to be renamed goes after it, so a
-    swap of names in one list works in either row order."""
-    done, left = [], list(pairs)
+def _apply_renames(db: Database, pairs: list[tuple[str, str]]
+                   ) -> tuple[list[str], list[str], list[str]]:
+    """Rename each (current, new), carrying history: (done, not done, already done).
+
+    The list of names is read once and kept up to date here. Renames go in
+    waves: an item whose new name is still held by another item waiting to be
+    renamed waits for the next wave, so a swap of names works in either row
+    order, and no wave holds a chain.
+    """
+    names = {m['name'] for m in db['medications'].find({}, {'_id': 0, 'name': 1})}
+    holder_of = {_match_key(n): n for n in names}
+    done: list[str] = []
+    already: list[str] = []
+    left = []
+    for cur, new in pairs:
+        if cur in names:
+            left.append((cur, new))
+        elif new in names:
+            already.append(f'{cur} -> {new}')      # a previous run got there
     while left:
-        progress = False
-        for cur, new in list(left):
-            holder = next((m['name'] for m in db['medications'].find({}, {'_id': 0, 'name': 1})
-                           if m['name'] != cur and _match_key(m['name']) == _match_key(new)), None)
-            if holder:
-                continue
-            if db['medications'].find_one({'name': cur}):
-                _rename_medication(db, cur, new)
-                done.append(f'{cur} -> {new}')
-            left.remove((cur, new))
-            progress = True
-        if not progress:
+        wave, later = [], []
+        taken: set[str] = set()
+        for cur, new in left:
+            k = _match_key(new)
+            h = holder_of.get(k)
+            if (h and h != cur) or k in taken:
+                later.append((cur, new))
+            else:
+                wave.append((cur, new))
+                taken.add(k)
+        if not wave:
             break
-    return done, [f'{c} -> {n}' for c, n in left]
+        _rename_many(db, wave)
+        for cur, new in wave:
+            holder_of.pop(_match_key(cur), None)
+            holder_of[_match_key(new)] = new
+            done.append(f'{cur} -> {new}')
+        left = later
+    return done, [f'{c} -> {n}' for c, n in left], already
 
 
 def _rename_medication(db: Database, old: str, new: str) -> dict[str, int]:
-    """Move an item, and every record that names it, from `old` to `new`.
+    """Move one item, and every record that names it, to a new name."""
+    return _rename_many(db, [(old, new)])
 
-    The history moves first and the item itself last. If anything stops part
-    way, the item still has its old name, and saving again finishes the job:
-    each step only touches what still carries the old name.
+
+def _rename_many(db: Database, pairs: list[tuple[str, str]]) -> dict[str, int]:
+    """Move items, and every record that names them, from old names to new.
+
+    Each kind of record is moved in ONE request for the whole list, so
+    renaming 300 items costs a handful of round trips to the database rather
+    than thousands (which ran a page past its time limit).
+
+    The history moves first and the items themselves last. If anything stops
+    part way, the items still have their old names, and running the rename
+    again finishes the job: each step only touches what still carries an old
+    name. The caller keeps chains (A->B while B->C) out of one call.
     """
-    moved = {
-        'ledger': db['transactions'].update_many(
-            {'med_name': old}, {'$set': {'med_name': new}}).modified_count,
-        'counts': db['stock_take_counts'].update_many(
-            {'med_name': old}, {'$set': {'med_name': new}}).modified_count,
-        'standard': db['dept_standards'].update_many(
-            {'med_name': old}, {'$set': {'med_name': new}}).modified_count,
-    }
-    n = 0
-    for d in db['dept_requests'].find({'lines.med_name': old}, {'lines': 1}):
-        lines = [dict(ln, med_name=new) if ln.get('med_name') == old else ln
+    pairs = [(o, n) for o, n in pairs if o and n and o != n]
+    moved = {'ledger': 0, 'counts': 0, 'standard': 0, 'requests': 0, 'drafts': 0}
+    if not pairs:
+        return moved
+    to = dict(pairs)
+    olds = list(to)
+
+    def by_field(col: str, field: str) -> int:
+        res = db[col].bulk_write([UpdateMany({field: o}, {'$set': {field: n}})
+                                  for o, n in pairs], ordered=True)
+        return res.modified_count
+
+    moved['ledger'] = by_field('transactions', 'med_name')
+    moved['counts'] = by_field('stock_take_counts', 'med_name')
+    moved['standard'] = by_field('dept_standards', 'med_name')
+
+    ops: list[Any] = []
+    for d in db['dept_requests'].find({'lines.med_name': {'$in': olds}}, {'lines': 1}):
+        lines = [dict(ln, med_name=to[ln['med_name']]) if ln.get('med_name') in to else ln
                  for ln in d.get('lines') or []]
-        db['dept_requests'].update_one({'_id': d['_id']}, {'$set': {'lines': lines}})
-        n += 1
-    moved['requests'] = n
-    n = 0
-    for d in db['upload_drafts'].find({'$or': [{'rows.name': old}, {'rows.med_name': old}]},
-                                      {'rows': 1}):
+        ops.append(UpdateOne({'_id': d['_id']}, {'$set': {'lines': lines}}))
+    if ops:
+        db['dept_requests'].bulk_write(ops, ordered=False)
+    moved['requests'] = len(ops)
+
+    ops = []
+    for d in db['upload_drafts'].find({'$or': [{'rows.name': {'$in': olds}},
+                                                {'rows.med_name': {'$in': olds}}]}, {'rows': 1}):
         rows = []
         for r in d.get('rows') or []:
             r = dict(r)
             for f in ('name', 'med_name'):
-                if r.get(f) == old:
-                    r[f] = new
+                if r.get(f) in to:
+                    r[f] = to[r[f]]
             rows.append(r)
-        db['upload_drafts'].update_one({'_id': d['_id']}, {'$set': {'rows': rows}})
-        n += 1
-    moved['drafts'] = n
-    db['medications'].update_one({'name': old}, {'$set': {'name': new},
-                                                 '$addToSet': {'former_names': old}})
+        ops.append(UpdateOne({'_id': d['_id']}, {'$set': {'rows': rows}}))
+    if ops:
+        db['upload_drafts'].bulk_write(ops, ordered=False)
+    moved['drafts'] = len(ops)
+
+    meds = db['medications']
+    meds.bulk_write([UpdateOne({'name': o}, {'$set': {'name': n}, '$addToSet': {'former_names': o}})
+                     for o, n in pairs], ordered=True)
     # Renamed back to an earlier name: that name is current again, not former.
-    db['medications'].update_one({'name': new}, {'$pull': {'former_names': new}})
+    meds.bulk_write([UpdateOne({'name': n}, {'$pull': {'former_names': n}}) for _o, n in pairs],
+                    ordered=False)
     return moved
 
 
@@ -2832,7 +2881,7 @@ def add_medication() -> ResponseReturnValue:
                 ticked = sum(1 for r in found['rows'] if r['apply'])
                 issues = [f"{by[k]} {label}" for k, label in
                           (('clash', 'clash with another name'), ('missing', 'not found'),
-                           ('same', 'already standard')) if by[k]]
+                           ('same', 'already standard'), ('done', 'already renamed')) if by[k]]
                 flash(f"Read {len(found['rows'])} row(s) from \"{found['sheet']}\": {by['ok']} ready, "
                       f"{ticked} of them marked Yes and ticked. "
                       + (', '.join(issues).capitalize() + '. ' if issues else '')
@@ -2851,12 +2900,13 @@ def add_medication() -> ResponseReturnValue:
             if not pairs:
                 flash('Nothing was ticked, so nothing was renamed.')
                 return redirect(url_for('add_medication', _anchor='names-review'))
-            done, stuck = _apply_renames(db, pairs)
+            done, stuck, already = _apply_renames(db, pairs)
             if done:
                 write_audit_entry('UPDATE', 'medication', f'{len(done)} items',
                                   'names standardised from a list: ' + '; '.join(done))
             _draft_drop(db, login, 'renames')
             flash(f'{len(done)} item(s) renamed - each kept its history, code and old name.'
+                  + (f' {len(already)} had already been renamed.' if already else '')
                   + (f' Not renamed, because the new name is taken: {_brief(stuck)}.' if stuck else ''))
             return redirect(url_for('add_medication', _anchor='names'))
 
