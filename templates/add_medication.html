@@ -146,6 +146,49 @@ cannot be added again.</p>
 </form>
 </div>
 {% endif %}
+
+{# ---- Standardise names from a reviewed list ---- #}
+{% call upload_box(url_for('add_medication'), 'Standardise names from a list.', 'upload_names', {},
+                   url_for('upload_template', kind='renames'),
+                   'Columns: Current name, Standard name, Apply (Yes / No / Check). Each rename keeps the '
+                   ~ "item's history, code and old name; nothing changes until you press Rename Ticked Items.",
+                   button='Read Rename List', anchor='names') %}
+{% endcall %}
+
+{% if rename_draft and rename_draft.rows %}
+{% set rrows = rename_draft.rows %}
+<div class="up-review" id="names-review">
+<h3>Renames from "{{ rename_draft.meta.sheet }}" &mdash; {{ rrows|length }} row(s)</h3>
+<p style="font-size:13px;">Ticked rows are renamed. Rows marked <strong>Yes</strong> in the sheet start ticked;
+<strong>Check</strong> and <strong>No</strong> do not. You can still correct a new name here.
+<a href="#" onclick="document.querySelectorAll('.ren-tick:not(:disabled)').forEach(function(x){x.checked=true});return false;">Tick all that are ready</a>
+&middot; <a href="#" onclick="document.querySelectorAll('.ren-tick').forEach(function(x){x.checked=false});return false;">Untick all</a></p>
+<form method="POST" action="{{ url_for('add_medication') }}" class="up-review-form">
+    <input type="hidden" name="action" value="names_bulk">
+    <div class="table-scroll"><table>
+        <thead><tr><th>Rename</th><th>Current name</th><th>New name</th><th>Sheet said</th></tr></thead>
+        <tbody>
+        {% for r in rrows %}{% set i = loop.index0 %}
+        <tr class="{% if r.status in ('clash', 'missing', 'empty') %}up-bad{% elif r.status == 'same' %}{% elif r.marked|lower == 'check' %}up-guess{% endif %}">
+            <td style="text-align:center;"><input type="checkbox" class="ren-tick" name="ren__{{ i }}" value="1"
+                       {% if r.status != 'ok' %}disabled{% elif r.apply %}checked{% endif %}></td>
+            <td>{{ r.current }}{% if r.why %}<span class="up-why">{{ r.why }}</span>{% endif %}
+                {%- if r.note %}<span class="up-why">Check: {{ r.note }}</span>{% endif %}</td>
+            <td><input name="new__{{ i }}" value="{{ r.new }}" style="width:24em;" {% if r.status != 'ok' %}readonly{% endif %}></td>
+            <td>{{ (r.marked or '-')|capitalize }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    <div class="form-buttons"><input type="submit" value="Rename Ticked Items"
+         onclick="return confirm('Rename the ticked items? Each keeps its history and its old name stays searchable.');"></div>
+</form>
+<form method="POST" action="{{ url_for('add_medication') }}" style="margin-top:4px;background:none;box-shadow:none;">
+    <input type="hidden" name="action" value="discard_names">
+    <button type="submit" class="delete-btn" onclick="return confirm('Discard the rename list?');">Discard Rename List</button>
+</form>
+</div>
+{% endif %}
 <script>
 document.addEventListener('DOMContentLoaded', async function() {
     const medInput = document.getElementById('med_name');

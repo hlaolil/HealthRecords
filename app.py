@@ -36,7 +36,7 @@ if TYPE_CHECKING:                       # imported for the checker, never at run
 Doc = dict[str, Any]
 Docs = list[Doc]
 Query = dict[str, Any]
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
 from markupsafe import escape  # FIX: used to prevent XSS in nav links
@@ -2519,6 +2519,83 @@ def _assign_missing_codes(medications: Collection) -> int:
     return len(missing)
 
 
+def _rename_rows(upload: Any, medications: Collection) -> Doc:
+    """Read a list of renames and check every one before anything changes.
+
+    Each row comes back with a status:
+      ok        ready to rename
+      same      the new name is the name it already has
+      missing   no item on the list has that current name
+      clash     another item already has the new name (in any spelling), or
+                two rows want the same new name
+      empty     no new name given
+    and `apply` from the sheet's Apply column (Yes only; "Check" and "No"
+    stay unticked), so the review opens exactly as the sheet was marked.
+    """
+    table = _find_table(_read_upload(upload), ['current', 'newname', 'apply', 'note'],
+                        [['current'], ['newname']])
+    cols = table['cols']
+    names = [m['name'] for m in medications.find({}, {'_id': 0, 'name': 1})]
+    have = set(names)
+    rows: Docs = []
+    for r in table['rows']:
+        cur = str(_cell(r, cols, 'current') or '').strip()
+        new = ' '.join(str(_cell(r, cols, 'newname') or '').split())
+        if not cur:
+            continue
+        mark = str(_cell(r, cols, 'apply') or '').strip().lower()
+        rows.append({'current': cur, 'new': new, 'apply': mark in ('yes', 'y', 'x', '1', 'true'),
+                     'marked': mark or '', 'note': str(_cell(r, cols, 'note') or '').strip()})
+    # Who ends up called what if every ok row is applied: a new name may not
+    # land on an item that keeps its name, nor on another row's new name.
+    renamed_away = {r['current'] for r in rows if r['current'] in have and r['new']
+                    and r['new'] != r['current']}
+    staying = {_match_key(n): n for n in names if n not in renamed_away}
+    targets: dict[str, int] = {}
+    for r in rows:
+        if r['new'] and r['current'] in have and r['new'] != r['current']:
+            k = _match_key(r['new'])
+            targets[k] = targets.get(k, 0) + 1
+    for r in rows:
+        if r['current'] not in have:
+            r['status'], r['why'] = 'missing', 'no item has this name now'
+        elif not r['new']:
+            r['status'], r['why'] = 'empty', 'no new name given'
+        elif r['new'] == r['current']:
+            r['status'], r['why'] = 'same', 'already has this name'
+        elif _match_key(r['new']) in staying and staying[_match_key(r['new'])] != r['current']:
+            r['status'], r['why'] = 'clash', f'"{staying[_match_key(r["new"])]}" already has this name'
+        elif targets.get(_match_key(r['new']), 0) > 1:
+            r['status'], r['why'] = 'clash', 'another row gives the same new name'
+        else:
+            r['status'], r['why'] = 'ok', ''
+        if r['status'] != 'ok':
+            r['apply'] = False
+    return {'rows': rows, 'sheet': table['sheet']}
+
+
+def _apply_renames(db: Database, pairs: list[tuple[str, str]]) -> tuple[list[str], list[str]]:
+    """Rename each (current, new), carrying history. An item whose new name
+    is still held by another item waiting to be renamed goes after it, so a
+    swap of names in one list works in either row order."""
+    done, left = [], list(pairs)
+    while left:
+        progress = False
+        for cur, new in list(left):
+            holder = next((m['name'] for m in db['medications'].find({}, {'_id': 0, 'name': 1})
+                           if m['name'] != cur and _match_key(m['name']) == _match_key(new)), None)
+            if holder:
+                continue
+            if db['medications'].find_one({'name': cur}):
+                _rename_medication(db, cur, new)
+                done.append(f'{cur} -> {new}')
+            left.remove((cur, new))
+            progress = True
+        if not progress:
+            break
+    return done, [f'{c} -> {n}' for c, n in left]
+
+
 def _rename_medication(db: Database, old: str, new: str) -> dict[str, int]:
     """Move an item, and every record that names it, from `old` to `new`.
 
@@ -2736,6 +2813,54 @@ def add_medication() -> ResponseReturnValue:
         login = session['user'].get('login')
 
         if request.method == 'POST' and request.form.get('action') in (
+                'upload_names', 'names_bulk', 'discard_names'):
+            # Standardising names from a reviewed list: nothing is renamed on
+            # upload; the list is shown, and only the ticked rows are applied.
+            action = request.form.get('action')
+            if action == 'discard_names':
+                _draft_drop(db, login, 'renames')
+                flash('The rename list was discarded. Nothing was renamed.')
+                return redirect(url_for('add_medication', _anchor='names'))
+            if action == 'upload_names':
+                try:
+                    found = _rename_rows(_uploaded('sheet'), medications)
+                except ValueError as e:
+                    flash(f'The rename list could not be read: {e}.')
+                    return redirect(url_for('add_medication', _anchor='names'))
+                _draft_put(db, login, 'renames', '', found['rows'], {'sheet': found['sheet']})
+                by = Counter(r['status'] for r in found['rows'])
+                ticked = sum(1 for r in found['rows'] if r['apply'])
+                issues = [f"{by[k]} {label}" for k, label in
+                          (('clash', 'clash with another name'), ('missing', 'not found'),
+                           ('same', 'already standard')) if by[k]]
+                flash(f"Read {len(found['rows'])} row(s) from \"{found['sheet']}\": {by['ok']} ready, "
+                      f"{ticked} of them marked Yes and ticked. "
+                      + (', '.join(issues).capitalize() + '. ' if issues else '')
+                      + "Nothing is renamed yet - check the list, then press Rename Ticked Items.")
+                return redirect(url_for('add_medication', _anchor='names-review'))
+            # names_bulk: apply the ticked rows, checked again against now.
+            draft = _draft_get(db, login, 'renames') or {}
+            ren_rows = draft.get('rows') or []
+            pairs = []
+            for i, r in enumerate(ren_rows):
+                if not request.form.get(f'ren__{i}') or r.get('status') != 'ok':
+                    continue
+                to_name = ' '.join((request.form.get(f'new__{i}') or r['new']).split())
+                if to_name and to_name != r['current']:
+                    pairs.append((r['current'], to_name))
+            if not pairs:
+                flash('Nothing was ticked, so nothing was renamed.')
+                return redirect(url_for('add_medication', _anchor='names-review'))
+            done, stuck = _apply_renames(db, pairs)
+            if done:
+                write_audit_entry('UPDATE', 'medication', f'{len(done)} items',
+                                  'names standardised from a list: ' + '; '.join(done))
+            _draft_drop(db, login, 'renames')
+            flash(f'{len(done)} item(s) renamed - each kept its history, code and old name.'
+                  + (f' Not renamed, because the new name is taken: {_brief(stuck)}.' if stuck else ''))
+            return redirect(url_for('add_medication', _anchor='names'))
+
+        if request.method == 'POST' and request.form.get('action') in (
                 'upload_meds', 'meds_bulk', 'discard_meds'):
             action = request.form.get('action')
             if action == 'discard_meds':
@@ -2878,7 +3003,8 @@ def add_medication() -> ResponseReturnValue:
         return render_template('add_medication.html', nav_links=get_nav_links(), message=message,
                      current_user=session.get('user', {}).get('name', ''),
                                                   categories=CATEGORIES,
-                     upload_draft=_draft_get(db, login, 'medications'))
+                     upload_draft=_draft_get(db, login, 'medications'),
+                     rename_draft=_draft_get(db, login, 'renames'))
     except ServerSelectionTimeoutError:
         return render_template(
             'add_medication.html', nav_links=get_nav_links(),
@@ -6087,13 +6213,17 @@ UPLOAD_HEADINGS: dict[str, list[str]] = {
     'batch': ['batch', 'batch no', 'batch number', 'lot', 'lot no', 'lot number'],
     'expiry': ['expiry', 'expiry date', 'exp', 'exp date', 'expires', 'best before',
                'use by', 'expiry date yyyy mm dd'],
-    'note': ['note', 'notes', 'remarks', 'comment', 'comments'],
+    'note': ['note', 'notes', 'remarks', 'comment', 'comments', 'please check'],
     'counted': ['physical count', 'counted', 'count', 'qty counted', 'quantity counted',
                 'physical count only if different'],
     'category': ['category'],
     'schedule': ['schedule', 'controlled'],
     'opening': ['opening balance', 'opening stock', 'initial balance', 'stock on hand'],
     'code': ['code', 'product code', 'med code', 'nmc code'],
+    # A list of renames: the name now, the name it should have, and whether to.
+    'current': ['current name', 'name now', 'old name', 'present name'],
+    'newname': ['standard name', 'new name', 'rename to', 'should be'],
+    'apply': ['apply', 'rename', 'apply rename', 'approved'],
 }
 
 
@@ -11588,6 +11718,24 @@ UPLOAD_TEMPLATES: dict[str, tuple[str, list[str], list[list[Any]], str]] = {
 }
 
 
+def _rename_template() -> ResponseReturnValue:
+    """Every item's current name, ready to be given a standard one: type the
+    new name, set Apply to Yes, and upload it on the Add Medication page."""
+    if (session.get('user') or {}).get('role') != 'admin':
+        flash('Only admins can rename medications.')
+        return redirect('/reports')
+    meds = _by_name(get_mongo_client()['pharmacy_db']['medications'].find(
+        {}, {'_id': 0, 'name': 1, 'code': 1}))
+    return _xlsx_download(
+        'medication-names.xlsx', 'Names',
+        ['Current name', 'Standard name', 'Apply', 'Code'],
+        [[m['name'], m['name'], 'No', m.get('code') or None] for m in meds],
+        'Standard name: change it where the name should be different; leave it as it is otherwise.\n'
+        'Apply: Yes to rename, No to leave. Only Yes rows start ticked when uploaded.\n'
+        'The standard: generic name, dosage form in full words, then the strength - '
+        '"Amoxicillin capsules, 250 mg".')
+
+
 def _checklist_template() -> ResponseReturnValue:
     """A blank month of the department's checklist, laid out the way the
     checklist import reads it: the standard list down the side, then QTY and
@@ -11650,6 +11798,8 @@ def upload_template(kind: str) -> ResponseReturnValue:
     """An empty sheet with the headings an upload reads, and how to fill it."""
     if kind == 'checklist':
         return _checklist_template()
+    if kind == 'renames':
+        return _rename_template()
     if kind not in UPLOAD_TEMPLATES:
         return redirect('/')
     fname, heads, example, note = UPLOAD_TEMPLATES[kind]
