@@ -8,6 +8,23 @@
                 display: none; }
   .draft-note.shown { display: block; }
 </style>
+<style>
+.inv-block { flex-basis: 100%; }
+.inv-row { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+.inv-row input { margin: 0; }
+.inv-row input[name=invoice_number] { flex: 2 1 10em; }
+.inv-row input[name=invoice_total] { flex: 1 1 8em; }
+.inv-del { width: auto; margin: 0; padding: 4px 10px; background: #b91c1c; }
+.inv-add { width: auto; margin: 2px 0 0; padding: 5px 12px; font-size: 13px; background: #fff;
+    color: #0056b3; border: 1px solid #0056b3; }
+.inv-sum { font-size: 13px; color: #333; margin-left: 10px; }
+.inv-card { background: #f1f6fc; border: 1px solid #c5d6ea; border-radius: 8px; padding: 10px 12px; margin: 10px 0; }
+.inv-list { width: auto; min-width: 18em; margin: 0 0 10px; }
+.inv-add-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0;
+    padding: 0; background: none; box-shadow: none; max-width: none; }
+.inv-add-form input { width: auto; flex: 1 1 9em; margin: 0; }
+.inv-add-form button { width: auto; margin: 0; }
+</style>
 {% endblock %}
 {% block content %}{% include "_medication_options.html" %}
 
@@ -80,11 +97,35 @@ medication &mdash; change it under Edit Medication.</p>
 <h2>{{ delivery.reference }} &mdash; {{ delivery.supplier }}</h2>
 <p><strong>Status:</strong> {{ delivery.status|upper }} &nbsp;|&nbsp;
    <strong>Order:</strong> {{ delivery.order_number }} &nbsp;|&nbsp;
-   <strong>Invoice:</strong> {{ delivery.invoice_number }} &nbsp;|&nbsp;
+   <strong>Invoice{% if delivery_invoices|length > 1 %}s{% endif %}:</strong> {{ delivery.invoice_number }} &nbsp;|&nbsp;
    Opened {{ delivery.opened_at.strftime('%Y-%m-%d %H:%M') }} by {{ delivery.received_by }}
    {% if delivery.closed_at %}&nbsp;|&nbsp; Closed {{ delivery.closed_at.strftime('%Y-%m-%d %H:%M') }} by {{ delivery.closed_by }}{% endif %}
 </p>
 <p><a href="{{ url_for('receive') }}">&larr; All deliveries</a></p>
+
+{% if delivery_invoices|length > 1 or delivery.status == 'open' %}
+<div class="inv-card">
+    {% if delivery_invoices|length > 1 %}
+    <table class="inv-list">
+        <thead><tr><th>Invoice</th><th>Amount</th></tr></thead>
+        <tbody>
+        {% for i in delivery_invoices %}<tr><td>{{ i.number }}</td><td>R{{ "%.2f"|format(i.total) }}</td></tr>{% endfor %}
+        </tbody>
+        <tfoot><tr><th>{{ delivery_invoices|length }} invoices</th><th>R{{ "%.2f"|format(delivery.invoice_total) }}</th></tr></tfoot>
+    </table>
+    {% endif %}
+    {% if delivery.status == 'open' %}
+    <form method="POST" action="{{ url_for('receive') }}" class="inv-add-form">
+        <input type="hidden" name="action" value="add_invoice">
+        <input type="hidden" name="delivery_id" value="{{ delivery._id|string }}">
+        <strong>Another invoice for this delivery?</strong>
+        <input name="invoice_number" placeholder="Invoice number" required aria-label="Invoice number">
+        <input name="invoice_total" type="number" step="0.01" min="0" placeholder="Amount (R)" required aria-label="Invoice amount">
+        <button type="submit">Add Invoice</button>
+    </form>
+    {% endif %}
+</div>
+{% endif %}
 
 {% if order_summary and order_summary.invoice_count %}
 <h3>Order {{ order_summary.order_number }}</h3>
@@ -129,12 +170,12 @@ opened delivery. Check the paperwork.</p>
 {% endif %}
 {% endif %}
 
-<h3>This Invoice vs Goods Received</h3>
+<h3>{% if delivery_invoices|length > 1 %}These {{ delivery_invoices|length }} Invoices{% else %}This Invoice{% endif %} vs Goods Received</h3>
 <div class="table-scroll"><table>
     <thead><tr><th>Document</th><th>Total</th><th>Compared With</th><th>Difference</th><th>Status</th></tr></thead>
     <tbody>
         <tr class="{{ recon.goods_class }}">
-            <td>Invoice {{ delivery.invoice_number }}</td>
+            <td>{% if delivery_invoices|length > 1 %}Invoices {{ delivery.invoice_number }} (together){% else %}Invoice {{ delivery.invoice_number }}{% endif %}</td>
             <td>R{{ "%.2f"|format(delivery.invoice_total) }}</td>
             <td>Goods received R{{ "%.2f"|format(recon.goods_value) }}</td>
             <td>{{ recon.goods_diff_label }}</td>
@@ -315,9 +356,18 @@ deliveries can be open at the same time.</p>
         <div><label>Order Number:</label><input name="order_number" required></div>
         <div><label>Order Total (R):</label>
             <input name="order_total" type="number" step="0.01" min="0" required></div>
-        <div><label>Invoice Number:</label><input name="invoice_number" required></div>
-        <div><label>Invoice Total (R):</label>
-            <input name="invoice_total" type="number" step="0.01" min="0" required></div>
+        <div class="inv-block">
+            <label>Invoices:</label>
+            <div id="inv_rows">
+                <div class="inv-row">
+                    <input name="invoice_number" placeholder="Invoice number" required aria-label="Invoice number">
+                    <input name="invoice_total" type="number" step="0.01" min="0" placeholder="Amount (R)" required aria-label="Invoice amount">
+                    <button type="button" class="inv-del" title="Remove this invoice" hidden>&times;</button>
+                </div>
+            </div>
+            <button type="button" id="inv_add" class="inv-add">+ Add invoice</button>
+            <span id="inv_sum" class="inv-sum"></span>
+        </div>
         <div><label>Received By:</label><input name="stock_receiver" value="{{ current_user }}" required></div>
         <div><label>Note (optional):</label><input name="note" type="text"></div>
     </div>
@@ -582,5 +632,38 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 });
+</script>
+<script>
+// Open a delivery with several invoices: each "+ Add invoice" adds a row,
+// and the running total shows what they come to together.
+(function () {
+    var box = document.getElementById('inv_rows');
+    if (!box) return;
+    var sum = document.getElementById('inv_sum');
+    function refresh() {
+        var rows = box.querySelectorAll('.inv-row'), total = 0, n = 0;
+        rows.forEach(function (r) {
+            var v = parseFloat(r.querySelector('[name=invoice_total]').value);
+            if (!isNaN(v)) { total += v; n += 1; }
+            r.querySelector('.inv-del').hidden = rows.length < 2;
+        });
+        sum.textContent = rows.length > 1 ? (rows.length + ' invoices, R' + total.toFixed(2) + ' together') : '';
+    }
+    document.getElementById('inv_add').addEventListener('click', function () {
+        var row = box.querySelector('.inv-row').cloneNode(true);
+        row.querySelectorAll('input').forEach(function (i) { i.value = ''; });
+        box.appendChild(row);
+        refresh();
+        row.querySelector('input').focus();
+    });
+    box.addEventListener('click', function (e) {
+        if (e.target.classList.contains('inv-del') && box.children.length > 1) {
+            e.target.closest('.inv-row').remove();
+            refresh();
+        }
+    });
+    box.addEventListener('input', refresh);
+    refresh();
+})();
 </script>
 {% endblock %}

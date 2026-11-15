@@ -2052,6 +2052,51 @@ def _delivery_goods_value(transactions: Collection, delivery_id: Any) -> float:
                                  {'_id': 0, 'quantity': 1, 'price': 1, 'line_value': 1}))
 
 
+def _delivery_invoices(d: Doc) -> list[Doc]:
+    """A delivery's invoices: [{'number', 'total'}]. One consignment can come
+    with several invoices; a delivery opened before that was possible holds
+    its one invoice in invoice_number / invoice_total."""
+    if d.get('invoices'):
+        return list(d['invoices'])
+    if d.get('invoice_number') or d.get('invoice_total'):
+        return [{'number': d.get('invoice_number') or '', 'total': d.get('invoice_total', 0) or 0}]
+    return []
+
+
+def _invoice_fields(invoices: list[Doc]) -> Doc:
+    """What a delivery stores for its invoices. Besides the list, the numbers
+    joined and the amounts added up are kept in invoice_number / invoice_total,
+    so the three-way match, the order roll-up, the lines (which carry the
+    invoice number) and every report read a multi-invoice delivery as one."""
+    return {'invoices': invoices,
+            'invoice_number': ', '.join(i['number'] for i in invoices),
+            'invoice_total': round(sum(i['total'] for i in invoices), 2)}
+
+
+def _read_invoices(numbers: list[str], totals: list[str]) -> list[Doc]:
+    """Invoice rows from a form, checked. Blank rows are skipped; a row with
+    only one of number and amount, a bad amount, or a number twice is refused."""
+    out: list[Doc] = []
+    for num, tot in zip(numbers, totals):
+        num, tot = (num or '').strip(), (tot or '').strip()
+        if not num and not tot:
+            continue
+        if not num or not tot:
+            raise ValueError('each invoice needs both its number and its amount')
+        try:
+            amount = float(tot)
+        except ValueError:
+            raise ValueError(f'the amount of invoice {num} is not a number')
+        if amount < 0:
+            raise ValueError(f'the amount of invoice {num} cannot be negative')
+        if any(i['number'].lower() == num.lower() for i in out):
+            raise ValueError(f'invoice {num} is listed twice')
+        out.append({'number': num, 'total': round(amount, 2)})
+    if not out:
+        raise ValueError('add at least one invoice')
+    return out
+
+
 def _order_rollup(deliveries: Collection, transactions: Collection, order_number: str | None) -> Doc | None:
     """NEW (Multiple invoices per order): one purchase order is normally
     fulfilled across several part-deliveries, each with its own invoice. The
@@ -2075,7 +2120,8 @@ def _order_rollup(deliveries: Collection, transactions: Collection, order_number
     outstanding = order_total - invoiced
     return {
         'order_number': order_number, 'order_total': order_total,
-        'invoice_count': len(sibs), 'invoiced': invoiced, 'goods': goods,
+        'invoice_count': sum(len(_delivery_invoices(d)) or 1 for d in sibs),
+        'invoiced': invoiced, 'goods': goods,
         'outstanding': outstanding,
         'over_invoiced': invoiced - order_total > 0.005,
         'fully_invoiced': abs(outstanding) < 0.01,
@@ -2204,13 +2250,15 @@ def receive() -> ResponseReturnValue:
             if action == 'open':
                 try:
                     reference = f"DEL-{datetime.utcnow().strftime('%Y%m%d')}-{uuid4().hex[:4].upper()}"
+                    # One consignment may come with several invoices.
+                    invoices = _read_invoices(request.form.getlist('invoice_number'),
+                                              request.form.getlist('invoice_total'))
                     new_id = deliveries.insert_one({
                         'reference': reference,
                         'supplier': request.form['supplier'].strip(),
                         'order_number': request.form['order_number'].strip(),
                         'order_total': float(request.form['order_total']),
-                        'invoice_number': request.form['invoice_number'].strip(),
-                        'invoice_total': float(request.form['invoice_total']),
+                        **_invoice_fields(invoices),
                         'stock_receiver': request.form['stock_receiver'].strip(),
                         'note': (request.form.get('note') or '').strip(),
                         'status': 'open',
@@ -2219,12 +2267,47 @@ def receive() -> ResponseReturnValue:
                         'closed_by': None, 'closed_at': None,
                     }).inserted_id
                     write_audit_entry('CREATE', 'delivery', reference,
-                                      f'Delivery {reference} opened by {current_user}')
-                    flash(f'Delivery {reference} opened.')
+                                      f'Delivery {reference} opened by {current_user} with '
+                                      + '; '.join(f"invoice {i['number']} R{i['total']:.2f}"
+                                                  for i in invoices))
+                    flash(f'Delivery {reference} opened'
+                          + (f' with {len(invoices)} invoices, R{sum(i["total"] for i in invoices):.2f} in all.'
+                             if len(invoices) > 1 else '.'))
                     return redirect(url_for('receive', delivery_id=str(new_id)))
                 except (ValueError, KeyError) as e:
                     flash(f'Invalid delivery details: {e}')
                     return redirect(url_for('receive'))
+
+            if action == 'add_invoice':
+                # An invoice that turns up after the delivery was opened.
+                d = _load_delivery(deliveries, request.form.get('delivery_id'))
+                if not d:
+                    flash('Delivery not found.')
+                    return redirect(url_for('receive'))
+                inv_back = url_for('receive', delivery_id=str(d['_id']))
+                if d['status'] != 'open':
+                    flash(f"Delivery {d['reference']} is closed, so no invoice can be added.")
+                    return redirect(inv_back)
+                inv_have = _delivery_invoices(d)
+                try:
+                    inv_more = _read_invoices(request.form.getlist('invoice_number'),
+                                          request.form.getlist('invoice_total'))
+                    for inv in inv_more:
+                        if any(h['number'].lower() == inv['number'].lower() for h in inv_have):
+                            raise ValueError(f"invoice {inv['number']} is already on this delivery")
+                except ValueError as e:
+                    flash(f'Invoice not added: {e}.')
+                    return redirect(inv_back)
+                inv_fields = _invoice_fields(inv_have + inv_more)
+                deliveries.update_one({'_id': d['_id']}, {'$set': inv_fields})
+                # Lines already received carry the invoice number; keep them in step.
+                transactions.update_many({'type': 'receive', 'delivery_id': str(d['_id'])},
+                                         {'$set': {'invoice_number': inv_fields['invoice_number']}})
+                write_audit_entry('UPDATE', 'delivery', d['reference'],
+                                  'invoice added: ' + '; '.join(f"{i['number']} R{i['total']:.2f}" for i in inv_more))
+                flash(f"Invoice {', '.join(i['number'] for i in inv_more)} added. "
+                      f"{len(inv_fields['invoices'])} invoices, R{inv_fields['invoice_total']:.2f} in all.")
+                return redirect(inv_back)
 
             if action == 'line':
                 d = _load_delivery(deliveries, request.form.get('delivery_id'))
@@ -2457,6 +2540,7 @@ def receive() -> ResponseReturnValue:
             search=search, rx_data=rx_data,
             current_user=session['user']['name'],
             delivery=delivery, delivery_lines=delivery_lines, recon=recon,
+            delivery_invoices=_delivery_invoices(delivery) if delivery else [],
             deliveries=delivery_rows, order_summary=order_summary,
             pager=pager, window_defaulted=window_defaulted, unit='receipts',
             upload_draft=upload_draft,
