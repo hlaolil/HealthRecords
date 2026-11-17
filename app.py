@@ -10149,6 +10149,13 @@ def stock_take() -> ResponseReturnValue:
                         by_row[int(k[5:])] = str(form.get(k) or '')
                 if not by_row:
                     by_row = dict(enumerate(request.form.getlist('med_name')))
+                # Rows that are only a tick come as one list of names, one
+                # per line (see the page's script), so ticking a whole
+                # sheet stays a small request. A row sent in full as well
+                # is handled with its row.
+                sent_rows = set(by_row.values())
+                tick_only = [n.strip() for n in str(form.get('agreed') or '').splitlines()
+                             if n.strip() and n.strip() not in sent_rows]
                 names = list(by_row.values())
                 posted = agreed = short = over = skipped = 0
                 details_only = detail_changes = bad_dates = confirmed = 0
@@ -10218,6 +10225,13 @@ def stock_take() -> ResponseReturnValue:
                     else:
                         over += 1
 
+                if tick_only:
+                    n_ok, n_missing = _record_agreed_many(medications, counts_col, st,
+                                                          tick_only, current_user)
+                    posted += n_ok
+                    agreed += n_ok
+                    confirmed += n_ok
+                    skipped += len(n_missing)
                 if posted:
                     msg = (f'{posted} count(s) posted to {st["reference"]}: '
                            f'{agreed} agreed, {short} short, {over} over.')
@@ -10387,6 +10401,25 @@ def stock_take() -> ResponseReturnValue:
                 rows_out = [r for r in sheet if r['group'] == grp] if grp in labels else sheet
                 title = labels.get(grp, 'Count sheet')
                 slug = ('-' + title.lower().replace(' ', '-')) if grp in labels else ''
+                if request.values.get('format') == 'csv':
+                    # The same sheet as plain CSV, for the NMC Stock Take phone
+                    # app: it imports this, counts item by item, and exports
+                    # the same columns back for the upload here. Expiry is
+                    # written dd/mm/yyyy, the way the app and the upload read it.
+                    out = io.StringIO()
+                    w = csv.writer(out)
+                    w.writerow(['Code', 'Medication', 'On system', 'Physical count',
+                                'Expiry date', 'Batch', 'Note', 'Group'])
+                    for r in rows_out:
+                        exp = _expiry_iso(r['expiry']) if r['expiry'] else ''
+                        w.writerow([r['code'] or '', r['name'], r['balance'], '',
+                                    datetime.strptime(exp, '%Y-%m-%d').strftime('%d/%m/%Y') if exp else '',
+                                    r['batch'] or '', '', labels.get(r['group'], '')])
+                    resp = make_response(out.getvalue().encode('utf-8-sig'))
+                    resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+                    resp.headers['Content-Disposition'] = (
+                        f'attachment; filename="{active["reference"]}-count-sheet{slug}.csv"')
+                    return resp
                 return _xlsx_download(
                     f"{active['reference']}-count-sheet{slug}.xlsx", title,
                     ['Code', 'Medication', 'On system', 'Physical count', 'Expiry date', 'Batch', 'Note'],
@@ -10436,6 +10469,55 @@ def stock_take() -> ResponseReturnValue:
             active=None, sessions=[], counts=[], med_names=[], uncounted=[],
             agreed_count=0, issued_not_recorded=0, recorded_not_issued=0,
         ), 500
+
+
+def _record_agreed_many(medications: Collection, counts_col: Collection, st: Doc,
+                        names: list[str], user: str) -> tuple[int, list[str]]:
+    """Record many "shelf agrees with the system" ticks in a few requests.
+
+    The same line _record_count writes for a tick with nothing else on the
+    row, but for a whole sheet at once. Ticking every row of a long sheet
+    used to send each row in full and save each tick with its own three
+    database requests: the request was too big for Vercel, and the saving
+    would have run past its time limit. Here the balances are read in one
+    query, the lines go in with one insert, and the audit gets one entry.
+    A tick moves no stock, so nothing is posted to the ledger.
+
+    Items already counted in this stock take are left alone, so pressing
+    Post Counts twice does not confirm anything twice. Returns how many were
+    recorded and the names not found.
+    """
+    wanted = list(dict.fromkeys(n for n in names if n))
+    if not wanted:
+        return 0, []
+    sid = str(st['_id'])
+    done = set(counts_col.distinct('med_name', {'stock_take_id': sid,
+                                                'counted': {'$ne': None}}))
+    found = {m['name']: m for m in medications.find(
+        {'name': {'$in': wanted}}, {'_id': 0, 'name': 1, 'balance': 1})}
+    missing = [n for n in wanted if n not in found]
+    now = datetime.utcnow()
+    lines = []
+    for n in wanted:
+        if n in found and n not in done:
+            bal = found[n].get('balance', 0)
+            lines.append({
+                'stock_take_id': sid, 'reference': st['reference'],
+                'med_name': n, 'system_balance': bal, 'counted': bal,
+                'variance': 0, 'discrepancy_type': classify_variance(0),
+                'note': '', 'counted_by': user, 'timestamp': now,
+                'method': 'confirmed'})
+    if lines:
+        counts_col.insert_many(lines)
+        write_audit_entry('UPDATE', 'stock_take_count', f"{st['reference']} / {len(lines)} item(s)",
+                          f'confirmed: shelf agrees with the system for {len(lines)} item(s): '
+                          + _brief([x['med_name'] for x in lines], 10))
+    if missing:
+        write_app_warning(
+            'medication_not_found',
+            f'{len(missing)} ticked medication(s) not found during stock take {st["reference"]}.',
+            {'med_names': missing[:50], 'stock_take': st['reference']})
+    return len(lines), missing
 
 
 def _record_count(medications: Collection, transactions: Collection,

@@ -27,6 +27,7 @@
 .st-downloads { font-size: 13px; margin: -4px 0 12px; }
 .st-downloads ul { list-style: none; padding: 0; margin: 6px 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
 .st-n { color: #666; }
+.st-csv { font-size: 11px; border: 1px solid #0056b3; border-radius: 8px; padding: 0 5px; margin-left: 3px; text-decoration: none; }
 .st-groups { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
 #st_sheet_form .st-groups button { padding: 5px 11px; font-size: 13px; margin: 0; width: auto;
     min-height: 0; border-radius: 14px; background: #fff; color: #0056b3; border: 1px solid #0056b3;
@@ -132,12 +133,15 @@ ticking.</p>
     <ul>
     {% for g, label in count_groups if group_counts[g] %}
         <li><a href="{{ url_for('stock_take', stock_take_id=active._id|string, download='sheet', group=g) }}">{{ label }}</a>
-            <span class="st-n">{{ group_counts[g] }}</span></li>
+            <span class="st-n">{{ group_counts[g] }}</span>
+            <a class="st-csv" href="{{ url_for('stock_take', stock_take_id=active._id|string, download='sheet', group=g, format='csv') }}" title="For the NMC Stock Take phone app">CSV</a></li>
     {% endfor %}
         <li><a href="{{ url_for('stock_take', stock_take_id=active._id|string, download='sheet') }}">Everything on one sheet</a>
-            <span class="st-n">{{ sheet|length }}</span></li>
+            <span class="st-n">{{ sheet|length }}</span>
+            <a class="st-csv" href="{{ url_for('stock_take', stock_take_id=active._id|string, download='sheet', format='csv') }}" title="For the NMC Stock Take phone app">CSV</a></li>
     </ul>
-    <small>Upload each one when it is counted. The uploads add up, so you can post them together or one at a time.</small>
+    <small><strong>CSV</strong> is for the NMC Stock Take phone app: open it there, count, and upload the file it gives back here.
+    Upload each one when it is counted. The uploads add up, so you can post them together or one at a time.</small>
 </div>
 {% if upload_draft %}
 <div class="message partial" style="font-size:14px;">
@@ -214,6 +218,7 @@ ticking.</p>
     </table></div>
     {% if uncounted %}
     <div class="form-buttons">
+        <input type="hidden" name="agreed" id="st_agreed" value="">
         <input type="submit" value="Post Counts">
     </div>
     {% endif %}
@@ -264,18 +269,39 @@ function stRowUntouched(tr) {
     }
     return true;
 }
+// A row whose only entry is the "agrees" tick: no count, expiry and batch
+// as on file, no note.
+function stRowTickOnly(tr) {
+    var box = tr.querySelector('input[name^="agree__"]');
+    if (!box || !box.checked || !tr.querySelector('input[name^="med__"]')) return false;
+    box.checked = false;
+    var blank = stRowUntouched(tr);
+    box.checked = true;
+    return blank;
+}
 document.addEventListener('DOMContentLoaded', function () {
     var form = document.getElementById('st_sheet_form');
     if (!form) return;
     form.addEventListener('submit', function () {
+        var ticked = [];
         form.querySelectorAll('#st_sheet tbody tr').forEach(function (tr) {
-            if (!stRowUntouched(tr)) return;
+            if (stRowTickOnly(tr)) {
+                // Only the name travels, in one list: a whole sheet of
+                // ticks is then a small request.
+                ticked.push(tr.querySelector('input[name^="med__"]').value);
+            } else if (!stRowUntouched(tr)) {
+                return;
+            }
             tr.querySelectorAll('input').forEach(function (inp) { inp.disabled = true; });
         });
+        var list = document.getElementById('st_agreed');
+        if (list) list.value = ticked.join('\n');
     });
 });
 // Coming back with the Back button, switch every row on again.
 window.addEventListener('pageshow', function () {
+    var list = document.getElementById('st_agreed');
+    if (list) list.value = '';
     document.querySelectorAll('#st_sheet tbody input:disabled').forEach(function (inp) {
         inp.disabled = false;
     });
