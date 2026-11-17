@@ -382,6 +382,9 @@ may be left blank if you only need to fix an expiry date or a batch number
 <h3 id="counted">Counted Items ({{ counts|length }})</h3>
 {% if counts %}
 <form method="GET" action="{{ url_for('stock_take') }}" style="display:inline">
+    {# A GET form replaces the whole query string, so the stock take must
+       travel with it or the button lands back on the list. #}
+    <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
     <button type="submit" name="export" value="csv">Download CSV</button>
     <span style="font-size:13px;">&nbsp;the count sheet as posted so far,
     with the variance against the system.</span>
