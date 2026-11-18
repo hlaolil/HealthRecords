@@ -75,7 +75,7 @@ print('\n--- 3. The spellings that were wrong ---')
 WAS_WRONG = {
     'Chelazion': 'Chalazion',
     'Rynaulds phenomenon': "Raynaud's phenomenon",
-    'Myocardiac infaction/ ACS': 'Acute myocardial infarction',
+    'Myocardiac infaction/ ACS': 'Acute myocardial infarction (MI)',
     'Circumcission': 'Circumcision',
     'Ligmament sprain': 'Ligament sprain',
     'Dysfunctional uterine beeding': 'Dysfunctional uterine bleeding',
@@ -90,7 +90,7 @@ WAS_WRONG = {
     'Secondary ammenorrhoea': 'Secondary amenorrhoea',
     'Epididimorchitis': 'Epididymo-orchitis',
     'Acute urinary retension': 'Acute urinary retention',
-    'Kaposis Sarcoma': "Kaposi's sarcoma",
+    'Kaposis Sarcoma': "Kaposi's sarcoma (KS)",
     'Illio-tibial band syndrome': 'Iliotibial band syndrome',
     'Hallus valgus deformity': 'Hallux valgus deformity',
 }
@@ -132,14 +132,14 @@ for typed, expect in BY_NAME.items():
 
 print('\n--- 6. And by the everyday word for it ---')
 PLAIN = {
-    'shingles': 'Herpes zoster', 'nosebleed': 'Epistaxis',
+    'shingles': 'Herpes zoster (shingles)', 'nosebleed': 'Epistaxis',
     'hives': 'Urticaria', 'ringworm': 'Dermatophytosis [tinea]',
     'piles': 'Haemorrhoids',
-    'heart attack': 'Acute myocardial infarction',
+    'heart attack': 'Acute myocardial infarction (MI)',
     'bunion': 'Hallux valgus deformity', 'reflux': 'Gastro-oesophageal reflux disease [GERD]',
     'sore throat': 'Acute tonsillitis',
     'car accident': 'Injury (RTA)', 'pins and needles': 'Paraesthesia',
-    'high blood pressure': 'HTN', 'back pain': 'Mechanical low back pain',
+    'high blood pressure': 'HTN', 'back pain': 'Mechanical low back pain (LBP)',
 }
 for typed, expect in PLAIN.items():
     got = A._diagnosis_matches(typed)
@@ -202,7 +202,7 @@ print('\n--- 7d. Two diseases no longer share one line ---')
 # The worst was Crohn's and ulcerative colitis filed under irritable bowel.
 SPLITS = {
     'Inflammatory bowel disease / IBS':
-        ('Inflammatory bowel disease', 'Irritable bowel syndrome'),
+        ('Inflammatory bowel disease', 'Irritable bowel syndrome (IBS)'),
     'Epilepsy / seizure disorder': ('Epilepsy', 'Seizure, unspecified'),
     'TIA / CVA': ('TIA', 'CVA'),
     'PUD / gastritis': ('PUD', 'Gastritis'),
@@ -238,8 +238,8 @@ FROM_STOCK = {
     'Anti Snake Bite Serum': ('snake', 'Snake bite'),
     'Antirubbies': ('rabies', 'Rabies exposure'),
     'Tetanus Toxoid Vaccine': ('tetanus', 'Tetanus prophylaxis'),
-    'Combined Pill and implants': ('contraception', 'Family planning'),
-    'Emergency Pill': ('morning after', 'Emergency contraception'),
+    'Combined Pill and implants': ('contraception', 'Family planning (FP)'),
+    'Emergency Pill': ('morning after', 'Emergency contraception (EC)'),
     'Naloxone': ('overdose', 'Overdose'),
     'Activated Charcoal': ('poisoning', 'Poisoning'),
     'Adrenalin injection': ('anaphylaxis', 'Anaphylaxis'),
@@ -254,7 +254,7 @@ for med, (typed, expect) in FROM_STOCK.items():
 
 print('\n--- 7f. A mine has its own conditions ---')
 OCCUPATIONAL = {
-    'hearing loss': 'Noise-induced hearing loss',
+    'hearing loss': 'Noise-induced hearing loss (NIHL)',
     'silicosis': 'Pneumoconiosis',
     'heat exhaustion': 'Heat exhaustion',
     'arc eye': 'Welding flash (arc eye)',

@@ -11092,13 +11092,20 @@ def _diagnosis_matches(query: str, limit: int = DIAGNOSIS_SUGGESTION_LIMIT) -> l
     scored = []
     for label in DIAGNOSES_OPTIONS:
         best = None
+        # The short form in brackets - "Hypertension (HTN)" - is what the
+        # clinic types, so it ranks with the start of the name, and typed in
+        # full it puts its entry first.
         terms = [(label.lower(), 0)] + [
+            (a.lower(), -1) for a in re.findall(r'\(([A-Za-z0-9]{2,6})\)', label)] + [
             (t, 1) for t in DIAGNOSIS_SEARCH_TERMS.get(label, ())]
         for text, offset in terms:
             if text == q:
                 # Typed exactly - the name, its short form ("tb") or an old
                 # name ("abscess"): that entry first, whatever else matches.
-                rank, offset = -1, 0
+                # The bracketed short form typed in full beats even that:
+                # "mus" is Male urethritis syndrome (MUS), not the STI
+                # entry that lists MUS among its search words.
+                rank, offset = (-2, 0) if offset < 0 else (-1, 0)
             elif text.startswith(q):
                 rank = 0
             elif re.search(r'\b' + re.escape(q), text):
@@ -11107,7 +11114,7 @@ def _diagnosis_matches(query: str, limit: int = DIAGNOSIS_SUGGESTION_LIMIT) -> l
                 rank = 2
             else:
                 continue
-            rank += offset
+            rank += max(offset, 0)
             best = rank if best is None else min(best, rank)
         if best is not None:
             # Equal matches: primary-care conditions first - they are what a
