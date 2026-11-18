@@ -10,6 +10,14 @@ Built 14 November 2026 from two sources:
     the clinic sees that the STG does not cover (occupational health, minor
     injuries, screening results). Those keep their place.
 
+Extended 18 November 2026 with conditions the clinic sees that neither
+covered: hypertensive urgency and emergency, injuries by cause (assault,
+sexual assault, domestic violence) and by site (fractures, sprains, burns by
+degree), and common primary-care complaints. Entries that joined two
+separable conditions ("Leukaemia or lymphoma") were split; see RETIRED.
+Names that still join two ("Nausea and vomiting", "Corns and callosities")
+are single ICD-10 codes, so they stay as one.
+
 Level of care
   'Primary'   the STG gives a treatment at community or health-centre level -
               primary health care can manage it.
@@ -31,6 +39,13 @@ P, S = 'Primary', 'Secondary'
 DIAGNOSES = [
     # --- Cardiovascular (STG 1) ---------------------------------------------
     ('Hypertension', 'I10', P, '1.1', ['htn', 'high blood pressure', 'bp']),
+    # ICD-10 (the WHO edition medical aids use) has no separate code for an
+    # urgency or an emergency: both are I10, told apart by the name here.
+    ('Hypertensive urgency', 'I10', P, None, ['hypertensive crisis', 'severe hypertension',
+                                              'very high blood pressure', 'uncontrolled bp']),
+    ('Hypertensive emergency', 'I10', S, None, ['hypertensive crisis', 'malignant hypertension',
+                                                'hypertensive encephalopathy']),
+    ('Hypertensive heart disease', 'I11.9', P, None, ['hhd']),
     ('Acute rheumatic fever', 'I00', P, '1.2', ['arf', 'rheumatic fever']),
     ('Valvular heart disease', 'I38', S, '1.3', ['rheumatic heart disease', 'valve']),
     ('Congestive cardiac failure (CCF)', 'I50.0', P, '1.4', ['ccf', 'heart failure', 'chf']),
@@ -45,9 +60,14 @@ DIAGNOSES = [
                                                         'venous thromboembolism']),
     ('Peripheral vascular disease', 'I73.9', S, None, ['pvd', 'claudication']),
     ("Raynaud's phenomenon", 'I73.0', P, None, ['raynaud']),
-    ('Venous insufficiency', 'I87.2', P, None, ['varicose veins']),
+    ('Venous insufficiency', 'I87.2', P, None, []),
     ('Hypercholesterolaemia', 'E78.0', P, None, ['high cholesterol', 'dyslipidaemia']),
     ('Hypertriglyceridaemia', 'E78.1', P, None, ['triglycerides']),
+    ('Chest pain', 'R07.4', P, None, ['chest discomfort']),
+    ('Pulmonary embolism', 'I26.9', S, None, ['pe', 'lung clot']),
+    ('Superficial thrombophlebitis', 'I80.0', P, None, ['phlebitis']),
+    ('Varicose veins', 'I83.9', P, None, ['varicose']),
+    ('Peripheral oedema', 'R60.0', P, None, ['swollen legs', 'leg swelling', 'swollen feet', 'edema']),
 
     # --- Nervous system and headache (STG 2) --------------------------------
     ('Headache, unspecified', 'R51', P, '2.1', ['headache', 'headache (tension, migraine, cluster etc)']),
@@ -65,6 +85,10 @@ DIAGNOSES = [
     ('Sciatica', 'M54.3', P, None, []),
     ('Syncope', 'R55', P, None, ['fainting', 'faint', 'collapse']),
     ('Chronic fatigue syndrome', 'G93.3', P, None, ['fatigue']),
+    ("Bell's palsy", 'G51.0', P, None, ['facial palsy', 'facial nerve palsy', 'bells palsy']),
+    ('Febrile convulsion', 'R56.0', P, None, ['febrile seizure', 'febrile fit']),
+    ('Carpal tunnel syndrome', 'G56.0', P, None, ['cts', 'numb hand']),
+    ('Restless legs syndrome', 'G25.8', P, None, ['restless legs']),
 
     # --- Oral and dental (STG 3) --------------------------------------------
     ('Oral candidiasis (thrush)', 'B37.0', P, '3.1', ['thrush', 'candida', 'oral thrush',
@@ -78,8 +102,8 @@ DIAGNOSES = [
     ('Periodontitis', 'K05.3', P, '3.6', ['periodontal abscess']),
     ('Dry socket', 'K10.3', S, '3.7', ['alveolar osteitis']),
     ('Stomatitis', 'K12.1', P, '3.8', []),
-    ('Aphthous ulcer and other oral lesions', 'K12.0', P, '3.9',
-     ['mouth ulcer', 'canker sore', 'aphthous']),
+    ('Aphthous ulcer', 'K12.0', P, '3.9', ['mouth ulcer', 'canker sore', 'aphthous',
+                                         'aphthous ulcer and other oral lesions']),
     ("Ludwig's angina", 'K12.2', P, '3.10', ['floor of mouth']),
     ('Angular cheilitis', 'K13.0', P, '3.11', ['cracked lips corner']),
     ('Herpes labialis (cold sore)', 'B00.1', P, '3.12', ['cold sore', 'fever blister']),
@@ -89,7 +113,7 @@ DIAGNOSES = [
     ('Toothache', 'K08.8', P, None, ['tooth pain']),
     ('Loose teeth', 'K08.8', P, None, []),
     ('Hairy leucoplakia', 'K13.3', P, None, ['oral hairy leukoplakia']),
-    ('Oral lesion(s)', 'K13.7', P, None, ['mouth lesion']),
+    ('Oral lesion(s)', 'K13.7', P, None, ['mouth lesion', 'aphthous ulcer and other oral lesions']),
 
     # --- Ear, nose and throat (STG 4) ---------------------------------------
     ('Otitis externa', 'H60.9', P, '4.1', ["swimmer's ear", 'ear canal infection']),
@@ -106,14 +130,19 @@ DIAGNOSES = [
     ('Epistaxis', 'R04.0', P, '4.8', ['nosebleed', 'nose bleed']),
     ('Foreign body in ear', 'T16', P, '4.9', ['foreign body ear']),
     ('Foreign body in nose', 'T17.1', P, '4.9', []),
-    ('Acute tonsillitis and pharyngitis', 'J03.9', P, '4.10', ['sore throat', 'tonsils',
-                                                              'pharyngitis', 'tonsillitis']),
+    ('Acute tonsillitis', 'J03.9', P, '4.10', ['sore throat', 'tonsils', 'tonsilitis',
+                                             'acute tonsillitis and pharyngitis']),
+    ('Acute pharyngitis', 'J02.9', P, '4.10', ['sore throat', 'pharyngitis',
+                                              'acute tonsillitis and pharyngitis']),
     ('Peritonsillar abscess', 'J36', P, '4.11', ['quinsy']),
     ('Epiglottitis', 'J05.1', S, '4.12', []),
     ('Laryngitis', 'J04.0', P, '4.13.1', ['hoarse voice', 'lost voice']),
     ('Chronic laryngitis', 'J37.0', S, '4.13.2', []),
     ('Ear wax impaction', 'H61.2', P, None, ['cerumen', 'wax']),
     ('Tinnitus', 'H93.1', P, None, ['ringing ears']),
+    ('Foreign body in throat', 'T17.2', P, None, ['fish bone', 'stuck in throat']),
+    ('Chronic rhinitis', 'J31.0', P, None, ['runny nose', 'non-allergic rhinitis']),
+    ('Croup', 'J05.0', P, None, ['laryngotracheobronchitis', 'barking cough']),
     ('Nasal polyp', 'J33.9', S, None, []),
     ('Nasal lesion and infection', 'J34.0', P, None, ['nasal vestibulitis']),
     ('Septic nasal piercing', 'J34.0', P, None, ['piercing']),
@@ -134,6 +163,15 @@ DIAGNOSES = [
     ('Acute adrenal insufficiency (Addisonian crisis)', 'E27.2', S, '5.11', ['addison']),
     ("Cushing's syndrome", 'E24.9', S, '5.12', ['cushing']),
     ('Hormonal imbalance', 'E34.9', P, None, []),
+    ('Obesity', 'E66.9', P, None, ['overweight', 'weight management']),
+    ('Prediabetes', 'R73.0', P, None, ['impaired glucose tolerance', 'igt', 'borderline diabetes']),
+    ('Diabetic foot ulcer', 'E14.5', P, None, ['diabetic foot']),
+    ('Diabetic neuropathy', 'E14.4', P, None, ['diabetic feet numb']),
+    ('Goitre', 'E04.9', P, None, ['goiter', 'thyroid swelling']),
+    ('Hypokalaemia', 'E87.6', P, None, ['low potassium', 'hypokalemia']),
+    ('Hyponatraemia', 'E87.1', S, None, ['low sodium', 'hyponatremia']),
+    ('Vitamin D deficiency', 'E55.9', P, None, ['low vitamin d']),
+    ('Vitamin B12 deficiency', 'E53.8', P, None, ['b12']),
 
     # --- Eye (STG 6) --------------------------------------------------------
     ('Allergic conjunctivitis', 'H10.1', P, '6.1.1', ['itchy eyes', 'red eye']),
@@ -160,6 +198,10 @@ DIAGNOSES = [
     ('Pterygium', 'H11.0', P, None, []),
     ('Welding flash (arc eye)', 'H16.1', P, None, ['arc eye', 'photokeratitis']),
     ('Visual impairment, unspecified', 'H54.7', P, None, ['poor vision', 'blurred vision']),
+    ('Blepharitis', 'H01.0', P, None, ['eyelid inflammation']),
+    ('Refractive error', 'H52.7', P, None, ['short sight', 'long sight', 'glasses',
+                                           'presbyopia', 'reading glasses']),
+    ('Subconjunctival haemorrhage', 'H11.3', P, None, ['blood in the eye', 'bloodshot']),
 
     # --- Alimentary tract (STG 7) -------------------------------------------
     ('Diarrhoea', 'A09.9', P, '7.1', ['diarrhea', 'loose stools', 'runny tummy']),
@@ -197,6 +239,21 @@ DIAGNOSES = [
     ('Post-operative adhesions', 'K66.0', S, None, ['adhesions']),
     ('Faecal incontinence', 'R15', P, None, []),
     ('Hepatitis, unspecified', 'K75.9', S, None, ['hepatitis', 'jaundice']),
+    ('Hepatitis A', 'B15.9', P, None, ['hep a']),
+    ('Acute hepatitis B', 'B16.9', S, None, ['hep b']),
+    ('Chronic hepatitis B', 'B18.1', S, None, ['hep b', 'hbv']),
+    ('Liver cirrhosis', 'K74.6', S, None, ['cirrhosis']),
+    ('Alcoholic liver disease', 'K70.9', S, None, ['alcoholic hepatitis']),
+    ('Jaundice', 'R17', S, None, ['yellow eyes', 'icterus']),
+    ('Abdominal pain', 'R10.4', P, None, ['stomach ache', 'tummy pain', 'stomach pain']),
+    ('Cholecystitis', 'K81.9', S, None, ['gallbladder infection']),
+    ('Gallstones', 'K80.2', S, None, ['cholelithiasis', 'biliary colic']),
+    ('Inguinal hernia', 'K40.9', S, None, ['hernia', 'groin hernia']),
+    ('Umbilical hernia', 'K42.9', S, None, ['hernia', 'belly button hernia']),
+    ('Hiatus hernia', 'K44.9', P, None, ['hiatal hernia']),
+    ('Pinworm (threadworm)', 'B80', P, None, ['enterobiasis', 'threadworm', 'itchy bottom']),
+    ('Weight loss', 'R63.4', P, None, ['losing weight', 'abnormal weight loss']),
+    ('Pilonidal sinus', 'L05.9', P, None, ['pilonidal abscess', 'pilonidal cyst']),
     ('Dehydration', 'E86', P, None, ['dehydrated', 'fluid loss']),
 
     # --- Gynaecology and obstetrics (STG 8) ---------------------------------
@@ -232,6 +289,14 @@ DIAGNOSES = [
     ('Pelvic mass', 'R19.0', S, None, []),
     ('Breast lump', 'N63', S, None, []),
     ('Pregnancy', 'Z33', P, None, ['antenatal', 'anc']),
+    ('Antenatal care', 'Z34.9', P, None, ['anc', 'antenatal visit']),
+    ('Postnatal care', 'Z39.2', P, None, ['pnc', 'postpartum check']),
+    ('Hyperemesis gravidarum', 'O21.0', P, None, ['vomiting in pregnancy', 'morning sickness']),
+    ('Threatened miscarriage', 'O20.0', S, None, ['threatened abortion', 'bleeding in pregnancy']),
+    ('Lactational mastitis', 'O91.2', P, None, ['mastitis', 'breastfeeding breast infection']),
+    ('Atrophic vaginitis', 'N95.2', P, None, ['vaginal dryness']),
+    ('Bacterial vaginosis', 'N76.0', P, None, ['bv']),
+    ('Female infertility', 'N97.9', S, None, ['infertility', 'failure to conceive']),
 
     # --- Diseases of public health concern (STG 9) --------------------------
     ('Malaria', 'B54', S, '9.1', []),
@@ -259,6 +324,7 @@ DIAGNOSES = [
     ('Genital warts', 'A63.0', P, '10.7.6', ['condylomata']),
     ('Genital herpes', 'A60.9', P, '10.7', ['herpes genitalia']),
     ('Trichomoniasis', 'A59.9', P, '10.7.7', ['trichomonas']),
+    ('Gonorrhoea', 'A54.9', P, None, ['gonorrhea']),
     ('Vaginal candidiasis', 'B37.3', P, '10.7.8', ['vaginal thrush', 'yeast infection']),
     ('Septicaemia', 'A41.9', S, '10.9', ['sepsis']),
     ('Tetanus', 'A35', S, '10.10', ['lockjaw']),
@@ -267,12 +333,21 @@ DIAGNOSES = [
     ('TB meningitis', 'A17.0', S, '10.11.2', ['tbm']),
     ('Leprosy', 'A30.9', S, '10.12', ["hansen's disease"]),
     ('Typhoid fever', 'A01.0', P, '10.13', ['typhoid', 'enteric fever']),
+    ('Fever', 'R50.9', P, None, ['pyrexia', 'febrile', 'high temperature']),
+    ('Viral infection', 'B34.9', P, None, ['viral illness', 'virus']),
+    ('Mumps', 'B26.9', P, None, []),
+    ('Rubella', 'B06.9', P, None, ['german measles']),
+    ('Hand, foot and mouth disease', 'B08.4', P, None, ['hfmd']),
+    ('Infectious mononucleosis', 'B27.9', P, None, ['glandular fever', 'mono']),
+    ('Pertussis (whooping cough)', 'A37.9', P, None, ['whooping cough']),
     ('Worm infestation', 'B83.9', P, '10.15', ['worms', 'helminths', 'deworming']),
     ('Hookworm', 'B76.9', P, '10.15.2', []),
     ('HIV disease', 'B24', P, '10.16', ['hiv', 'aids', 'art', 'arv']),
     ('HIV post-exposure prophylaxis (PEP)', 'Z20.6', P, '10.16.1', ['pep', 'post hiv exposure',
                                                                    'needle stick']),
     ('HIV pre-exposure prophylaxis (PrEP)', 'Z29.8', P, '10.16.1', ['prep']),
+    ('TB preventive therapy (TPT)', 'Z29.2', P, None, ['tpt', 'ipt', 'isoniazid preventive therapy',
+                                                    'latent tb', '3hp']),
     ('Immune reconstitution inflammatory syndrome (IRIS)', 'D89.3', S, '10.17', ['iris']),
     ('HIV-associated vasculitis', 'B23.8', S, None, []),
     ("Kaposi's sarcoma", 'C46.9', S, None, ['ks']),
@@ -300,12 +375,22 @@ DIAGNOSES = [
     ('Spondylolisthesis', 'M43.1', S, None, []),
     ('Spinal abnormality', 'M43.9', S, None, []),
     ('Torticollis', 'M43.6', P, None, ['stiff neck', 'wry neck']),
-    ('Myalgia and muscle spasm', 'M79.1', P, None, ['myalgia', 'muscle pain', 'spasm', 'cramps']),
+    ('Myalgia', 'M79.1', P, None, ['muscle pain', 'myalgia and muscle spasm']),
+    ('Muscle spasm', 'R25.2', P, None, ['spasm', 'cramps', 'muscle cramp',
+                                        'myalgia and muscle spasm']),
     ('Bursitis', 'M71.9', P, None, []),
     ('Tendonitis', 'M77.9', P, None, ['tendinitis']),
     ('Tennis elbow', 'M77.1', P, None, ['lateral epicondylitis']),
     ("Golfer's elbow", 'M77.0', P, None, ['medial epicondylitis']),
     ('Plantar fasciitis', 'M72.2', P, None, ['heel pain']),
+    ('Neck pain', 'M54.2', P, None, ['cervicalgia', 'stiff neck']),
+    ('Frozen shoulder', 'M75.0', P, None, ['adhesive capsulitis']),
+    ('Rotator cuff syndrome', 'M75.1', P, None, ['shoulder pain', 'rotator cuff']),
+    ('Trigger finger', 'M65.3', P, None, []),
+    ("De Quervain's tenosynovitis", 'M65.4', P, None, ['de quervain', 'wrist tendon pain']),
+    ('Fibromyalgia', 'M79.7', P, None, []),
+    ('Ankylosing spondylitis', 'M45', S, None, []),
+    ('Systemic lupus erythematosus (SLE)', 'M32.9', S, None, ['sle', 'lupus']),
     ('Calcaneal spur', 'M77.3', P, None, ['heel spur', 'calcaneous spur']),
     ('Iliotibial band syndrome', 'M76.3', P, None, ['itbs']),
     ('Costochondritis', 'M94.0', P, None, ['chest wall pain']),
@@ -327,14 +412,22 @@ DIAGNOSES = [
     # --- Mental health and substance use (STG 13) ---------------------------
     ('Bipolar disorder', 'F31.9', P, '13.1', ['bipolar', 'mania']),
     ('Depressive disorder', 'F32.9', P, '13.2', ['depression', 'low mood']),
-    ('Suicidal ideation or self-harm', 'R45.8', P, '13.3', ['suicide', 'self harm', 'overdose intent']),
+    ('Suicidal ideation', 'R45.8', P, '13.3', ['suicide', 'suicidal thoughts',
+                                               'suicidal ideation or self-harm']),
+    # Self-harm has no "nature" code of its own: ICD-10 records what was done
+    # (the cut, the overdose) and adds X84 for the intent. X84 is that intent.
+    ('Self-harm', 'X84', P, '13.3', ['self harm', 'overdose intent', 'suicide attempt',
+                                     'attempted suicide', 'suicidal ideation or self-harm']),
     ('Schizophrenia', 'F20.9', P, '13.4', ['psychosis']),
     ('Epilepsy', 'G40.9', P, '13.5', ['fits', 'seizures']),
     ('Status epilepticus', 'G41.9', P, '17.6', []),
     ('Seizure, unspecified', 'R56.8', P, None, ['seizure', 'fit', 'convulsion']),
     ('Alcohol use disorder', 'F10.2', P, '13.6.1', ['alcoholism', 'alcohol dependence']),
     ('Alcohol intoxication', 'F10.0', P, '17.9.10', ['drunk', 'alcohol poisoning']),
-    ('Cannabis or stimulant use', 'F12.1', P, '13.6.2', ['dagga', 'marijuana', 'cocaine']),
+    ('Cannabis use', 'F12.1', P, '13.6.2', ['dagga', 'marijuana', 'weed',
+                                            'cannabis or stimulant use']),
+    ('Stimulant use', 'F15.1', P, '13.6.2', ['cocaine', 'methamphetamine', 'tik', 'nyaope',
+                                             'cannabis or stimulant use']),
     ('Tobacco dependence', 'F17.2', P, '13.6.3', ['smoking', 'nicotine']),
     ('Opioid withdrawal', 'F11.3', P, '13.6.4', []),
     ('Dementia', 'F03', P, '13.7', ['memory loss']),
@@ -343,6 +436,8 @@ DIAGNOSES = [
     ('Anxiety disorder', 'F41.9', P, '13.10', ['anxiety']),
     ('Panic disorder', 'F41.0', P, '13.10', ['panic attack']),
     ('Acute stress disorder', 'F43.0', P, None, ['stress']),
+    ('Post-traumatic stress disorder (PTSD)', 'F43.1', P, None, ['ptsd', 'trauma']),
+    ('Adjustment disorder', 'F43.2', P, None, []),
     ('Bereavement reaction', 'Z63.4', P, None, ['grief', 'bereavement']),
     ('Psychosomatic disorder', 'F45.9', P, None, ['somatic']),
     ('Insomnia', 'G47.0', P, None, ["can't sleep", 'sleeplessness']),
@@ -350,6 +445,7 @@ DIAGNOSES = [
     ('Obstructive sleep apnoea', 'G47.3', S, None, ['osa', 'snoring']),
     ('Inhibited sexual desire', 'F52.0', P, None, ['low libido']),
     ('Erectile dysfunction', 'N48.4', P, None, ['ed', 'impotence']),
+    ('Male infertility', 'N46', S, None, ['infertility', 'low sperm count']),
 
     # --- Kidney and urinary (STG 14) ----------------------------------------
     ('Urinary tract infection (UTI)', 'N39.0', P, '14.1.1', ['uti', 'cystitis', 'burning urine']),
@@ -367,9 +463,16 @@ DIAGNOSES = [
     ('Urinary incontinence', 'R32', P, None, []),
     ('Kidney stone', 'N20.0', S, None, ['renal colic', 'calculus']),
     ('Bladder stone', 'N21.0', S, None, []),
-    ('Urethral stricture and bladder outlet obstruction', 'N35.9', S, None, ['stricture']),
+    ('Urethral stricture', 'N35.9', S, None, ['stricture',
+                                               'urethral stricture and bladder outlet obstruction']),
+    ('Bladder outlet obstruction', 'N32.0', S, None, ['boo',
+                                                      'urethral stricture and bladder outlet obstruction']),
     ('Drug-induced kidney injury', 'N14.1', S, None, []),
     ('Hydrocele', 'N43.3', S, None, []),
+    ('Haematuria', 'R31', P, None, ['blood in urine', 'hematuria']),
+    ('Testicular torsion', 'N44.0', S, None, ['torsion']),
+    ('Balanitis', 'N48.1', P, None, []),
+    ('Phimosis', 'N47', P, None, ['tight foreskin']),
     ('Circumcision', 'Z41.2', P, None, ['vmmc', 'circumcission']),
 
     # --- Respiratory (STG 15) -----------------------------------------------
@@ -385,7 +488,8 @@ DIAGNOSES = [
     ('Bronchiolitis', 'J21.9', P, '15.6', []),
     ('Lung cancer', 'C34.9', S, '15.7', ['respiratory neoplasm']),
     ('Pneumoconiosis', 'J64', S, '15.8', ['silicosis', 'dust lung']),
-    ('Empyema and lung abscess', 'J86.9', S, '15.9', ['empyema', 'lung abscess']),
+    ('Empyema', 'J86.9', S, '15.9', ['pyothorax', 'pus in the chest', 'empyema and lung abscess']),
+    ('Lung abscess', 'J85.2', S, '15.9', ['empyema and lung abscess']),
     ('Pleural effusion', 'J90', S, None, []),
     ('Pleurisy', 'R09.1', P, None, ['pleuritic pain']),
     ('ARDS', 'J80', S, None, ['acute respiratory distress syndrome']),
@@ -394,6 +498,10 @@ DIAGNOSES = [
     ('Mucus hypersecretion', 'R09.3', P, None, ['phlegm', 'sputum']),
     ('Medication-induced cough (ACE-I etc)', 'R05', P, None, ['enalapril cough', 'cough']),
     ('Hiccups', 'R06.6', P, None, []),
+    ('Cough', 'R05', P, None, ['coughing']),
+    ('Shortness of breath', 'R06.0', P, None, ['dyspnoea', 'dyspnea', 'sob', 'difficulty breathing']),
+    ('Haemoptysis', 'R04.2', S, None, ['coughing blood', 'hemoptysis']),
+    ('Pneumothorax', 'J93.9', S, None, ['collapsed lung']),
 
     # --- Skin (STG 16) ------------------------------------------------------
     ('Acne vulgaris', 'L70.0', P, '16.1', ['acne', 'pimples']),
@@ -420,6 +528,22 @@ DIAGNOSES = [
     ('Ingrown toenail', 'L60.0', P, None, []),
     ('Lymphadenitis', 'L04.9', P, None, ['swollen glands']),
     ('Ulcer, site unspecified', 'L98.4', P, None, ['ulcer', 'skin ulcer', 'leg ulcer']),
+    ('Onychomycosis (fungal nail)', 'B35.1', P, None, ['fungal nail', 'tinea unguium']),
+    ('Pityriasis versicolor', 'B36.0', P, None, ['tinea versicolor']),
+    ('Head lice', 'B85.0', P, None, ['lice', 'pediculosis']),
+    ('Contact dermatitis', 'L25.9', P, None, []),
+    ('Napkin dermatitis (nappy rash)', 'L22', P, None, ['nappy rash', 'diaper rash']),
+    ('Folliculitis', 'L73.9', P, None, ['shaving rash', 'razor bumps']),
+    ('Paronychia', 'L03.0', P, None, ['whitlow', 'nail fold infection']),
+    ('Infected wound', 'T79.3', P, None, ['wound sepsis', 'septic wound']),
+    ('Pressure ulcer', 'L89.9', P, None, ['bed sore', 'pressure sore']),
+    ('Sunburn', 'L55.9', P, None, []),
+    ('Pruritus', 'L29.9', P, None, ['itching', 'itchy skin']),
+    ('Molluscum contagiosum', 'B08.1', P, None, []),
+    ('Vitiligo', 'L80', P, None, []),
+    ('Keloid', 'L91.0', P, None, ['keloid scar']),
+    ('Alopecia', 'L65.9', P, None, ['hair loss']),
+    ('Hyperhidrosis', 'R61', P, None, ['excessive sweating']),
 
     # --- Emergencies and poisoning (STG 17) ---------------------------------
     ('Acute pulmonary oedema', 'J81', P, '17.3', ['pulmonary oedema']),
@@ -443,6 +567,10 @@ DIAGNOSES = [
     ('High altitude syndrome', 'T70.2', P, None, ['altitude sickness']),
     ('Lightning injury', 'T75.0', S, None, []),
     ('Crush syndrome', 'T79.5', S, None, []),
+    ('Electric shock', 'T75.4', P, None, ['electrocution']),
+    ('Near drowning', 'T75.1', S, None, ['drowning']),
+    ('Hypothermia', 'T68', S, None, []),
+    ('Frostbite', 'T35.7', P, None, []),
 
     # --- Injuries and trauma (STG 18) ---------------------------------------
     ('Animal bite', 'T14.1', P, '18.1.4', ['dog bite', 'cat bite', 'bite']),
@@ -463,6 +591,47 @@ DIAGNOSES = [
     ('Injury, site unspecified', 'T14.9', P, None, ['injury']),
     ('Injury (RTA)', 'T14.9', P, None, ['road traffic accident', 'rta', 'mva']),
     ('Injury on duty', 'T14.9', P, None, ['iod', 'occupational injury']),
+    # Who or what caused an injury is not its own ICD-10 code - the code
+    # says what the injury is (T14.9 when no site is given), and the cause
+    # goes in the name, as with "Injury (RTA)".
+    ('Injury (assault)', 'T14.9', P, None, ['assault', 'assaulted', 'beaten', 'fight', 'gbh',
+                                           'interpersonal violence']),
+    ('Stab wound', 'T14.1', P, None, ['knife wound', 'stabbed', 'stabbing']),
+    ('Gunshot wound', 'T14.1', S, None, ['gsw', 'shot', 'bullet wound']),
+    ('Sexual assault', 'T74.2', P, None, ['rape', 'sexual abuse', 'sexual violence']),
+    ('Physical abuse (domestic violence)', 'T74.1', P, None, ['domestic violence', 'gbv',
+                                                             'gender-based violence',
+                                                             'intimate partner violence',
+                                                             'child abuse']),
+    ('Human bite', 'T14.1', P, None, []),
+    ('Needle-stick injury', 'T14.1', P, None, ['needlestick', 'sharps injury', 'needle prick']),
+    ('Concussion', 'S06.0', P, None, []),
+    # By site and degree, for when it is known; the unspecified entries above
+    # stay for when it is not.
+    ('First-degree burn', 'T30.1', P, '18.3', ['superficial burn']),
+    ('Second-degree burn', 'T30.2', P, '18.3', ['partial thickness burn', 'blistering burn']),
+    ('Third-degree burn', 'T30.3', S, '18.3', ['full thickness burn', 'deep burn']),
+    ('Fracture of rib', 'S22.3', P, '18.2', ['rib fracture', 'broken rib']),
+    ('Fracture of clavicle', 'S42.0', P, '18.2', ['collarbone', 'broken collarbone']),
+    ('Fracture of humerus', 'S42.3', S, '18.2', ['upper arm fracture', 'broken arm']),
+    ('Fracture of forearm', 'S52.9', S, '18.2', ['radius', 'ulna', 'broken arm']),
+    ('Fracture of wrist (distal radius)', 'S52.5', S, '18.2', ['colles', 'broken wrist']),
+    ('Fracture of hand (metacarpal)', 'S62.3', S, '18.2', ['boxer fracture', 'broken hand']),
+    ('Fracture of finger', 'S62.6', P, '18.2', ['broken finger']),
+    ('Fracture of nose', 'S02.2', P, '18.2', ['broken nose', 'nasal fracture']),
+    ('Fracture of spine', 'T08', S, '18.2', ['vertebral fracture', 'broken back']),
+    ('Fracture of femur or hip', 'S72.9', S, '18.2', ['hip fracture', 'broken leg', 'thigh']),
+    ('Fracture of lower leg', 'S82.9', S, '18.2', ['tibia', 'fibula', 'broken leg']),
+    ('Fracture of ankle', 'S82.8', S, '18.2', ['broken ankle', 'malleolus']),
+    ('Fracture of foot', 'S92.9', S, '18.2', ['metatarsal', 'broken foot']),
+    ('Fracture of toe', 'S92.5', P, '18.2', ['broken toe']),
+    ('Ankle sprain', 'S93.4', P, '18.4', ['twisted ankle', 'sprained ankle']),
+    ('Knee sprain', 'S83.6', P, '18.4', ['twisted knee', 'knee ligament']),
+    ('Wrist sprain', 'S63.5', P, '18.4', ['sprained wrist']),
+    ('Neck sprain (whiplash)', 'S13.4', P, '18.4', ['whiplash']),
+    ('Lower back strain', 'S33.5', P, '18.4', ['back strain', 'lumbar sprain']),
+    ('Dislocated shoulder', 'S43.0', S, None, ['shoulder dislocation']),
+    ('Dislocated finger', 'S63.1', P, None, ['finger dislocation']),
     ('Foreign body, site unspecified', 'T14.8', P, None, ['foreign body']),
     ('Surgical site infection', 'T81.4', P, '10.14', ['wound infection', 'ssi']),
 
@@ -478,17 +647,22 @@ DIAGNOSES = [
     ('Immune thrombocytopenia (ITP)', 'D69.3', S, '19.3.3', ['itp', 'low platelets']),
     ('Disseminated intravascular coagulation (DIC)', 'D65', S, '19.5', ['dic']),
     ('Antiphospholipid syndrome', 'D68.6', S, None, ['aps']),
+    ('Thrombocytopenia', 'D69.6', S, None, ['low platelets']),
     ('Temporal arteritis', 'M31.6', S, None, ['giant cell arteritis', 'gca']),
-    ('Leukaemia or lymphoma', 'C95.9', S, '19.7', ['leukaemia', 'lymphoma', 'blood cancer']),
+    ('Leukaemia', 'C95.9', S, '19.7', ['leukemia', 'blood cancer', 'leukaemia or lymphoma']),
+    ('Lymphoma', 'C85.9', S, '19.7', ['hodgkin', 'leukaemia or lymphoma']),
 
     # --- Palliative care and oncology (STG 21, 23) --------------------------
     ('Palliative care', 'Z51.5', P, '21', ['end of life', 'hospice']),
     ('Breast cancer', 'C50.9', S, '23.3', []),
     ('Cervical cancer', 'C53.9', S, '23.4', ['cancer of the cervix']),
     ('Prostate cancer', 'C61', S, '23.5', []),
-    ('Stomach or oesophageal cancer', 'C16.9', S, '23.6', ['gastric cancer', 'oesophageal cancer']),
+    ('Stomach cancer', 'C16.9', S, '23.6', ['gastric cancer', 'stomach or oesophageal cancer']),
+    ('Oesophageal cancer', 'C15.9', S, '23.6', ['cancer of the oesophagus',
+                                                'stomach or oesophageal cancer']),
     ('Skin cancer', 'C44.9', S, '23.7', []),
     ('Head and neck cancer', 'C76.0', S, '23.1', []),
+    ('Liver cancer', 'C22.9', S, None, ['hepatocellular carcinoma', 'hcc']),
     ('Neoplasm, nature unspecified', 'D48.9', S, None, ['tumour', 'growth', 'lump']),
 
     # --- Other: services, prevention and occupational health ----------------
@@ -496,6 +670,10 @@ DIAGNOSES = [
     ('Tetanus prophylaxis', 'Z23.5', P, None, ['tetanus toxoid', 'tt']),
     ('Fitness to work examination', 'Z02.1', P, None, ['pre-employment', 'medical exam']),
     ('Wound care (dressing)', 'Z48.0', P, None, ['dressing', 'wound care']),
+    ('Removal of sutures', 'Z48.0', P, None, ['stitches out', 'suture removal', 'remove stitches']),
+    ('Repeat prescription', 'Z76.0', P, None, ['refill', 'repeat script', 'chronic medication',
+                                              'medication collection']),
+    ('Blood pressure screening', 'Z13.6', P, None, ['bp check', 'screening']),
     ('I & D', None, P, None, ['incision and drainage']),
 ]
 
@@ -542,7 +720,22 @@ RENAMED = {
 }
 
 # Old names no longer offered because they named two different conditions.
-# Their records keep the words and simply stay uncoded.
+# Their records keep the words, as every clinical record does.
+#
+# Each keeps the ICD-10 code it carried, so an old visit still shows a code on
+# the reports, and typing it offers every entry it was split into. They count
+# under their old name rather than being guessed into one half.
 RETIRED = {
-    'Inflammatory bowel disease': 'split into Ulcerative colitis and Crohn\'s disease',
+    # name: (ICD-10 it carried, the entries it became)
+    'Inflammatory bowel disease': (None, ['Ulcerative colitis', "Crohn's disease"]),
+    'Acute tonsillitis and pharyngitis': ('J03.9', ['Acute tonsillitis', 'Acute pharyngitis']),
+    'Aphthous ulcer and other oral lesions': ('K12.0', ['Aphthous ulcer', 'Oral lesion(s)']),
+    'Myalgia and muscle spasm': ('M79.1', ['Myalgia', 'Muscle spasm']),
+    'Suicidal ideation or self-harm': ('R45.8', ['Suicidal ideation', 'Self-harm']),
+    'Cannabis or stimulant use': ('F12.1', ['Cannabis use', 'Stimulant use']),
+    'Urethral stricture and bladder outlet obstruction':
+        ('N35.9', ['Urethral stricture', 'Bladder outlet obstruction']),
+    'Empyema and lung abscess': ('J86.9', ['Empyema', 'Lung abscess']),
+    'Leukaemia or lymphoma': ('C95.9', ['Leukaemia', 'Lymphoma']),
+    'Stomach or oesophageal cancer': ('C16.9', ['Stomach cancer', 'Oesophageal cancer']),
 }

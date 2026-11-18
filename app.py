@@ -524,6 +524,10 @@ DIAGNOSES_OPTIONS = sorted((d[0] for d in _dxl.DIAGNOSES), key=str.lower)
 DIAGNOSIS_CODES = {d[0]: d[1] for d in _dxl.DIAGNOSES}
 DIAGNOSIS_LEVELS = {d[0]: d[2] for d in _dxl.DIAGNOSES}
 DIAGNOSIS_STG = {d[0]: d[3] for d in _dxl.DIAGNOSES}
+# A name split into two since keeps the code it had, so its old visits are
+# still coded on the reports. It is not offered for new visits.
+DIAGNOSIS_CODES.update({n: code for n, (code, _parts) in _dxl.RETIRED.items()
+                        if n not in DIAGNOSIS_CODES})
 
 # What each renamed entry used to be called.
 #
@@ -951,7 +955,8 @@ DIAGNOSIS_RENAMES = {**DIAGNOSIS_RENAMES, **_dxl.RENAMED}
 DIAGNOSIS_RENAMES = {old: _final_name(old) for old in DIAGNOSIS_RENAMES}
 # Any case or spacing of a current name is that name too: a visit typed as
 # "influenza" is the list's "Influenza", and counts and codes as it.
-_DIAGNOSIS_CANONICAL = {' '.join(n.lower().split()): n for n in DIAGNOSES_OPTIONS}
+_DIAGNOSIS_CANONICAL = {' '.join(n.lower().split()): n
+                        for n in [*_dxl.RETIRED, *DIAGNOSES_OPTIONS]}
 _DIAGNOSIS_CANONICAL.update({' '.join(old.lower().split()): new
                              for old, new in DIAGNOSIS_RENAMES.items()})
 
@@ -961,15 +966,18 @@ _DIAGNOSIS_CANONICAL.update({' '.join(old.lower().split()): new
 _merged_terms: dict[str, list[str]] = {n: [] for n in DIAGNOSES_OPTIONS}
 for _label, _words in DIAGNOSIS_SEARCH_TERMS.items():
     _to = _final_name(_label)
-    if _to in _merged_terms:
-        _merged_terms[_to].extend(_words)
+    # A split name's words find every entry it became.
+    for _t in (_dxl.RETIRED[_to][1] if _to in _dxl.RETIRED else [_to]):
+        if _t in _merged_terms:
+            _merged_terms[_t].extend(_words)
 for _name, _code, _lvl, _stg, _words in _dxl.DIAGNOSES:
     _merged_terms[_name].extend(_words)
     if _code:
         _merged_terms[_name].append(_code.lower())
 for _old, _to in DIAGNOSIS_RENAMES.items():
-    if _to in _merged_terms and _old.lower() != _to.lower():
-        _merged_terms[_to].append(_old.lower())
+    for _t in (_dxl.RETIRED[_to][1] if _to in _dxl.RETIRED else [_to]):
+        if _t in _merged_terms and _old.lower() != _t.lower():
+            _merged_terms[_t].append(_old.lower())
 DIAGNOSIS_SEARCH_TERMS = {n: sorted({w.lower() for w in ws if w}) for n, ws in _merged_terms.items()}
 
 

@@ -137,7 +137,7 @@ PLAIN = {
     'piles': 'Haemorrhoids',
     'heart attack': 'Acute myocardial infarction',
     'bunion': 'Hallux valgus deformity', 'reflux': 'Gastro-oesophageal reflux disease [GERD]',
-    'sore throat': 'Acute tonsillitis and pharyngitis',
+    'sore throat': 'Acute tonsillitis',
     'car accident': 'Injury (RTA)', 'pins and needles': 'Paraesthesia',
     'high blood pressure': 'HTN', 'back pain': 'Mechanical low back pain',
 }
@@ -337,9 +337,19 @@ check('an empty value does not become a condition',
 check('matching ignores case and stray spaces',
       A._canonical_diagnosis('  injury  ') == 'Injury, site unspecified',
       A._canonical_diagnosis('  injury  '))
+# ...or to a name since split in two, which keeps its own code instead.
 check('every old name maps to an entry that actually exists',
-      all(v in DX for v in A.DIAGNOSIS_RENAMES.values()),
-      str([v for v in A.DIAGNOSIS_RENAMES.values() if v not in DX]))
+      all(v in DX or v in A._dxl.RETIRED for v in A.DIAGNOSIS_RENAMES.values()),
+      str([v for v in A.DIAGNOSIS_RENAMES.values()
+           if v not in DX and v not in A._dxl.RETIRED]))
+for _old, (_code, _parts) in A._dxl.RETIRED.items():
+    if _code:
+        check(f'"{_old}" was split, and its old visits keep {_code}',
+              A._diagnosis_code(_old) == _code, str(A._diagnosis_code(_old)))
+    check(f'...typing "{_old}" offers every part it became',
+          all(p in A._diagnosis_matches(_old, 50) for p in _parts),
+          str(A._diagnosis_matches(_old, 50)))
+    check(f'...and "{_old}" is no longer offered for a new visit', _old not in DX)
 check('and no old name is still on the list under its old wording',
       not any(k in DX for k in A.DIAGNOSIS_RENAMES),
       str([k for k in A.DIAGNOSIS_RENAMES if k in DX]))
