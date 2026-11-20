@@ -1,4 +1,4 @@
-"""Staff meeting indicators on the dashboard, and the PTO & errors log."""
+"""Staff meeting indicators on the dashboard, and the medication errors log."""
 from _root import ROOT  # noqa: F401
 import os
 os.environ['SECRET_KEY'] = 'test-secret-key'
@@ -52,32 +52,36 @@ db['transactions'].insert_many([
     # After the month: A received 0 net; B had a receipt after month end
     {'med_name': 'B', 'type': 'receive', 'quantity': 20, 'timestamp': end + timedelta(hours=30)},
 ])
-db['stock_takes'].insert_one({'reference': 'ST-1', 'status': 'closed', 'closed_at': mid})
+full = db['stock_takes'].insert_one({'reference': 'ST-1', 'status': 'closed', 'closed_at': mid}).inserted_id
+part = db['stock_takes'].insert_one({'reference': 'ST-2', 'status': 'closed', 'closed_at': mid}).inserted_id
+for n in ('A', 'B', 'C'):
+    db['stock_take_counts'].insert_one({'stock_take_id': str(full), 'med_name': n, 'counted': 1})
+db['stock_take_counts'].insert_one({'stock_take_id': str(part), 'med_name': 'A', 'counted': 1})
 
 k = A._meeting_kpis(db, py, pm, 'pharmaceutical')
 names = sorted(s['med_name'] for s in k['stocked_out'])
 # A: closing 10, before receive 0 -> hit zero. B: closing 30, never zero. C: always 0.
 check('stock-out finds items that touched zero', names == ['A', 'C'], str(names))
 check('stock-out rate', k['stockout_pct'] == '66.7%', k['stockout_pct'])
+check('stock-out objective is 10%', k['stockout_objective'] == '10%' and not k['stockout_met'])
 check('expired cost uses price on the write-off', k['expired_value'] == 'R6.00', k['expired_value'])
-check('stock take counted', k['st_done'] == 1 and k['st_pct'] == '100%')
+check('only the full count counts', k['st_done'] == 1 and len(k['st_partial']) == 1,
+      str(k['st_full']) + str(k['st_partial']))
+check('two full counts a year', k['st_expected'] == 2 and k['st_due'] == pm * 2 // 12)
 
 # PTO and errors via the page
 day = (now - timedelta(days=0)).strftime('%Y-%m-%d')
-r = client.post('/meeting-log', data={'action': 'add_pto', 'date': day, 'task': 'Dispensing', 'status': 'Planned'})
-check('PTO saves', r.status_code == 302 and db['pto_log'].count_documents({}) == 1)
-pid = str(db['pto_log'].find_one()['_id'])
-client.post('/meeting-log', data={'action': 'complete_pto', 'id': pid})
-check('PTO marked completed', db['pto_log'].find_one()['status'] == 'Completed')
 client.post('/meeting-log', data={'action': 'add_error', 'date': day, 'error_type': 'Near-miss',
                                   'description': 'Wrong strength picked, caught at check'})
 check('error saves', db['medication_errors'].count_documents({}) == 1)
 k2 = A._meeting_kpis(db, now.year, now.month, 'pharmaceutical')
-check('this month counts PTO and error', k2['pto_done'] == 1 and k2['errors'] == 1)
+check('this month counts the error', k2['errors'] == 1)
+check('no PTO left', 'pto_done' not in k2)
 
 r = client.get('/dashboard')
 body = r.get_data(as_text=True)
 check('dashboard shows the panel', r.status_code == 200 and 'Staff Meeting Indicators' in body)
+check('no PTO on the dashboard', 'PTO' not in body)
 r = client.get('/meeting-log')
 check('log page renders', r.status_code == 200 and 'Wrong strength' in r.get_data(as_text=True))
 login('department')

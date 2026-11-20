@@ -101,24 +101,20 @@
             {% for n, v in kpis.expired_by_med %}{{ n }}: R{{ '%.2f'|format(v) }}<br>{% endfor %}
             </details>{% endif %}</small></td>
     </tr>
-    <tr class="{{ 'normal' if kpis.st_done >= kpis.st_expected else 'expired' }}">
-        <td>3. Stock take completed vs expected</td>
-        <td><strong>{{ kpis.st_done }} of {{ kpis.st_expected }}</strong><br><small>{{ kpis.st_pct }}</small></td>
-        <td>{{ kpis.st_expected }} per month</td>
-        <td><small>Stock takes closed in the month{% if kpis.st_refs %}: {{ kpis.st_refs|join(', ') }}{% endif %}.</small></td>
+    <tr class="{{ 'normal' if kpis.st_on_track else 'expired' }}">
+        <td>3. Full stock counts vs expected</td>
+        <td><strong>{{ kpis.st_done }} of {{ kpis.st_expected }}</strong><br><small>in {{ kpis.year }} so far</small></td>
+        <td>{{ kpis.st_expected }} per year<br><small>{{ kpis.st_due }} due by now &mdash; {{ 'on track' if kpis.st_on_track else 'behind' }}</small></td>
+        <td><small>Full = counted at least {{ kpis.st_coverage_rule }} of items.
+            {% for c in kpis.st_full %}{{ c.reference }} ({{ c.closed }}, {{ c.coverage }}){% if not loop.last %}, {% endif %}{% endfor %}
+            {% if kpis.st_partial %}<br>Partial counts not included: {% for c in kpis.st_partial %}{{ c.reference }} ({{ c.coverage }}){% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</small></td>
     </tr>
     <tr>
-        <td>4. PTO completed vs expected</td>
-        <td><strong>{{ kpis.pto_done }} of {{ kpis.pto_expected }}</strong><br><small>{{ kpis.pto_pct }}</small></td>
-        <td>All planned</td>
-        <td><small>From the <a href="{{ url_for('meeting_log') }}">PTO &amp; Errors</a> log.</small></td>
-    </tr>
-    <tr>
-        <td>5. Medical errors reported</td>
+        <td>4. Medical errors reported</td>
         <td><strong>{{ kpis.errors }}</strong></td>
         <td>-</td>
         <td><small>{% for t, n in kpis.error_types %}{{ t }}: {{ n }}{% if not loop.last %}, {% endif %}{% else %}None reported{% endfor %}.
-            From the <a href="{{ url_for('meeting_log') }}">PTO &amp; Errors</a> log.</small></td>
+            From the <a href="{{ url_for('meeting_log') }}">Medication Errors</a> log.</small></td>
     </tr>
     </tbody>
 </table></div>

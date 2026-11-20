@@ -1183,7 +1183,7 @@ def get_nav_links() -> str:
             <a href="/requests">{req_label}</a> |
             <a href="/internal-issue">Internal Issues</a> |
             <a href="/temperature">Temperature</a> |
-            <a href="/meeting-log">PTO &amp; Errors</a> |
+            <a href="/meeting-log">Medication Errors</a> |
             <a href="/loans">Loans</a> |
             <a href="/key-register">Store Key</a> |
             {add_med_link}
@@ -9487,17 +9487,18 @@ def key_register() -> ResponseReturnValue:
 # NEW (Staff meeting): the pharmacy's five key indicators for one month,
 # as the monthly staff meeting agenda asks for them:
 #
-#   1. Stock-out rate vs objective    3. Stock takes completed vs expected
-#   2. Expired medicines vs cost      4. PTOs completed vs expected
-#                                      5. Medication errors reported
+#   1. Stock-out rate vs objective    3. Full stock counts vs expected
+#   2. Expired medicines vs cost      4. Medication errors reported
 #
-# 1-3 come from the stock records already kept. 4 and 5 were on paper, so
+# 1-3 come from the stock records already kept. Errors were on paper, so
 # they have their own small log (/meeting-log) and are counted from there.
 # -----------------------------------------------------------------------
-STOCKOUT_OBJECTIVE_PCT = 5.0        # no more than 5% of items out of stock
-STOCK_TAKES_EXPECTED_PER_MONTH = 1  # one full count each month
+STOCKOUT_OBJECTIVE_PCT = 10.0       # no more than 10% of items out of stock
+FULL_COUNTS_PER_YEAR = 2            # two full stock counts a year, one per half
+# A stock take is a FULL count when it counted at least this share of the
+# items on the books; anything less is a spot or partial count.
+FULL_COUNT_COVERAGE_PCT = 90.0
 MED_ERROR_TYPES = ['Dispensing', 'Labelling', 'Prescribing', 'Near-miss', 'Other']
-PTO_STATUSES = ['Planned', 'Completed']
 
 
 def _local_month_bounds(y: int, m: int) -> tuple[datetime, datetime]:
@@ -9587,21 +9588,28 @@ def _meeting_kpis(db: Any, y: int, m: int, cat: str) -> Doc:
         by_med[w.get('med_name', '')] = by_med.get(w.get('med_name', ''), 0.0) + v
     expired_value = sum(by_med.values())
 
-    # --- 3. Stock takes completed -----------------------------------------
-    st_done = list(db['stock_takes'].find(
-        {'status': 'closed', 'closed_at': {'$gte': start, '$lt': end}},
-        {'_id': 0, 'reference': 1, 'closed_at': 1}).sort('closed_at', 1))
+    # --- 3. Full stock counts, year to date --------------------------------
+    # Two a year, so a single month says little: count every stock take closed
+    # from 1 January to the end of the chosen month, and call it full only if
+    # it covered most of the items on the books (all categories).
+    year_start, _ = _local_month_bounds(y, 1)
+    on_books = db['medications'].count_documents(_active()) or 1
+    full_counts, partial_counts = [], []
+    for st in db['stock_takes'].find(
+            {'status': 'closed', 'closed_at': {'$gte': year_start, '$lt': end}},
+            {'reference': 1, 'closed_at': 1}).sort('closed_at', 1):
+        counted = len(db['stock_take_counts'].distinct(
+            'med_name', {'stock_take_id': str(st['_id']), 'counted': {'$ne': None}}))
+        cover = counted / on_books * 100
+        entry = {'reference': st.get('reference'), 'coverage': f'{min(cover, 100):.0f}%',
+                 'closed': to_local(st.get('closed_at'), '%d %b')}
+        (full_counts if cover >= FULL_COUNT_COVERAGE_PCT else partial_counts).append(entry)
+    # Due by now: one by the end of June, two by the end of December.
+    st_due = m * FULL_COUNTS_PER_YEAR // 12
 
-    # --- 4. PTOs --------------------------------------------------------------
-    ptos = list(db['pto_log'].find({'date': {'$gte': start, '$lt': end}}))
-    pto_done = sum(1 for p in ptos if p.get('status') == 'Completed')
-
-    # --- 5. Medication errors -------------------------------------------------
+    # --- 4. Medication errors -------------------------------------------------
     errors = list(db['medication_errors'].find({'date': {'$gte': start, '$lt': end}}))
     err_types = Counter(e.get('error_type', 'Other') for e in errors)
-
-    def pct(a: int, b: int) -> str:
-        return f'{a / b * 100:.0f}%' if b else '-'
 
     return {
         'label': datetime(y, m, 1).strftime('%B %Y'),
@@ -9614,12 +9622,11 @@ def _meeting_kpis(db: Any, y: int, m: int, cat: str) -> Doc:
         'expired_lines': len(expired_lines),
         'expired_value': f'R{expired_value:,.2f}',
         'expired_by_med': sorted(by_med.items(), key=lambda kv: -kv[1])[:10],
-        'st_done': len(st_done),
-        'st_expected': STOCK_TAKES_EXPECTED_PER_MONTH,
-        'st_pct': pct(len(st_done), STOCK_TAKES_EXPECTED_PER_MONTH),
-        'st_refs': [s.get('reference') for s in st_done],
-        'pto_done': pto_done, 'pto_expected': len(ptos),
-        'pto_pct': pct(pto_done, len(ptos)),
+        'year': y,
+        'st_done': len(full_counts), 'st_expected': FULL_COUNTS_PER_YEAR,
+        'st_due': st_due, 'st_on_track': len(full_counts) >= st_due,
+        'st_full': full_counts, 'st_partial': partial_counts,
+        'st_coverage_rule': f'{FULL_COUNT_COVERAGE_PCT:g}%',
         'errors': len(errors),
         'error_types': sorted(err_types.items(), key=lambda kv: -kv[1]),
     }
@@ -9628,45 +9635,23 @@ def _meeting_kpis(db: Any, y: int, m: int, cat: str) -> Doc:
 @app.route('/meeting-log', methods=['GET', 'POST'])
 @login_required
 def meeting_log() -> ResponseReturnValue:
-    """PTOs and medication errors: the two meeting indicators that have no
-    other record in the app."""
+    """Medication errors: the meeting indicator that has no other record in
+    the app."""
     if session['user'].get('role') == 'department':
         return redirect('/requests')
     current_user = session['user']['name']
     is_admin = session['user'].get('role') == 'admin'
     message_class, message = _flashed_banner()
     db = get_mongo_client()['pharmacy_db']
-    ptos, errs = db['pto_log'], db['medication_errors']
+    errs = db['medication_errors']
 
     if request.method == 'POST':
         action = request.form.get('action')
-        if action in ('add_pto', 'add_error'):
+        if action == 'add_error':
             when, problem = _entry_time(request.form.get('date', ''))
             if when is None:
                 flash(problem)
                 return redirect(url_for('meeting_log'))
-        if action == 'add_pto':
-            task = (request.form.get('task') or '').strip()
-            status = request.form.get('status')
-            if not task or status not in PTO_STATUSES:
-                flash('Enter the task observed and whether it is planned or completed.')
-                return redirect(url_for('meeting_log'))
-            ptos.insert_one({'date': when, 'task': task[:200],
-                             'observed': (request.form.get('observed') or '').strip()[:100],
-                             'status': status, 'recorded_by': current_user,
-                             'timestamp': datetime.utcnow()})
-            write_audit_entry('CREATE', 'pto', task[:60], f'PTO logged ({status})')
-            flash('PTO saved.', 'success')
-        elif action == 'complete_pto':
-            try:
-                ptos.update_one({'_id': ObjectId(request.form.get('id', ''))},
-                                {'$set': {'status': 'Completed',
-                                          'completed_by': current_user,
-                                          'completed_at': datetime.utcnow()}})
-                flash('PTO marked completed.', 'success')
-            except (InvalidId, TypeError):
-                flash('That PTO was not found.')
-        elif action == 'add_error':
             etype = request.form.get('error_type')
             desc = (request.form.get('description') or '').strip()
             if etype not in MED_ERROR_TYPES or not desc:
@@ -9677,11 +9662,10 @@ def meeting_log() -> ResponseReturnValue:
                              'recorded_by': current_user, 'timestamp': datetime.utcnow()})
             write_audit_entry('CREATE', 'medication_error', etype, 'Medication error reported')
             flash('Error report saved. Thank you for reporting it.', 'success')
-        elif action in ('delete_pto', 'delete_error') and is_admin:
-            col = ptos if action == 'delete_pto' else errs
+        elif action == 'delete_error' and is_admin:
             try:
-                col.delete_one({'_id': ObjectId(request.form.get('id', ''))})
-                write_audit_entry('DELETE', action[7:], request.form.get('id', ''), 'removed')
+                errs.delete_one({'_id': ObjectId(request.form.get('id', ''))})
+                write_audit_entry('DELETE', 'medication_error', request.form.get('id', ''), 'removed')
                 flash('Entry deleted.', 'success')
             except (InvalidId, TypeError):
                 flash('That entry was not found.')
@@ -9692,8 +9676,7 @@ def meeting_log() -> ResponseReturnValue:
         'meeting_log.html', nav_links=get_nav_links(),
         message=message, message_class=message_class, is_admin=is_admin,
         today=local_now().strftime('%Y-%m-%d'),
-        pto_statuses=PTO_STATUSES, error_types=MED_ERROR_TYPES,
-        ptos=list(ptos.find({'date': {'$gte': since}}).sort('date', -1)),
+        error_types=MED_ERROR_TYPES,
         errors=list(errs.find({'date': {'$gte': since}}).sort('date', -1)),
     )
 

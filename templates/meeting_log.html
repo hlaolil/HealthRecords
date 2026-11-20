@@ -1,46 +1,11 @@
 {% extends "base.html" %}
-{#- NEW (Staff meeting): PTOs and medication errors, the two meeting
-    indicators that had no record in the app. The dashboard counts them. -#}
-{% block title %}PTO &amp; Errors &middot; NMC Pharmacy{% endblock %}
-{% block heading %}PTO &amp; Medication Errors{% endblock %}
+{#- NEW (Staff meeting): medication errors, the meeting indicator that had
+    no record in the app. The dashboard counts them. -#}
+{% block title %}Medication Errors &middot; NMC Pharmacy{% endblock %}
+{% block heading %}Medication Errors{% endblock %}
 {% block content %}{% if message %}
     <p class="message {% if message_class %}{{ message_class }}{% else %}error{% endif %}">{{ message }}</p>
 {% endif %}
-
-<h2>Planned Task Observations (PTO)</h2>
-<p>Log each PTO planned for the month as <strong>Planned</strong>, then mark it
-completed when it is done. The dashboard counts completed against all logged.</p>
-<form method="POST" action="{{ url_for('meeting_log') }}" class="dispense-form">
-    <input type="hidden" name="action" value="add_pto">
-    <label>Date:</label> <input type="date" name="date" value="{{ today }}" max="{{ today }}" required>
-    <label>Task observed:</label> <input type="text" name="task" maxlength="200" required placeholder="e.g. Dispensing procedure">
-    <label>Person observed:</label> <input type="text" name="observed" maxlength="100">
-    <label>Status:</label>
-    <select name="status">{% for s in pto_statuses %}<option>{{ s }}</option>{% endfor %}</select>
-    <input type="submit" value="Save PTO">
-</form>
-<div class="table-scroll"><table>
-    <thead><tr><th>Date</th><th>Task</th><th>Observed</th><th>Status</th><th></th></tr></thead>
-    <tbody>
-    {% for p in ptos %}
-    <tr class="{{ 'normal' if p.status == 'Completed' else 'close-to-expire' }}">
-        <td>{{ p.date|local('%Y-%m-%d') }}</td><td>{{ p.task }}</td><td>{{ p.observed or '-' }}</td><td>{{ p.status }}</td>
-        <td>
-            {% if p.status != 'Completed' %}
-            <form method="POST" action="{{ url_for('meeting_log') }}" style="display:inline">
-                <input type="hidden" name="action" value="complete_pto"><input type="hidden" name="id" value="{{ p._id }}">
-                <input type="submit" value="Mark completed"></form>
-            {% endif %}
-            {% if is_admin %}
-            <form method="POST" action="{{ url_for('meeting_log') }}" style="display:inline">
-                <input type="hidden" name="action" value="delete_pto"><input type="hidden" name="id" value="{{ p._id }}">
-                <input type="submit" value="Delete"></form>
-            {% endif %}
-        </td>
-    </tr>
-    {% else %}<tr><td colspan="5">No PTOs in the last three months.</td></tr>{% endfor %}
-    </tbody>
-</table></div>
 
 <h2>Medication Errors &amp; Near-misses</h2>
 <p>Record what happened and what was done. <strong>Do not enter patient or staff
