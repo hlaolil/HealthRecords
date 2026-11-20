@@ -1183,6 +1183,7 @@ def get_nav_links() -> str:
             <a href="/requests">{req_label}</a> |
             <a href="/internal-issue">Internal Issues</a> |
             <a href="/temperature">Temperature</a> |
+            <a href="/meeting-log">PTO &amp; Errors</a> |
             <a href="/loans">Loans</a> |
             <a href="/key-register">Store Key</a> |
             {add_med_link}
@@ -9482,6 +9483,221 @@ def key_register() -> ResponseReturnValue:
         return redirect('/reports')
 
 
+# -----------------------------------------------------------------------
+# NEW (Staff meeting): the pharmacy's five key indicators for one month,
+# as the monthly staff meeting agenda asks for them:
+#
+#   1. Stock-out rate vs objective    3. Stock takes completed vs expected
+#   2. Expired medicines vs cost      4. PTOs completed vs expected
+#                                      5. Medication errors reported
+#
+# 1-3 come from the stock records already kept. 4 and 5 were on paper, so
+# they have their own small log (/meeting-log) and are counted from there.
+# -----------------------------------------------------------------------
+STOCKOUT_OBJECTIVE_PCT = 5.0        # no more than 5% of items out of stock
+STOCK_TAKES_EXPECTED_PER_MONTH = 1  # one full count each month
+MED_ERROR_TYPES = ['Dispensing', 'Labelling', 'Prescribing', 'Near-miss', 'Other']
+PTO_STATUSES = ['Planned', 'Completed']
+
+
+def _local_month_bounds(y: int, m: int) -> tuple[datetime, datetime]:
+    """[start, end) of a month on the pharmacy's calendar, as stored (UTC) times."""
+    off = timedelta(hours=PHARMACY_UTC_OFFSET_HOURS)
+    start = datetime(y, m, 1)
+    end = datetime(y + (m == 12), 1 if m == 12 else m + 1, 1)
+    return start - off, end - off
+
+
+def _meeting_month_choices(n: int = 12) -> list[tuple[str, str]]:
+    """('YYYY-MM', 'November 2026') for the last n months, newest first."""
+    today = local_now()
+    y, m = today.year, today.month
+    out = []
+    for _ in range(n):
+        out.append((f'{y:04d}-{m:02d}', datetime(y, m, 1).strftime('%B %Y')))
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+    return out
+
+
+def _default_meeting_month() -> str:
+    """The month a meeting reports on: the last COMPLETE month. A meeting
+    early in December reports on November, which is what the agenda means."""
+    t = local_now()
+    y, m = (t.year, t.month - 1) if t.month > 1 else (t.year - 1, 12)
+    return f'{y:04d}-{m:02d}'
+
+
+def _tx_effect(tx: Doc) -> float:
+    """What one transaction did to the shelf balance, signed. Direction comes
+    from the type, never the stored sign (see CONTROLLED_DIRECTION)."""
+    kind = tx.get('type')
+    qty = tx.get('quantity', 0) or 0
+    if kind == 'adjustment':
+        return qty
+    return CONTROLLED_DIRECTION.get(kind, 0) * abs(qty)
+
+
+def _meeting_kpis(db: Any, y: int, m: int, cat: str) -> Doc:
+    start, end = _local_month_bounds(y, m)
+    meds = _by_name(db['medications'].find(_active(_category_filter(cat)),
+                                           {'_id': 0, 'name': 1, 'balance': 1}))
+    names = [d.get('name', '') for d in meds]
+
+    # --- 1. Stock-out: did the balance touch zero at ANY point? ----------
+    # Start from today's balance, undo everything after the month to get the
+    # closing balance, then walk the month backwards. The lowest point seen
+    # (closing, after each movement, or opening) is what the shelf got down to.
+    txs_by_med: defaultdict[str, list[Doc]] = defaultdict(list)
+    for tx in db['transactions'].find(
+            {'timestamp': {'$gte': start}, 'med_name': {'$in': names},
+             'type': {'$in': list(CONTROLLED_DIRECTION)}},
+            {'_id': 0, 'med_name': 1, 'type': 1, 'quantity': 1, 'timestamp': 1}):
+        txs_by_med[tx.get('med_name', '')].append(tx)
+
+    stocked_out = []
+    for d in meds:
+        name = d.get('name', '')
+        bal = d.get('balance', 0) or 0
+        txs = txs_by_med.get(name, [])
+        after = sum(_tx_effect(t) for t in txs if t['timestamp'] >= end)
+        bal -= after                                  # closing balance
+        lowest = bal
+        inside = sorted((t for t in txs if t['timestamp'] < end),
+                        key=lambda t: t['timestamp'], reverse=True)
+        for t in inside:
+            bal -= _tx_effect(t)                      # balance before t
+            lowest = min(lowest, bal)
+        if lowest <= 0:
+            stocked_out.append({'med_name': name,
+                                'zero_at_end': (d.get('balance', 0) or 0) - after <= 0})
+    tracked = len(meds)
+    so_pct = (len(stocked_out) / tracked * 100) if tracked else None
+
+    # --- 2. Expired medicines and their cost ------------------------------
+    expired_lines = list(db['transactions'].find(
+        {'type': 'expiry_removal', 'timestamp': {'$gte': start, '$lt': end}},
+        {'_id': 0, 'med_name': 1, 'quantity': 1, 'price': 1, 'line_value': 1}))
+    by_med: dict[str, float] = {}
+    for w in expired_lines:
+        units = abs(w.get('quantity', 0) or 0)
+        v = abs(w['line_value']) if w.get('line_value') is not None \
+            else units * (w.get('price', 0) or 0)
+        by_med[w.get('med_name', '')] = by_med.get(w.get('med_name', ''), 0.0) + v
+    expired_value = sum(by_med.values())
+
+    # --- 3. Stock takes completed -----------------------------------------
+    st_done = list(db['stock_takes'].find(
+        {'status': 'closed', 'closed_at': {'$gte': start, '$lt': end}},
+        {'_id': 0, 'reference': 1, 'closed_at': 1}).sort('closed_at', 1))
+
+    # --- 4. PTOs --------------------------------------------------------------
+    ptos = list(db['pto_log'].find({'date': {'$gte': start, '$lt': end}}))
+    pto_done = sum(1 for p in ptos if p.get('status') == 'Completed')
+
+    # --- 5. Medication errors -------------------------------------------------
+    errors = list(db['medication_errors'].find({'date': {'$gte': start, '$lt': end}}))
+    err_types = Counter(e.get('error_type', 'Other') for e in errors)
+
+    def pct(a: int, b: int) -> str:
+        return f'{a / b * 100:.0f}%' if b else '-'
+
+    return {
+        'label': datetime(y, m, 1).strftime('%B %Y'),
+        'tracked': tracked,
+        'stocked_out': stocked_out,
+        'stockout_pct': f'{so_pct:.1f}%' if so_pct is not None else '-',
+        'stockout_objective': f'{STOCKOUT_OBJECTIVE_PCT:g}%',
+        'stockout_met': so_pct is not None and so_pct <= STOCKOUT_OBJECTIVE_PCT,
+        'expired_items': len(by_med),
+        'expired_lines': len(expired_lines),
+        'expired_value': f'R{expired_value:,.2f}',
+        'expired_by_med': sorted(by_med.items(), key=lambda kv: -kv[1])[:10],
+        'st_done': len(st_done),
+        'st_expected': STOCK_TAKES_EXPECTED_PER_MONTH,
+        'st_pct': pct(len(st_done), STOCK_TAKES_EXPECTED_PER_MONTH),
+        'st_refs': [s.get('reference') for s in st_done],
+        'pto_done': pto_done, 'pto_expected': len(ptos),
+        'pto_pct': pct(pto_done, len(ptos)),
+        'errors': len(errors),
+        'error_types': sorted(err_types.items(), key=lambda kv: -kv[1]),
+    }
+
+
+@app.route('/meeting-log', methods=['GET', 'POST'])
+@login_required
+def meeting_log() -> ResponseReturnValue:
+    """PTOs and medication errors: the two meeting indicators that have no
+    other record in the app."""
+    if session['user'].get('role') == 'department':
+        return redirect('/requests')
+    current_user = session['user']['name']
+    is_admin = session['user'].get('role') == 'admin'
+    message_class, message = _flashed_banner()
+    db = get_mongo_client()['pharmacy_db']
+    ptos, errs = db['pto_log'], db['medication_errors']
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action in ('add_pto', 'add_error'):
+            when, problem = _entry_time(request.form.get('date', ''))
+            if when is None:
+                flash(problem)
+                return redirect(url_for('meeting_log'))
+        if action == 'add_pto':
+            task = (request.form.get('task') or '').strip()
+            status = request.form.get('status')
+            if not task or status not in PTO_STATUSES:
+                flash('Enter the task observed and whether it is planned or completed.')
+                return redirect(url_for('meeting_log'))
+            ptos.insert_one({'date': when, 'task': task[:200],
+                             'observed': (request.form.get('observed') or '').strip()[:100],
+                             'status': status, 'recorded_by': current_user,
+                             'timestamp': datetime.utcnow()})
+            write_audit_entry('CREATE', 'pto', task[:60], f'PTO logged ({status})')
+            flash('PTO saved.', 'success')
+        elif action == 'complete_pto':
+            try:
+                ptos.update_one({'_id': ObjectId(request.form.get('id', ''))},
+                                {'$set': {'status': 'Completed',
+                                          'completed_by': current_user,
+                                          'completed_at': datetime.utcnow()}})
+                flash('PTO marked completed.', 'success')
+            except (InvalidId, TypeError):
+                flash('That PTO was not found.')
+        elif action == 'add_error':
+            etype = request.form.get('error_type')
+            desc = (request.form.get('description') or '').strip()
+            if etype not in MED_ERROR_TYPES or not desc:
+                flash('Choose the type of error and describe what happened.')
+                return redirect(url_for('meeting_log'))
+            errs.insert_one({'date': when, 'error_type': etype, 'description': desc[:500],
+                             'action_taken': (request.form.get('action_taken') or '').strip()[:500],
+                             'recorded_by': current_user, 'timestamp': datetime.utcnow()})
+            write_audit_entry('CREATE', 'medication_error', etype, 'Medication error reported')
+            flash('Error report saved. Thank you for reporting it.', 'success')
+        elif action in ('delete_pto', 'delete_error') and is_admin:
+            col = ptos if action == 'delete_pto' else errs
+            try:
+                col.delete_one({'_id': ObjectId(request.form.get('id', ''))})
+                write_audit_entry('DELETE', action[7:], request.form.get('id', ''), 'removed')
+                flash('Entry deleted.', 'success')
+            except (InvalidId, TypeError):
+                flash('That entry was not found.')
+        return redirect(url_for('meeting_log'))
+
+    since = datetime.utcnow() - timedelta(days=92)
+    return render_template(
+        'meeting_log.html', nav_links=get_nav_links(),
+        message=message, message_class=message_class, is_admin=is_admin,
+        today=local_now().strftime('%Y-%m-%d'),
+        pto_statuses=PTO_STATUSES, error_types=MED_ERROR_TYPES,
+        ptos=list(ptos.find({'date': {'$gte': since}}).sort('date', -1)),
+        errors=list(errs.find({'date': {'$gte': since}}).sort('date', -1)),
+    )
+
+
 @app.route('/dashboard', methods=['GET'])
 @login_required
 def dashboard() -> ResponseReturnValue:
@@ -9783,8 +9999,15 @@ def dashboard() -> ResponseReturnValue:
                 key=lambda n: -n['value']
             )[:25]
 
+        kpi_month = request.args.get('kpi_month') or _default_meeting_month()
+        kpi_choices = _meeting_month_choices()
+        if kpi_month not in [c[0] for c in kpi_choices]:
+            kpi_month = _default_meeting_month()
+        kpis = _meeting_kpis(db, int(kpi_month[:4]), int(kpi_month[5:]), cat)
+
         return render_template(
             'dashboard.html', nav_links=get_nav_links(), message=message,
+            kpis=kpis, kpi_month=kpi_month, kpi_choices=kpi_choices,
             is_admin=is_admin, month_labels=month_labels, months_back=months_back,
             month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
             search=search, category=cat, category_label=CATEGORY_LABELS[cat],

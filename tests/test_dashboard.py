@@ -363,7 +363,8 @@ print(f'   10 medications -> {small} queries;  60 medications -> {large} queries
 check('query count does not grow with the formulary', small == large, f'{small} vs {large}')
 # flatness is the property that matters; the absolute count grows only when a
 # new panel is added, never with the size of the formulary
-check('query count stays bounded', large <= 12, str(large))
+# +2 for the staff meeting indicators (one medications read, one transactions read).
+check('query count stays bounded', large <= 14, str(large))
 check('page still renders all 60', r.data.decode().count(', 10 mg</td>') >= 60)
 
 print('\n--- 12. Activity counts visits, items and patients ---')
