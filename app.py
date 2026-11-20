@@ -9494,6 +9494,7 @@ def key_register() -> ResponseReturnValue:
 # they have their own small log (/meeting-log) and are counted from there.
 # -----------------------------------------------------------------------
 STOCKOUT_OBJECTIVE_PCT = 10.0       # no more than 10% of items out of stock
+STOCKOUT_DORMANT_MONTHS = 6         # at zero longer than this: left out of the rate
 FULL_COUNTS_PER_YEAR = 2            # two full stock counts a year, one per half
 # A stock take is a FULL count when it counted at least this share of the
 # items on the books; anything less is a spot or partial count.
@@ -9548,32 +9549,44 @@ def _meeting_kpis(db: Any, y: int, m: int, cat: str) -> Doc:
 
     # --- 1. Stock-out: did the balance touch zero at ANY point? ----------
     # Start from today's balance, undo everything after the month to get the
-    # closing balance, then walk the month backwards. The lowest point seen
-    # (closing, after each movement, or opening) is what the shelf got down to.
+    # closing balance, then walk backwards. The lowest point inside the month
+    # is what the shelf got down to.
+    #
+    # An item that has sat at zero for more than six months is no longer a
+    # stock-out to be managed — it is dormant or discontinued — so it is left
+    # out of the rate entirely, from both the items counted and the items
+    # tracked, and listed separately. The walk therefore goes back to the
+    # start of the six months ending with the chosen month.
+    dy, dm = y, m - (STOCKOUT_DORMANT_MONTHS - 1)
+    while dm < 1:
+        dm, dy = dm + 12, dy - 1
+    dormant_from, _ = _local_month_bounds(dy, dm)
     txs_by_med: defaultdict[str, list[Doc]] = defaultdict(list)
     for tx in db['transactions'].find(
-            {'timestamp': {'$gte': start}, 'med_name': {'$in': names},
+            {'timestamp': {'$gte': min(start, dormant_from)}, 'med_name': {'$in': names},
              'type': {'$in': list(CONTROLLED_DIRECTION)}},
             {'_id': 0, 'med_name': 1, 'type': 1, 'quantity': 1, 'timestamp': 1}):
         txs_by_med[tx.get('med_name', '')].append(tx)
 
-    stocked_out = []
+    stocked_out, dormant = [], []
     for d in meds:
         name = d.get('name', '')
         bal = d.get('balance', 0) or 0
         txs = txs_by_med.get(name, [])
-        after = sum(_tx_effect(t) for t in txs if t['timestamp'] >= end)
-        bal -= after                                  # closing balance
-        lowest = bal
-        inside = sorted((t for t in txs if t['timestamp'] < end),
-                        key=lambda t: t['timestamp'], reverse=True)
-        for t in inside:
+        bal -= sum(_tx_effect(t) for t in txs if t['timestamp'] >= end)
+        closing = bal
+        lowest = highest = bal
+        for t in sorted((t for t in txs if t['timestamp'] < end),
+                        key=lambda t: t['timestamp'], reverse=True):
             bal -= _tx_effect(t)                      # balance before t
-            lowest = min(lowest, bal)
-        if lowest <= 0:
-            stocked_out.append({'med_name': name,
-                                'zero_at_end': (d.get('balance', 0) or 0) - after <= 0})
-    tracked = len(meds)
+            if t['timestamp'] >= start:
+                lowest = min(lowest, bal)
+            highest = max(highest, bal)
+        if highest <= 0:                              # zero the whole six months
+            dormant.append(name)
+        elif lowest <= 0:
+            stocked_out.append({'med_name': name, 'zero_at_end': closing <= 0})
+    tracked = len(meds) - len(dormant)
     so_pct = (len(stocked_out) / tracked * 100) if tracked else None
 
     # --- 2. Expired medicines and their cost ------------------------------
@@ -9615,6 +9628,7 @@ def _meeting_kpis(db: Any, y: int, m: int, cat: str) -> Doc:
         'label': datetime(y, m, 1).strftime('%B %Y'),
         'tracked': tracked,
         'stocked_out': stocked_out,
+        'dormant': dormant, 'dormant_months': STOCKOUT_DORMANT_MONTHS,
         'stockout_pct': f'{so_pct:.1f}%' if so_pct is not None else '-',
         'stockout_objective': f'{STOCKOUT_OBJECTIVE_PCT:g}%',
         'stockout_met': so_pct is not None and so_pct <= STOCKOUT_OBJECTIVE_PCT,

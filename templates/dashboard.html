@@ -90,6 +90,9 @@
             ({{ category_label }}).
             {% if kpis.stocked_out %}<details><summary>Show items</summary>
             {% for s in kpis.stocked_out %}{{ s.med_name }}{% if s.zero_at_end %} <em>(still out at month end)</em>{% endif %}<br>{% endfor %}
+            </details>{% endif %}
+            {% if kpis.dormant %}<details><summary>{{ kpis.dormant|length }} item(s) left out: at zero for over {{ kpis.dormant_months }} months</summary>
+            {% for n in kpis.dormant %}{{ n }}<br>{% endfor %}
             </details>{% endif %}</small></td>
     </tr>
     <tr>

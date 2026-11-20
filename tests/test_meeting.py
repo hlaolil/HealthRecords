@@ -41,6 +41,7 @@ db['medications'].insert_many([
     {'name': 'A', 'balance': 10, 'price': 2.0},
     {'name': 'B', 'balance': 50, 'price': 1.0},
     {'name': 'C', 'balance': 0, 'price': 1.0},
+    {'name': 'D', 'balance': 0, 'price': 1.0},
 ])
 db['transactions'].insert_many([
     {'med_name': 'A', 'type': 'dispense', 'quantity': 10, 'timestamp': mid},
@@ -49,12 +50,16 @@ db['transactions'].insert_many([
     {'med_name': 'B', 'type': 'dispense', 'quantity': 5, 'timestamp': mid},
     {'med_name': 'B', 'type': 'expiry_removal', 'quantity': -4, 'price': 1.5,
      'timestamp': mid},
+    # C ran out 3 months before the month: out under six months, still counted
+    {'med_name': 'C', 'type': 'dispense', 'quantity': 4, 'timestamp': start - timedelta(days=80)},
+    # D has had nothing for a year: dormant, left out
+    {'med_name': 'D', 'type': 'dispense', 'quantity': 4, 'timestamp': start - timedelta(days=365)},
     # After the month: A received 0 net; B had a receipt after month end
     {'med_name': 'B', 'type': 'receive', 'quantity': 20, 'timestamp': end + timedelta(hours=30)},
 ])
 full = db['stock_takes'].insert_one({'reference': 'ST-1', 'status': 'closed', 'closed_at': mid}).inserted_id
 part = db['stock_takes'].insert_one({'reference': 'ST-2', 'status': 'closed', 'closed_at': mid}).inserted_id
-for n in ('A', 'B', 'C'):
+for n in ('A', 'B', 'C', 'D'):
     db['stock_take_counts'].insert_one({'stock_take_id': str(full), 'med_name': n, 'counted': 1})
 db['stock_take_counts'].insert_one({'stock_take_id': str(part), 'med_name': 'A', 'counted': 1})
 
@@ -63,6 +68,8 @@ names = sorted(s['med_name'] for s in k['stocked_out'])
 # A: closing 10, before receive 0 -> hit zero. B: closing 30, never zero. C: always 0.
 check('stock-out finds items that touched zero', names == ['A', 'C'], str(names))
 check('stock-out rate', k['stockout_pct'] == '66.7%', k['stockout_pct'])
+check('item at zero over six months is left out', k['dormant'] == ['D'] and k['tracked'] == 3,
+      str(k['dormant']) + str(k['tracked']))
 check('stock-out objective is 10%', k['stockout_objective'] == '10%' and not k['stockout_met'])
 check('expired cost uses price on the write-off', k['expired_value'] == 'R6.00', k['expired_value'])
 check('only the full count counts', k['st_done'] == 1 and len(k['st_partial']) == 1,
